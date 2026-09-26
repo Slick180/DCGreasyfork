@@ -1,0 +1,14 @@
+# Node / OS artefacts
+node_modules/
+dist/
+
+# Editor / OS artefacts
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Tampermonkey / build artefacts
+*.bak
