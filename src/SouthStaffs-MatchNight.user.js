@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         South Staffs Match Night
 // @namespace    https://github.com/south-staffs-superleague
-// @version      1.0.0
+// @version      1.1.0-dev
 // @description  Compact match-night management screen for the South Staffordshire Superleague (Universal / White Eagle): division rosters, Not Here filtering, postponed-fixture merging, live PLAYING detection.
 // @author       South Staffs Superleague
-// @match        https://my.dartconnect.com/league/schedule/SStaffSL/24343
+// @match        https://my.dartconnect.com/league/schedule/*
 // @match        https://tv.dartconnect.com/league/SStaffSL/matches/24343
 // @connect      tv.dartconnect.com
 // @grant        GM_xmlhttpRequest
@@ -13,7 +13,7 @@
 // @license      MIT
 // ==/UserScript==
 
-/* South Staffs Match Night — V1.0.0.
+/* South Staffs Match Night — V1.1.0-dev (league-context foundation).
  *
  * Schedule data comes from the page's embedded Inertia data-page JSON
  * (props.sidebar.divisions[].competitors for the roster;
@@ -30,7 +30,7 @@
 
   /* ============================== 1. Diagnostics ============================== */
 
-  const VERSION = '1.0.0';
+  const VERSION = '1.1.0-dev';
   const TAG = '[SSSL Match Night]';
   const MAX_LOG_LINES = 40;
   let logCount = 0;
@@ -64,7 +64,9 @@
 
   const STAGE_ID = '24343';
   const STORE_KEY = 'sssl-match-night:' + STAGE_ID;
-  const MATCHCENTRE_URL = 'https://tv.dartconnect.com/league/SStaffSL/matches/' + STAGE_ID;
+  // NOTE (V1.1 phase 1): STAGE_ID/STORE_KEY remain for the South Staffs
+  // runtime and later per-league storage migration. All endpoint URLs now
+  // derive from LeagueContext (see section 2b).
 
   const DIVISIONS = ['Universal', 'White Eagle'];
 
@@ -80,6 +82,35 @@
     liveRefDesktop: '[data-testid="desktop-match-reference"]',
     liveRefMobile: '[data-testid="mobile-match-reference"]',
   };
+
+  /* ============ 2b. League context (dynamic league identity) ============ */
+
+  // Compatible schedule paths: /league/schedule/<leagueCode>/<numericId>
+  // with optional further path components (player/division child pages).
+  const SCHEDULE_PATH_RE = /^\/league\/schedule\/([^/]+)\/(\d+)(?:\/|$)/;
+
+  /** Extract the path component from an absolute URL or a raw path. Pure. */
+  function schedulePathFromUrl(href) {
+    if (typeof href !== 'string' || !href) return '';
+    const m = href.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/]*(\/[^?#]*)/);
+    if (m) return m[1];
+    if (href.charAt(0) === '/') {
+      const q = href.search(/[?#]/);
+      return q === -1 ? href : href.slice(0, q);
+    }
+    return '';
+  }
+
+  /**
+   * Derive the league context from a schedule URL.
+   * Returns { leagueCode, leagueId, scheduleUrl } or null when the URL is
+   * not a compatible league schedule page. Pure; no hard-coded leagues.
+   */
+  function parseLeagueContext(href) {
+    const m = schedulePathFromUrl(href).match(SCHEDULE_PATH_RE);
+    if (!m) return null;
+    return { leagueCode: m[1], leagueId: m[2], scheduleUrl: href };
+  }
 
   /* ============================== 3. Pure helpers ============================== */
 
@@ -470,7 +501,17 @@
   /* ============================== 6b. Match Center live API ============================== */
 
   const TV_API_BASE = 'https://tv.dartconnect.com';
-  const TV_LEAGUE_SLUG = 'SStaffSL';
+
+  function tvApiUrl(kind, league) {
+    // kind: 'live' | 'matches'. The stage/season id is the numeric schedule id.
+    const suffix = kind === 'live' ? '/matches/live/' + league.leagueId : '/matches/' + league.leagueId;
+    return TV_API_BASE + '/api/league/' + league.leagueCode + suffix;
+  }
+
+  /** Match Centre page URL for a league context (DOM-scrape fallback). */
+  function matchCentreUrl(league) {
+    return 'https://tv.dartconnect.com/league/' + league.leagueCode + '/matches/' + league.leagueId;
+  }
 
   /**
    * Exact POST body the official Match Center client sends to both league
@@ -481,12 +522,6 @@
    * Never send '{}' or an empty body here.
    */
   const LEAGUE_POST_BODY = '{"division_id":null,"competitor_id":null}';
-
-  function tvApiUrl(kind) {
-    // kind: 'live' | 'matches'. Season is the stage id on this league URL.
-    const suffix = kind === 'live' ? '/matches/live/' + STAGE_ID : '/matches/' + STAGE_ID;
-    return TV_API_BASE + '/api/league/' + TV_LEAGUE_SLUG + suffix;
-  }
 
   /** POST JSON via the Tampermonkey transport. Resolves {ok, status, json, error}. */
   function apiPost(transport, url, body) {
@@ -877,7 +912,7 @@
     const candidates = (ctx.data.fixtures || []).filter((f) =>
       f.division === ctx.state.division &&
       (!f.date || !ctx.state.selectedMatchDate || f.date <= ctx.state.selectedMatchDate));
-    return fetchLiveState(ctx.transport, candidates, ctx.data.fixtures || [], ctx.state).then((result) => {
+    return fetchLiveState(ctx.transport, candidates, ctx.data.fixtures || [], ctx.state, ctx.league).then((result) => {
       liveInFlight = false;
       info.source = result.source;
       info.requestStatus = result.status;
@@ -951,7 +986,7 @@
    * non-completed records, then DOM scrape fallback. Applies priority
    * matching against the candidate fixtures. Never throws.
    */
-  function fetchLiveState(transport, fixtures, allFixtures, state) {
+  function fetchLiveState(transport, fixtures, allFixtures, state, league) {
     const summary = {
       ok: false, source: 'none', status: 0, rows: 0, parsed: 0,
       marked: new Map(), ambiguous: [], unmatched: [], rejected: [],
@@ -962,7 +997,7 @@
     function apply(records, stats, source, status, shape) {
       summary.ok = true;
       summary.source = source;
-      summary.endpointUsed = source === 'dom' ? 'dom-scrape' : tvApiUrl(source === 'api-live' ? 'live' : 'matches');
+      summary.endpointUsed = source === 'dom' ? 'dom-scrape' : tvApiUrl(source === 'api-live' ? 'live' : 'matches', league);
       summary.status = status;
       summary.responseShape = shape;
       summary.recordsReceived = stats.received;
@@ -980,7 +1015,7 @@
     }
     function attempt(kind, res) {
       summary.attempts.push({
-        endpoint: kind === 'dom' ? 'dom-scrape' : tvApiUrl(kind),
+        endpoint: kind === 'dom' ? 'dom-scrape' : tvApiUrl(kind, league),
         status: res.status || 0,
         error: res.error || null,
         records: 0,
@@ -990,7 +1025,7 @@
     function freshStats() {
       return { received: 0, byStatus: {}, dropped: 0 };
     }
-    return apiPost(transport, tvApiUrl('live')).then((res) => {
+    return apiPost(transport, tvApiUrl('live', league)).then((res) => {
       const att = attempt('live', res);
       summary.liveOk = !!(res.ok && res.json !== null);
       if (res.ok && res.json !== null) {
@@ -1004,7 +1039,7 @@
           return out;
         }
       }
-      return apiPost(transport, tvApiUrl('matches')).then((res2) => {
+      return apiPost(transport, tvApiUrl('matches', league)).then((res2) => {
         const att2 = attempt('matches', res2);
         if (res2.ok && res2.json !== null) {
           const stats = freshStats();
@@ -1017,8 +1052,8 @@
         }
         summary.error = (res.error || res2.error || 'unreachable');
         summary.status = res2.status || res.status;
-        summary.endpointUsed = tvApiUrl('live') + ' then ' + tvApiUrl('matches');
-        return fetchLiveDom(transport).then((domRecords) => {
+        summary.endpointUsed = tvApiUrl('live', league) + ' then ' + tvApiUrl('matches', league);
+        return fetchLiveDom(transport, league).then((domRecords) => {
           if (domRecords === null) return summary;
           const domStats = freshStats();
           domStats.received = domRecords.length;
@@ -1035,7 +1070,7 @@
   }
 
   /** Last-resort DOM scrape of the Match Center page (rows are usually client-rendered). */
-  function fetchLiveDom(transport) {
+  function fetchLiveDom(transport, league) {
     return new Promise((resolve) => {
       if (!transport || typeof transport !== 'function' || typeof DOMParser === 'undefined') {
         resolve(null);
@@ -1043,7 +1078,7 @@
       }
       try {
         transport({
-          method: 'GET', url: MATCHCENTRE_URL, timeout: 15000,
+          method: 'GET', url: matchCentreUrl(league), timeout: 15000,
           onload: (resp) => {
             if (resp.status < 200 || resp.status >= 300) { resolve(null); return; }
             try {
@@ -1287,8 +1322,8 @@
   /* ============================== 8. Boot ============================== */
 
   function isSchedulePage(loc) {
-    return loc.hostname === 'my.dartconnect.com'
-      && loc.pathname.indexOf('/league/schedule/SStaffSL/24343') === 0;
+    if (!loc || loc.hostname !== 'my.dartconnect.com') return false;
+    return parseLeagueContext(loc.pathname || '') !== null;
   }
 
   /** Expand collapsed postponed date groups, then resolve when settled. */
@@ -1316,6 +1351,9 @@
   }
 
   function boot(windowObj, doc, storage, transport) {
+    // League identity comes from the schedule page URL (V1.1 LeagueContext).
+    // boot only runs on schedule pages, so this is non-null in practice.
+    const league = parseLeagueContext(windowObj && windowObj.location && windowObj.location.href);
     const state = loadState(storage);
     state.theme = defaultTheme(state.theme, systemPrefersDark());
     log('state restored:', state.division, '| absent:', state.absentIds.length);
@@ -1407,7 +1445,7 @@
     lastInfo.liveError = live.error;
     lastInfo.liveOk = live.liveOk;
     const liveCtx = {
-      state, storage, data, transport, live,
+      state, storage, data, transport, live, league,
       rerender: (note) => {
         lastInfo.liveSource = live.source;
         lastInfo.liveLastChecked = live.lastChecked;
@@ -1469,8 +1507,10 @@
     withinSelectedDate,
     applyDisplayFilters,
     tvApiUrl,
+    matchCentreUrl,
     apiPost,
     LEAGUE_POST_BODY,
+    parseLeagueContext,
     normalizeApiRecord,
     collectApiRecords,
     isLiveRecord,

@@ -271,7 +271,7 @@ asyncChecks.push(api.fetchLiveState((opts) => {
   opts.onload({ status: 200, responseText: JSON.stringify({ reg: { Universal: { '2026-09-03': [
     { id: 1, status: 'C', left: { id: 1, team_name: 'A' }, right: { id: 2, team_name: 'B' } },
   ] } } }) });
-}, [], [], { division: 'Universal', selectedMatchDate: '2026-10-01' }).then((s) => {
+}, [], [], { division: 'Universal', selectedMatchDate: '2026-10-01' }, { leagueCode: 'SStaffSL', leagueId: '24343' }).then((s) => {
   check('fetchLiveState all-completed: compact counts',
     s.source === 'api-live' && s.recordsReceived === 1 && s.consideredLive === 0 &&
     s.statusCounts.C === 1 && s.marked.size === 0 &&
@@ -283,7 +283,7 @@ asyncChecks.push(api.fetchLiveState((opts) => {
   ]) });
 }, [{ matchId: 101, division: 'Universal', date: '2026-10-01', playerA: { id: 1, name: 'A' }, playerB: { id: 2, name: 'B' }, status: 'waiting' }],
 [{ matchId: 101, division: 'Universal', date: '2026-10-01', playerA: { id: 1, name: 'A' }, playerB: { id: 2, name: 'B' }, status: 'waiting' }],
-{ division: 'Universal', selectedMatchDate: '2026-10-01' }).then((s) => {
+{ division: 'Universal', selectedMatchDate: '2026-10-01' }, { leagueCode: 'SStaffSL', leagueId: '24343' }).then((s) => {
   check('fetchLiveState live record marks by id', s.source === 'api-live' && s.marked.size === 1);
 }));
 asyncChecks.push(api.fetchLiveState((opts) => {
@@ -296,7 +296,7 @@ asyncChecks.push(api.fetchLiveState((opts) => {
   ]) });
 }, [{ matchId: 101, division: 'Universal', date: '2026-10-01', playerA: { id: 1, name: 'A' }, playerB: { id: 2, name: 'B' }, status: 'waiting' }],
 [{ matchId: 101, division: 'Universal', date: '2026-10-01', playerA: { id: 1, name: 'A' }, playerB: { id: 2, name: 'B' }, status: 'waiting' }],
-{ division: 'Universal', selectedMatchDate: '2026-10-01' }).then((s) => {
+{ division: 'Universal', selectedMatchDate: '2026-10-01' }, { leagueCode: 'SStaffSL', leagueId: '24343' }).then((s) => {
   check('fetchLiveState fallback path records both attempts', s.source === 'api-matches' && s.marked.size === 1 &&
     s.attempts.length === 2 && s.attempts[0].status === 500 && s.attempts[1].status === 200);
 }));
@@ -393,7 +393,7 @@ asyncChecks.push(api.fetchLiveState((opts) => {
     league_match: { id: 10258951, left: { id: 5765962 }, right: { id: 5765923 } },
   }] }) });
 }, [liveFixture], [liveFixture],
-{ division: 'Universal', selectedMatchDate: '2026-10-01' }).then((s) => {
+{ division: 'Universal', selectedMatchDate: '2026-10-01' }, { leagueCode: 'SStaffSL', leagueId: '24343' }).then((s) => {
   check('fetchLiveState live-shape C marks nothing',
     s.source === 'api-live' && s.marked.size === 0 &&
     s.rejected.length === 1 && s.rejected[0].reason === 'status-not-live');
@@ -406,7 +406,7 @@ asyncChecks.push(api.fetchLiveState((opts) => {
 [{ matchId: 10258951, division: 'Universal', date: '2026-10-01',
    playerA: { id: 5765923, name: 'Nick Walton' },
    playerB: { id: 5765962, name: 'James Harrison' }, status: 'waiting' }],
-{ division: 'Universal', selectedMatchDate: '2026-10-01' }).then((s) => {
+{ division: 'Universal', selectedMatchDate: '2026-10-01' }, { leagueCode: 'SStaffSL', leagueId: '24343' }).then((s) => {
   check('fetchLiveState genuine live payload marks by id', s.source === 'api-live' && s.marked.size === 1);
 }));
 
@@ -428,6 +428,7 @@ function lifecycleCtx(fixture, transport) {
       storage: null,
       data: { fixtures: [fixture] },
       transport,
+      league: { leagueCode: 'SStaffSL', leagueId: '24343' },
       live: {
         source: 'none', lastChecked: null, requestStatus: 0, rowsFound: 0,
         parsed: 0, playing: 0, ambiguous: [], unmatched: [], rejected: [],
@@ -515,6 +516,45 @@ asyncChecks.push((async () => {
   check('lifecycle fallback positive evidence adds PLAYING',
     fx4.status === 'playing' && c4.ctx.live.playing === 1 && c4.ctx.live.source === 'api-matches');
 })());
+// ---- LeagueContext (V1.1 phase 1: dynamic league identity, SStaffSL unpinned) ----
+function sameContext(a, b) {
+  return !!a && !!b && a.leagueCode === b.leagueCode && a.leagueId === b.leagueId && a.scheduleUrl === b.scheduleUrl;
+}
+check('context from SStaffSL schedule URL', sameContext(
+  api.parseLeagueContext('https://my.dartconnect.com/league/schedule/SStaffSL/24343'),
+  { leagueCode: 'SStaffSL', leagueId: '24343', scheduleUrl: 'https://my.dartconnect.com/league/schedule/SStaffSL/24343' }));
+check('context from synthetic league URL', sameContext(
+  api.parseLeagueContext('https://my.dartconnect.com/league/schedule/OTHERLG/77031'),
+  { leagueCode: 'OTHERLG', leagueId: '77031', scheduleUrl: 'https://my.dartconnect.com/league/schedule/OTHERLG/77031' }));
+check('context tolerates player child path', sameContext(
+  api.parseLeagueContext('https://my.dartconnect.com/league/schedule/SStaffSL/24343/5765962'),
+  { leagueCode: 'SStaffSL', leagueId: '24343', scheduleUrl: 'https://my.dartconnect.com/league/schedule/SStaffSL/24343/5765962' }));
+check('context tolerates trailing slash and query', sameContext(
+  api.parseLeagueContext('https://my.dartconnect.com/league/schedule/OTHERLG/77031/?x=1'),
+  { leagueCode: 'OTHERLG', leagueId: '77031', scheduleUrl: 'https://my.dartconnect.com/league/schedule/OTHERLG/77031/?x=1' }));
+check('context from raw path', sameContext(
+  api.parseLeagueContext('/league/schedule/OTHERLG/77031'),
+  { leagueCode: 'OTHERLG', leagueId: '77031', scheduleUrl: '/league/schedule/OTHERLG/77031' }));
+check('context rejects non-schedule URLs', [
+  'https://my.dartconnect.com/league/standings/SStaffSL/24343',
+  'https://my.dartconnect.com/league/schedule/SStaffSL',
+  'https://my.dartconnect.com/league/schedule/SStaffSL/notanid',
+  'https://my.dartconnect.com/league/schedule//24343',
+  'https://my.dartconnect.com/league/SStaffSL/24343',
+  'https://my.dartconnect.com/',
+  'not a url at all',
+  '',
+  null,
+].every((u) => api.parseLeagueContext(u) === null));
+check('dynamic live URL SStaffSL', api.tvApiUrl('live', { leagueCode: 'SStaffSL', leagueId: '24343' }) ===
+  'https://tv.dartconnect.com/api/league/SStaffSL/matches/live/24343');
+check('dynamic matches URL SStaffSL', api.tvApiUrl('matches', { leagueCode: 'SStaffSL', leagueId: '24343' }) ===
+  'https://tv.dartconnect.com/api/league/SStaffSL/matches/24343');
+check('dynamic live URL synthetic league', api.tvApiUrl('live', { leagueCode: 'OTHERLG', leagueId: '77031' }) ===
+  'https://tv.dartconnect.com/api/league/OTHERLG/matches/live/77031');
+check('dynamic match centre URL', api.matchCentreUrl({ leagueCode: 'SStaffSL', leagueId: '24343' }) ===
+  'https://tv.dartconnect.com/league/SStaffSL/matches/24343');
+
 // ---- live request construction (official body required; '{}' -> HTTP 500) ----
 check('official league POST body exported', api.LEAGUE_POST_BODY === '{"division_id":null,"competitor_id":null}');
 check('official body carries both filter keys', (() => {
@@ -532,7 +572,7 @@ asyncChecks.push(api.fetchLiveState((opts) => {
     return okMethod && okUrl && okData && okHeaders;
   })());
   opts.onload({ status: 200, responseText: JSON.stringify({ divisions: [], teams: [], matches: [] }) });
-}, [], [], { division: 'Universal', selectedMatchDate: '2026-10-01' }).then((s) => {
+}, [], [], { division: 'Universal', selectedMatchDate: '2026-10-01' }, { leagueCode: 'SStaffSL', leagueId: '24343' }).then((s) => {
   check('official-body live request succeeds', s.ok && s.source === 'api-live');
 }));
 asyncChecks.push(api.fetchLiveState((opts) => {
@@ -543,7 +583,7 @@ asyncChecks.push(api.fetchLiveState((opts) => {
     return;
   }
   opts.onload({ status: 200, responseText: JSON.stringify({ divisions: [], teams: [], matches: [] }) });
-}, [], [], { division: 'Universal', selectedMatchDate: '2026-10-01' }).then((s) => {
+}, [], [], { division: 'Universal', selectedMatchDate: '2026-10-01' }, { leagueCode: 'SStaffSL', leagueId: '24343' }).then((s) => {
   check('fallback path still records both attempts', s.attempts.length === 2);
 }));
 // ---- playing-row presentation (CSS/rendering only, both themes) ----

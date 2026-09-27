@@ -171,6 +171,12 @@ integration lands without UI redesign.
   `{"division_id":null,"competitor_id":null} → 200 (3/3)`; Content-Type
   irrelevant. `apiPost` now sends the exact official body to both league
   endpoints (request-construction tests added). No auth/cookies needed.
+- [x] V1.1 phase 1: LeagueContext (`leagueCode`/`leagueId`/`scheduleUrl`)
+  derived from the schedule page URL; schedule detection, live/API and
+  Match Centre URLs dynamic (SStaffSL/24343 reproduced exactly). Official
+  POST body, lifecycle, matching and polling unchanged. Divisions, roster
+  handling and storage keys remain South Staffs runtime until later phases.
+  No generic-league compatibility claimed yet.
 - [ ] Live behaviour verified end-to-end in Tampermonkey (GM_xmlhttpRequest
   POST reaching the live endpoint; PLAYING flag appearing on a real live
   fixture; 30s polling; transient-500 retry path).
