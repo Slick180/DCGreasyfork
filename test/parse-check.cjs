@@ -142,12 +142,13 @@ function memStore(initial) {
   };
 }
 const store = memStore();
-const st0 = api.loadState(store);
+const storeKey = 'match-night-singles:SStaffSL:24343';
+const st0 = api.loadState(store, [], storeKey);
 check('fresh state has null date', st0.selectedMatchDate === null);
 st0.selectedMatchDate = '2026-10-01';
 st0.absentIds = [5765962];
-api.saveState(store, st0);
-const st1 = api.loadState(store);
+api.saveState(store, st0, storeKey);
+const st1 = api.loadState(store, [], storeKey);
 check('state round-trips date+absent', st1.selectedMatchDate === '2026-10-01' && st1.absentIds.join() === '5765962');
 check('restored date resolves when available', api.resolveMatchDate(dates, st1.selectedMatchDate, '2026-09-26') === '2026-10-01');
 
@@ -581,9 +582,12 @@ check('G: saved invalid division falls back to first discovered', (() => {
   return api.loadState(store, ['Alpha', 'Beta']).division === 'Alpha';
 })());
 check('G: saved valid division preserved', (() => {
-  const store = { data: JSON.stringify({ division: 'Beta', absentIds: [7], selectedMatchDate: null, theme: null }),
-    getItem() { return this.data; }, setItem(_, v) { this.data = String(v); } };
-  const st = api.loadState(store, ['Alpha', 'Beta']);
+  const m = {};
+  const s = { getItem(k) { return Object.prototype.hasOwnProperty.call(m, k) ? m[k] : null; },
+    setItem(k, v) { m[k] = String(v); } };
+  const k = api.storageKeyForLeague({ leagueCode: 'T', leagueId: '1' });
+  s.setItem(k, JSON.stringify({ division: 'Beta', absentIds: [7], selectedMatchDate: null }));
+  const st = api.loadState(s, ['Alpha', 'Beta'], k);
   return st.division === 'Beta' && st.absentIds.join() === '7';
 })());
 check('H: ghost-division fixture diagnosed, not merged', (() => {
@@ -602,6 +606,102 @@ check('I: no production DIVISIONS allowlist', api.DIVISIONS === undefined &&
 check('I: division names only in metadata, never logic', srcLines.every((line) =>
   line.indexOf('Universal') === -1 && line.indexOf('White Eagle') === -1 ||
   line.trim().indexOf('// @') === 0));
+
+// ---- per-league storage (V1.1 phase 3: isolation + legacy migration) ----
+const SSTAFF_LEAGUE = { leagueCode: 'SStaffSL', leagueId: '24343' };
+const OTHER_LEAGUE = { leagueCode: 'ABC', leagueId: '99999' };
+const SSTAFF_KEY = api.storageKeyForLeague(SSTAFF_LEAGUE);
+const OTHER_KEY = api.storageKeyForLeague(OTHER_LEAGUE);
+function mapStore() {
+  const m = {};
+  return {
+    getItem(k) { return Object.prototype.hasOwnProperty.call(m, k) ? m[k] : null; },
+    setItem(k, v) { m[k] = String(v); },
+    _m: m,
+  };
+}
+check('A: SStaffSL/24343 key', SSTAFF_KEY === 'match-night-singles:SStaffSL:24343');
+check('B: synthetic league key', OTHER_KEY === 'match-night-singles:ABC:99999');
+check('storage key rejects invalid contexts', [null, undefined, {}, { leagueCode: '', leagueId: '1' },
+  { leagueCode: 'A', leagueId: '' }, { leagueCode: 'A', leagueId: 'x' },
+  { leagueCode: 'A:B', leagueId: '1' }, { leagueCode: 'A/B', leagueId: '1' },
+].every((l) => api.storageKeyForLeague(l) === null));
+check('C: leagues cannot read each other absent state', (() => {
+  const s = mapStore();
+  api.saveState(s, { division: 'Alpha', absentIds: [11], selectedMatchDate: '2026-10-01', theme: null }, SSTAFF_KEY);
+  const other = api.loadState(s, ['X', 'Y'], OTHER_KEY);
+  const same = api.loadState(s, ['Alpha', 'Beta'], SSTAFF_KEY);
+  return other.absentIds.length === 0 && same.absentIds.join() === '11';
+})());
+check('D: leagues cannot read each other division/date', (() => {
+  const s = mapStore();
+  api.saveState(s, { division: 'Beta', absentIds: [], selectedMatchDate: '2026-11-05', theme: null }, SSTAFF_KEY);
+  api.saveState(s, { division: 'Y', absentIds: [], selectedMatchDate: '2026-09-03', theme: null }, OTHER_KEY);
+  const a = api.loadState(s, ['Alpha', 'Beta'], SSTAFF_KEY);
+  const b = api.loadState(s, ['X', 'Y'], OTHER_KEY);
+  return a.division === 'Beta' && a.selectedMatchDate === '2026-11-05' &&
+    b.division === 'Y' && b.selectedMatchDate === '2026-09-03';
+})());
+check('E: keyed invalid division falls back to first discovered', (() => {
+  const s = mapStore();
+  s.setItem(SSTAFF_KEY, JSON.stringify({ division: 'Nope', absentIds: [], selectedMatchDate: null }));
+  return api.loadState(s, ['Alpha', 'Beta'], SSTAFF_KEY).division === 'Alpha';
+})());
+check('F: generic key wins over legacy key', (() => {
+  const s = mapStore();
+  const legacy = JSON.stringify({ division: 'Alpha', absentIds: [1], selectedMatchDate: '2026-09-03', theme: 'dark' });
+  s.setItem('sssl-match-night:24343', legacy);
+  s.setItem(SSTAFF_KEY, JSON.stringify({ division: 'Beta', absentIds: [2], selectedMatchDate: '2026-10-01' }));
+  const migrated = api.migrateLegacyState(s, SSTAFF_LEAGUE);
+  const st = api.loadState(s, ['Alpha', 'Beta'], SSTAFF_KEY);
+  return migrated === false && st.division === 'Beta' && st.absentIds.join() === '2' &&
+    s._m['sssl-match-night:24343'] === legacy;
+})());
+check('G: legacy SStaff key migrates when generic absent', (() => {
+  const s = mapStore();
+  s.setItem('sssl-match-night:24343', JSON.stringify({ division: 'Beta', absentIds: [3, 'x'], selectedMatchDate: '2026-10-01', theme: 'light' }));
+  const migrated = api.migrateLegacyState(s, SSTAFF_LEAGUE);
+  const st = api.loadState(s, ['Alpha', 'Beta'], SSTAFF_KEY);
+  return migrated === true && st.division === 'Beta' && st.absentIds.join() === '3' &&
+    st.selectedMatchDate === '2026-10-01' && st.theme === 'light';
+})());
+check('H: legacy key untouched after migration', (() => {
+  const s = mapStore();
+  const legacy = JSON.stringify({ division: 'Beta', absentIds: [3], selectedMatchDate: null, theme: null });
+  s.setItem('sssl-match-night:24343', legacy);
+  api.migrateLegacyState(s, SSTAFF_LEAGUE);
+  return s._m['sssl-match-night:24343'] === legacy && s._m[SSTAFF_KEY] !== legacy;
+})());
+check('I: migration does not run for other leagues', (() => {
+  const s = mapStore();
+  s.setItem('sssl-match-night:24343', JSON.stringify({ division: 'Beta', absentIds: [3], selectedMatchDate: null, theme: null }));
+  const migrated = api.migrateLegacyState(s, OTHER_LEAGUE);
+  return migrated === false && !(OTHER_KEY in s._m) &&
+    api.loadState(s, ['X', 'Y'], OTHER_KEY).division === 'X';
+})());
+check('J: corrupt legacy JSON fails safely', (() => {
+  const s = mapStore();
+  s.setItem('sssl-match-night:24343', '{oops');
+  const migrated = api.migrateLegacyState(s, SSTAFF_LEAGUE);
+  const st = api.loadState(s, ['Alpha', 'Beta'], SSTAFF_KEY);
+  return migrated === false && st.division === 'Alpha' && st.absentIds.length === 0;
+})());
+check('K: player href works for arbitrary league', api.parsePlayerIdFromHref(
+  '/league/schedule/OTHERLG/77031/12345', { leagueCode: 'OTHERLG', leagueId: '77031' }) === 12345 &&
+  api.parsePlayerIdFromHref('/league/schedule/OTHERLG/77031/12345') === 12345);
+check('L: division URL never a player ID', api.parsePlayerIdFromHref(
+  '/league/schedule/OTHERLG/77031/division/42', { leagueCode: 'OTHERLG', leagueId: '77031' }) === null &&
+  api.parsePlayerIdFromHref('/league/schedule/OTHERLG/77031/division/42') === null &&
+  api.parsePlayerIdFromHref('/league/schedule/SStaffSL/24343/5765962',
+    { leagueCode: 'OTHERLG', leagueId: '77031' }) === null);
+check('M: theme stays global across leagues', (() => {
+  const s = mapStore();
+  api.saveState(s, { division: 'Beta', absentIds: [], selectedMatchDate: null, theme: 'dark' }, SSTAFF_KEY);
+  const payload = JSON.parse(s._m[SSTAFF_KEY]);
+  return payload.theme === undefined &&
+    api.loadState(s, ['X', 'Y'], OTHER_KEY).theme === 'dark' &&
+    api.loadState(s, [], null).theme === 'dark';
+})());
 
 // ---- LeagueContext (V1.1 phase 1: dynamic league identity, SStaffSL unpinned) ----
 function sameContext(a, b) {

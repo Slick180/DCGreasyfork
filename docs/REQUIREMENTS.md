@@ -184,6 +184,11 @@ integration lands without UI redesign.
   diagnostics maps; saved-division validation against discovered list.
   SStaffSL still discovers Universal/White Eagle (23/23, 511, 32 delayed).
   Filtering, matcher, lifecycle, polling and row layout unchanged.
+- [x] V1.1 phase 3: per-league storage (`match-night-singles:<code>:<id>`;
+  theme global). One-time non-destructive legacy migration for SStaffSL
+  24343 only (new key wins; old key kept; failures never block start).
+  Player URLs validated against LeagueContext; division URLs never match.
+  158 checks ALL PASS.
 - [ ] Live behaviour verified end-to-end in Tampermonkey (GM_xmlhttpRequest
   POST reaching the live endpoint; PLAYING flag appearing on a real live
   fixture; 30s polling; transient-500 retry path).

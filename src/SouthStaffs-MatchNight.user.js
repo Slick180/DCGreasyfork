@@ -62,11 +62,29 @@
 
   /* ============================== 2. Constants ============================== */
 
-  const STAGE_ID = '24343';
-  const STORE_KEY = 'sssl-match-night:' + STAGE_ID;
-  // NOTE (V1.1 phase 1): STAGE_ID/STORE_KEY remain for the South Staffs
-  // runtime and later per-league storage migration. All endpoint URLs now
-  // derive from LeagueContext (see section 2b).
+  // Per-league storage (V1.1 phase 3): attendance state is namespaced by
+  // detected league so leagues can never contaminate each other.
+  const STORE_PREFIX = 'match-night-singles:';
+  // Theme is a device/user preference, not league data: one global key.
+  const THEME_KEY = 'match-night-singles:theme';
+
+  // Legacy V1.0 compatibility ONLY (South Staffordshire baseline).
+  // This is the single permitted league-specific runtime exception: a
+  // one-time, non-destructive copy from the old fixed key (see
+  // migrateLegacyState). Never add another league here.
+  const LEGACY_SSTAFF_KEY = 'sssl-match-night:24343';
+  const LEGACY_SSTAFF_CODE = 'SStaffSL';
+  const LEGACY_SSTAFF_ID = '24343';
+
+  /**
+   * Pure builder: per-league storage key for a LeagueContext.
+   * Returns null for invalid contexts; never throws.
+   */
+  function storageKeyForLeague(league) {
+    if (!league || typeof league.leagueCode !== 'string' || typeof league.leagueId !== 'string') return null;
+    if (!/^[^:/]+$/.test(league.leagueCode) || !/^\d+$/.test(league.leagueId)) return null;
+    return STORE_PREFIX + league.leagueCode + ':' + league.leagueId;
+  }
 
   // Player schedule links look like: /league/schedule/<code>/<stageId>/<playerId>.
   // Segment-generic so any league schedule page works; the player id is the
@@ -113,9 +131,17 @@
 
   /* ============================== 3. Pure helpers ============================== */
 
-  /** Extract the numeric player ID from a schedule player URL. Null when absent. */
-  function parsePlayerIdFromHref(href) {
+  /**
+   * Extract the numeric player ID from a schedule player URL. Null when
+   * absent. Segment-generic across leagues; division URLs (which carry a
+   * non-numeric segment after the stage id) never match. When `league` is
+   * supplied, the URL must additionally belong to that league's schedule
+   * path, so foreign-league URLs cannot leak IDs in.
+   */
+  function parsePlayerIdFromHref(href, league) {
     if (typeof href !== 'string') return null;
+    if (league && (typeof league.leagueCode !== 'string' || typeof league.leagueId !== 'string')) return null;
+    if (league && schedulePathFromUrl(href).indexOf('/league/schedule/' + league.leagueCode + '/' + league.leagueId + '/') !== 0) return null;
     const m = href.match(PLAYER_HREF_RE);
     if (!m) return null;
     const id = parseInt(m[1], 10);
@@ -241,37 +267,91 @@
     } catch (e) { return false; }
   }
 
-  function loadState(storage, divisions) {
+  /**
+   * Load per-league state (division/absent/date) from `storeKey` plus the
+   * global theme preference. Division is validated against `divisions`
+   * (discovered data), never fixed constants. Pure except storage reads.
+   */
+  function loadState(storage, divisions, storeKey) {
     const list = Array.isArray(divisions) ? divisions : [];
+    const state = defaultState(list);
     try {
-      const raw = storage.getItem(STORE_KEY);
-      if (!raw) return defaultState(list);
-      const parsed = JSON.parse(raw);
-      const division = list.indexOf(parsed.division) !== -1 ? parsed.division : defaultState(list).division;
-      const absentIds = Array.isArray(parsed.absentIds)
-        ? parsed.absentIds.filter((id) => Number.isSafeInteger(id))
-        : [];
-      const selectedMatchDate = typeof parsed.selectedMatchDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(parsed.selectedMatchDate)
-        ? parsed.selectedMatchDate
-        : null;
-      const theme = parsed.theme === 'light' || parsed.theme === 'dark' ? parsed.theme : null;
-      return { division, absentIds, selectedMatchDate, theme };
+      const raw = storeKey ? storage.getItem(storeKey) : null;
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (list.indexOf(parsed.division) !== -1) state.division = parsed.division;
+        if (Array.isArray(parsed.absentIds)) {
+          state.absentIds = parsed.absentIds.filter((id) => Number.isSafeInteger(id));
+        }
+        if (typeof parsed.selectedMatchDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(parsed.selectedMatchDate)) {
+          state.selectedMatchDate = parsed.selectedMatchDate;
+        }
+      }
     } catch (e) {
       warn('localStorage read failed, using defaults:', e);
-      return defaultState(list);
+    }
+    try {
+      const theme = storage.getItem(THEME_KEY);
+      if (theme === 'light' || theme === 'dark') state.theme = theme;
+    } catch (e) {
+      warn('theme read failed:', e);
+    }
+    return state;
+  }
+
+  /**
+   * Save per-league state under `storeKey` and the theme globally.
+   * Never writes when `storeKey` is missing (no cross-league leakage).
+   */
+  function saveState(storage, state, storeKey) {
+    try {
+      if (storeKey) {
+        storage.setItem(storeKey, JSON.stringify({
+          division: state.division,
+          absentIds: state.absentIds,
+          selectedMatchDate: state.selectedMatchDate || null,
+        }));
+      }
+    } catch (e) {
+      warn('localStorage write failed:', e);
+    }
+    try {
+      if (state.theme === 'light' || state.theme === 'dark') storage.setItem(THEME_KEY, state.theme);
+    } catch (e) {
+      warn('theme write failed:', e);
     }
   }
 
-  function saveState(storage, state) {
+  /**
+   * ONE-TIME legacy V1.0 migration (South Staffordshire ONLY).
+   * Copies compatible fields from the old fixed key to the new per-league
+   * key when the new key does not exist yet. Never overwrites, never deletes
+   * the old key, never throws, and is a no-op for every other league.
+   */
+  function migrateLegacyState(storage, league) {
     try {
-      storage.setItem(STORE_KEY, JSON.stringify({
-        division: state.division,
-        absentIds: state.absentIds,
-        selectedMatchDate: state.selectedMatchDate || null,
-        theme: state.theme === 'light' || state.theme === 'dark' ? state.theme : null,
-      }));
+      if (!storage || !league || league.leagueCode !== LEGACY_SSTAFF_CODE || league.leagueId !== LEGACY_SSTAFF_ID) return false;
+      const storeKey = storageKeyForLeague(league);
+      if (!storeKey || storage.getItem(storeKey) != null) return false;
+      const raw = storage.getItem(LEGACY_SSTAFF_KEY);
+      if (raw == null) return false;
+      const parsed = JSON.parse(raw);
+      const next = {};
+      if (typeof parsed.division === 'string' && parsed.division) next.division = parsed.division;
+      if (Array.isArray(parsed.absentIds)) {
+        next.absentIds = parsed.absentIds.filter((id) => Number.isSafeInteger(id));
+      }
+      if (typeof parsed.selectedMatchDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(parsed.selectedMatchDate)) {
+        next.selectedMatchDate = parsed.selectedMatchDate;
+      }
+      storage.setItem(storeKey, JSON.stringify(next));
+      if ((parsed.theme === 'light' || parsed.theme === 'dark') && storage.getItem(THEME_KEY) == null) {
+        storage.setItem(THEME_KEY, parsed.theme);
+      }
+      return true;
     } catch (e) {
-      warn('localStorage write failed:', e);
+      warn('legacy state migration failed; starting fresh:', e);
+      return false;
     }
   }
 
@@ -396,7 +476,7 @@
    * Accepts every well-formed roster block; division filtering (if any)
    * is the caller's decision, not the parser's.
    */
-  function parseRosterFromProps(props) {
+  function parseRosterFromProps(props, league) {
     const players = [];
     const warnings = [];
     const seen = new Set();
@@ -407,7 +487,7 @@
         return;
       }
       block.competitors.forEach((c) => {
-        const id = typeof c.id === 'number' ? c.id : parsePlayerIdFromHref(c.url);
+        const id = typeof c.id === 'number' ? c.id : parsePlayerIdFromHref(c.url, league);
         const name = typeof c.competitor_name === 'string' ? c.competitor_name.trim().replace(/\s+/g, ' ') : '';
         if (!Number.isSafeInteger(id) || !name) {
           warnings.push('roster entry without id/name skipped');
@@ -1196,7 +1276,7 @@
       b.type = 'button';
       b.addEventListener('click', () => {
         state.division = div;
-        saveState(storage, state);
+        saveState(storage, state, data.storeKey);
         render(state, storage, data, liveNote, diagnostics);
         if (activeLiveCtx) refreshLive(activeLiveCtx);
       });
@@ -1217,7 +1297,7 @@
       });
       select.addEventListener('change', () => {
         state.selectedMatchDate = select.value || null;
-        saveState(storage, state);
+        saveState(storage, state, data.storeKey);
         render(state, storage, data, liveNote, diagnostics);
         if (activeLiveCtx) refreshLive(activeLiveCtx);
       });
@@ -1290,7 +1370,7 @@
         if (next.has(p.id)) next.delete(p.id);
         else next.add(p.id);
         state.absentIds = Array.from(next);
-        saveState(storage, state);
+        saveState(storage, state, data.storeKey);
         render(state, storage, data, liveNote, diagnostics);
       });
       rosterPane.appendChild(b);
@@ -1377,10 +1457,12 @@
     // League identity comes from the schedule page URL (V1.1 LeagueContext).
     // boot only runs on schedule pages, so this is non-null in practice.
     const league = parseLeagueContext(windowObj && windowObj.location && windowObj.location.href);
-    const state = loadState(storage);
+    migrateLegacyState(storage, league);
+    const storeKey = league ? storageKeyForLeague(league) : null;
+    const state = loadState(storage, [], storeKey);
     state.theme = defaultTheme(state.theme, systemPrefersDark());
     log('state restored:', state.division, '| absent:', state.absentIds.length);
-    const data = { fixtures: [], roster: [], divisions: [], parseFailed: false };
+    const data = { fixtures: [], roster: [], divisions: [], parseFailed: false, league, storeKey };
     const info = {
       rosterCounts: {}, playerLinks: 0,
       candidates: 0, parsed: 0, delayed: 0, duplicates: 0,
@@ -1388,7 +1470,7 @@
     try {
       const html = doc.documentElement.outerHTML;
       const props = extractDataPageProps(html);
-      const roster = parseRosterFromProps(props);
+      const roster = parseRosterFromProps(props, league);
       roster.warnings.forEach(warnOnce);
       data.roster = roster.players;
       data.divisions = discoverDivisions(props);
@@ -1396,7 +1478,7 @@
       // back to the first discovered division (preserves valid SStaff state).
       if (data.divisions.indexOf(state.division) === -1) {
         state.division = data.divisions.length ? data.divisions[0] : '';
-        saveState(storage, state);
+        saveState(storage, state, data.storeKey);
       }
       data.divisions.forEach((div) => {
         info.rosterCounts[div] = roster.players.filter((p) => p.division === div).length;
@@ -1419,6 +1501,9 @@
       saveState(storage, state);
       lastInfo = {
         version: VERSION,
+        leagueCode: league ? league.leagueCode : null,
+        leagueId: league ? league.leagueId : null,
+        storageKey: storeKey,
         selectedDivision: state.division,
         discoveredDivisions: data.divisions.slice(),
         rosterCounts: Object.assign({}, info.rosterCounts),
@@ -1526,7 +1611,9 @@
 
   const api = {
     VERSION,
-    STORE_KEY,
+    THEME_KEY,
+    storageKeyForLeague,
+    migrateLegacyState,
     discoverDivisions,
     parsePlayerIdFromHref,
     abbreviateName,
