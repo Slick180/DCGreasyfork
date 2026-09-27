@@ -607,6 +607,15 @@ check('I: division names only in metadata, never logic', srcLines.every((line) =
   line.indexOf('Universal') === -1 && line.indexOf('White Eagle') === -1 ||
   line.trim().indexOf('// @') === 0));
 
+// ---- V1.1 production branding/metadata ----
+check('product name is generic', srcLines.some((l) => l.trim() === '// @name         Match Night Singles Manager'));
+check('version is 1.1.0', srcLines.some((l) => l.trim() === '// @version      1.1.0'));
+check('schedule @match is generic', srcLines.some((l) => l.trim() === '// @match        https://my.dartconnect.com/league/schedule/*'));
+check('no tv @match remains', srcLines.every((l) => l.trim().indexOf('// @match') !== 0 || l.indexOf('tv.dartconnect.com') === -1));
+check('tv @connect retained', srcLines.some((l) => l.trim() === '// @connect      tv.dartconnect.com'));
+check('diagnostics alias exposed', srcLines.some((l) => l.indexOf('__matchNightSingles') !== -1) &&
+  srcLines.some((l) => l.indexOf('__ssslMatchNight') !== -1));
+
 // ---- per-league storage (V1.1 phase 3: isolation + legacy migration) ----
 const SSTAFF_LEAGUE = { leagueCode: 'SStaffSL', leagueId: '24343' };
 const OTHER_LEAGUE = { leagueCode: 'ABC', leagueId: '99999' };

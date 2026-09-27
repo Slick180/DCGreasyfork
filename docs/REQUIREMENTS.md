@@ -1,8 +1,9 @@
-# South Staffs DartConnect Match Night — Requirements
+# Match Night Singles Manager — Requirements
 
-> **Status: V1.0.0 Match Night release candidate (full-row green PLAYING
-> highlight, both themes; live detection proven in the real browser);
-> `node test/parse-check.cjs` ALL PASS. Not published.**
+> **Status: V1.1.0 release candidate — league-independent singles manager
+> (dynamic context/divisions/rosters, per-league state, live PLAYING
+> detection). Validated in the real browser against SStaffSL/24343 and
+> DalySL/23875; `node test/parse-check.cjs` ALL PASS. Not published.**
 
 ## 1. Purpose
 
@@ -189,6 +190,11 @@ integration lands without UI redesign.
   24343 only (new key wins; old key kept; failures never block start).
   Player URLs validated against LeagueContext; division URLs never match.
   158 checks ALL PASS.
+- [x] V1.1.0 release candidate: generic Match Night Singles Manager branding;
+  fixed tv `@match` removed (`@connect tv.dartconnect.com` retained);
+  diagnostics on `__matchNightSingles` (legacy `__ssslMatchNight` alias kept,
+  `scheduleUrl` added). Validated in-browser: SStaffSL/24343 and DalySL/23875.
+  Sole league-specific runtime: legacy `sssl-match-night:24343` migration.
 - [ ] Live behaviour verified end-to-end in Tampermonkey (GM_xmlhttpRequest
   POST reaching the live endpoint; PLAYING flag appearing on a real live
   fixture; 30s polling; transient-500 retry path).

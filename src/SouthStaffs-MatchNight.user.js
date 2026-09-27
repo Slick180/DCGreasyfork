@@ -1,11 +1,10 @@
 // ==UserScript==
-// @name         South Staffs Match Night
+// @name         Match Night Singles Manager
 // @namespace    https://github.com/south-staffs-superleague
-// @version      1.1.0-dev
-// @description  Compact match-night management screen for the South Staffordshire Superleague (Universal / White Eagle): division rosters, Not Here filtering, postponed-fixture merging, live PLAYING detection.
+// @version      1.1.0
+// @description  Compact DartConnect singles match-night manager: division rosters, Not Here attendance filtering, delayed fixtures and live PLAYING status.
 // @author       South Staffs Superleague
 // @match        https://my.dartconnect.com/league/schedule/*
-// @match        https://tv.dartconnect.com/league/SStaffSL/matches/24343
 // @connect      tv.dartconnect.com
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
@@ -13,7 +12,11 @@
 // @license      MIT
 // ==/UserScript==
 
-/* South Staffs Match Night — V1.1.0-dev (league-context foundation).
+/* Match Night Singles Manager — V1.1.0.
+ *
+ * League-independent DartConnect singles match-night manager: league
+ * context, divisions, rosters and fixtures are discovered from the
+ * schedule page data; per-league attendance state; live PLAYING status.
  *
  * Schedule data comes from the page's embedded Inertia data-page JSON
  * (props.sidebar.divisions[].competitors for the roster;
@@ -30,7 +33,7 @@
 
   /* ============================== 1. Diagnostics ============================== */
 
-  const VERSION = '1.1.0-dev';
+  const VERSION = '1.1.0';
   const TAG = '[SSSL Match Night]';
   const MAX_LOG_LINES = 40;
   let logCount = 0;
@@ -1503,6 +1506,7 @@
         version: VERSION,
         leagueCode: league ? league.leagueCode : null,
         leagueId: league ? league.leagueId : null,
+        scheduleUrl: league ? league.scheduleUrl : null,
         storageKey: storeKey,
         selectedDivision: state.division,
         discoveredDivisions: data.divisions.slice(),
@@ -1682,12 +1686,15 @@
   // Tampermonkey runs userscripts in an isolated world: the sandbox
   // `window` above is NOT the page window the operator sees in DevTools.
   // Expose the read-only diagnostics API on the real page window so
-  // window.__ssslMatchNight.getDiagnostics() works from the console.
+  // window.__matchNightSingles.getDiagnostics() works from the console.
+  // The legacy __ssslMatchNight alias is retained (diagnostics only).
   if (typeof window !== 'undefined') {
+    window.__matchNightSingles = api;
     window.__ssslMatchNight = api;
   }
   try {
     if (typeof unsafeWindow !== 'undefined' && unsafeWindow && unsafeWindow !== window) {
+      unsafeWindow.__matchNightSingles = api;
       unsafeWindow.__ssslMatchNight = api;
     }
   } catch (e) {

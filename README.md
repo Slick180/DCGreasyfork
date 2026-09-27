@@ -1,12 +1,14 @@
-# South Staffs DartConnect Match Night
+# Match Night Singles Manager
 
-Compact match-night management screen for the South Staffordshire
-Superleague (Universal + White Eagle divisions), delivered as a
-Tampermonkey userscript.
+Compact DartConnect singles match-night manager, delivered as a
+Tampermonkey userscript. Designed to work with compatible DartConnect
+singles league schedules and validated against multiple leagues:
+- South Staffordshire Superleague — SStaffSL/24343
+- Daly's Singles League — DalySL/23875
 
-> **Status: V1.0.0 Match Night release candidate — schedule, rosters,
-> filters, themes, live PLAYING detection (incl. full-row highlight) all
-> verified; `node test/parse-check.cjs` ALL PASS. Not published.**
+> **Status: V1.1.0 release candidate — dynamic league context, divisions,
+> rosters and per-league state; live PLAYING detection; `node
+> test/parse-check.cjs` ALL PASS. Not published.**
 
 ## Architecture (planned)
 
@@ -20,13 +22,14 @@ Tampermonkey userscript.
   - `match-centre-completed.html` — completed rows (full/surname-first names)
 - `docs/REQUIREMENTS.md` — full requirements (source of truth for scope).
 
-## Data flow (planned)
+## Data flow
 
 ```
-Schedule page (my.dartconnect.com) ──parse──▶ fixtures + rosters (by player ID)
-Match Center (tv.dartconnect.com) ──pair-match──▶ playing flags
-localStorage (sssl-match-night:24343) ◀▶ division + absent player IDs
-                                        ──render──▶ compact Match Night view
+Schedule page (my.dartconnect.com/league/schedule/<code>/<id>)
+  ──discover league/divisions──▶ fixtures + rosters (by player ID)
+Match Center (tv.dartconnect.com) ──ID-first match──▶ playing flags
+localStorage (match-night-singles:<code>:<id>) ◀▶ division + absent IDs
+                                                  ──render──▶ compact Match Night view
 ```
 
 ## Key design decisions
