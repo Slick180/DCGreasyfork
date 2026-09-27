@@ -300,6 +300,260 @@ asyncChecks.push(api.fetchLiveState((opts) => {
   check('fetchLiveState fallback path records both attempts', s.source === 'api-matches' && s.marked.size === 1 &&
     s.attempts.length === 2 && s.attempts[0].status === 500 && s.attempts[1].status === 200);
 }));
+// ---- genuine live-endpoint shape (verified 2026-09-27 via direct probing) ----
+// Field names below are the genuine tv.dartconnect.com live payload shape:
+// POST api/league/SStaffSL/matches/live/24343 -> {divisions, teams, matches[]}
+// with status "O", league_match_id, opponent_0/1 abbrev, surname-first
+// opponent_X_players, nested league_match {left/right numeric ids}.
+const genuineLive = {
+  id: 9857684,
+  league_match_id: 10258951,
+  division_id: 94909,
+  division: 'Universal',
+  status: 'O',
+  spectator_key: 'MDTX8',
+  score: '0-0',
+  set_score: '0-0',
+  opponent_0: 'James H',
+  opponent_0_players: 'Harrison, James',
+  opponent_1: 'Nick W',
+  opponent_1_players: 'Walton, Nick',
+  league_match: {
+    id: 10258951,
+    league_match_id: 10258951,
+    division_id: 94903,
+    division: 'Universal',
+    status: 'P',
+    left: { id: 5765962, team_name: 'Harrison, James' },
+    right: { id: 5765923, team_name: 'Walton, Nick' },
+  },
+};
+check('unflipName surname-first', api.unflipName('Harrison, James') === 'James Harrison');
+check('unflipName passes through', api.unflipName('James Harrison') === 'James Harrison');
+check('unflipName empty', api.unflipName('') === '');
+const normLive = api.normalizeApiRecord(genuineLive);
+check('genuine live normalizes fixture id first',
+  !!normLive && normLive.matchIds[0] === 10258951, JSON.stringify(normLive && normLive.matchIds));
+check('genuine live resolves numeric player ids',
+  !!normLive && normLive.ids[0] === 5765962 && normLive.ids[1] === 5765923);
+check('genuine live flips names to schedule order',
+  !!normLive && normLive.names[0] === 'James Harrison' && normLive.names[1] === 'Nick Walton');
+check('genuine live carries spectator key as ref', !!normLive && normLive.ref === 'MDTX8');
+check('genuine live status O counts live', api.isLiveRecord(normLive) === true);
+const liveFixture = {
+  matchId: 10258951, division: 'Universal', date: '2026-10-01',
+  playerA: { id: 5765923, name: 'Nick Walton' },
+  playerB: { id: 5765962, name: 'James Harrison' },
+  status: 'waiting',
+};
+const liveMark = api.matchLiveRecords([liveFixture], [normLive]);
+check('genuine live marks exact fixture by id', liveMark.marked.size === 1);
+const liveCollect = api.collectApiRecords({ divisions: [], teams: [], matches: [genuineLive] });
+check('genuine live payload collects', liveCollect.length === 1 && liveCollect[0].matchIds[0] === 10258951);
+const liveObjCollect = api.collectApiRecords({ divisions: [], teams: [], matches: { a: genuineLive } });
+check('matches-as-object collects', liveObjCollect.length === 1);
+
+// ---- id-join hardening: league_match_id wins, division_id never joins ----
+check('league_match_id preferred over broadcast id', (() => {
+  const rec = api.normalizeApiRecord({
+    id: 9857684, league_match_id: 10258951, status: 'O', division: 'Universal',
+    opponent_0: 'James H', opponent_1: 'Nick W',
+  });
+  return !!rec && rec.matchIds[0] === 10258951 && rec.matchIds.indexOf(9857684) !== -1;
+})());
+check('broadcast id alone never marks a fixture', (() => {
+  const rec = { matchIds: [9857684], ids: [null, null], names: ['', ''], state: 'O', ref: '', division: '' };
+  const m = api.matchLiveRecords([liveFixture], [rec]);
+  return m.marked.size === 0 && m.unmatched.length === 1;
+})());
+check('misleading division_id does not prevent id match', (() => {
+  const rec = api.normalizeApiRecord({
+    id: 9857684, league_match_id: 10258951, division_id: 94909, division: 'Universal',
+    status: 'O', opponent_0: 'James H', opponent_1: 'Nick W',
+    league_match: { id: 10258951, left: { id: 5765962 }, right: { id: 5765923 } },
+  });
+  const m = api.matchLiveRecords([liveFixture], [rec]);
+  return m.marked.size === 1;
+})());
+check('swapped numeric pair still marks', (() => {
+  const rec = { matchIds: [], ids: [5765962, 5765923], names: ['James Harrison', 'Nick Walton'], state: 'O', ref: '', division: '' };
+  const m = api.matchLiveRecords([liveFixture], [rec]);
+  return m.marked.size === 1;
+})());
+check('live-shape C record never live', (() => {
+  const rec = api.normalizeApiRecord({
+    id: 9857684, league_match_id: 10258951, status: 'C', division: 'Universal',
+    league_match: { id: 10258951, left: { id: 5765962 }, right: { id: 5765923 } },
+  });
+  return api.isLiveRecord(rec) === false;
+})());
+asyncChecks.push(api.fetchLiveState((opts) => {
+  opts.onload({ status: 200, responseText: JSON.stringify({ divisions: [], teams: [], matches: [{
+    id: 9857684, league_match_id: 10258951, status: 'C', division: 'Universal',
+    league_match: { id: 10258951, left: { id: 5765962 }, right: { id: 5765923 } },
+  }] }) });
+}, [liveFixture], [liveFixture],
+{ division: 'Universal', selectedMatchDate: '2026-10-01' }).then((s) => {
+  check('fetchLiveState live-shape C marks nothing',
+    s.source === 'api-live' && s.marked.size === 0 &&
+    s.rejected.length === 1 && s.rejected[0].reason === 'status-not-live');
+}));
+asyncChecks.push(api.fetchLiveState((opts) => {
+  opts.onload({ status: 200, responseText: JSON.stringify({ divisions: [], teams: [], matches: [genuineLive] }) });
+}, [{ matchId: 10258951, division: 'Universal', date: '2026-10-01',
+     playerA: { id: 5765923, name: 'Nick Walton' },
+     playerB: { id: 5765962, name: 'James Harrison' }, status: 'waiting' }],
+[{ matchId: 10258951, division: 'Universal', date: '2026-10-01',
+   playerA: { id: 5765923, name: 'Nick Walton' },
+   playerB: { id: 5765962, name: 'James Harrison' }, status: 'waiting' }],
+{ division: 'Universal', selectedMatchDate: '2026-10-01' }).then((s) => {
+  check('fetchLiveState genuine live payload marks by id', s.source === 'api-live' && s.marked.size === 1);
+}));
+
+// ---- PLAYING lifecycle via refreshLive (scripted transport) ----
+function lifecycleFixture() {
+  return {
+    matchId: 10258951, division: 'Universal', date: '2026-10-01',
+    dateLabel: '01 Oct', delayed: false, roundLabel: 'Round 1', sessionLabel: 'Session 3',
+    playerA: { id: 5765923, name: 'Nick Walton' },
+    playerB: { id: 5765962, name: 'James Harrison' },
+    status: 'waiting',
+  };
+}
+function lifecycleCtx(fixture, transport) {
+  const notes = [];
+  return {
+    ctx: {
+      state: { division: 'Universal', selectedMatchDate: '2026-10-01' },
+      storage: null,
+      data: { fixtures: [fixture] },
+      transport,
+      live: {
+        source: 'none', lastChecked: null, requestStatus: 0, rowsFound: 0,
+        parsed: 0, playing: 0, ambiguous: [], unmatched: [], rejected: [],
+        endpointUsed: '', responseShape: '', recordsReceived: 0, consideredLive: 0,
+        statusCounts: {}, attempts: [], normalized: [], error: null,
+      },
+      rerender: (note) => { notes.push(note); },
+    },
+    notes,
+  };
+}
+function scriptedTransport(script) {
+  // One entry per poll: {live} and/or {matches} payloads; a missing side 500s.
+  let poll = 0;
+  return (opts) => {
+    const step = script[Math.min(poll, script.length - 1)];
+    const isLive = opts.url.indexOf('/matches/live/') !== -1;
+    if (!isLive) {
+      if (step.matches !== undefined) opts.onload({ status: 200, responseText: JSON.stringify(step.matches) });
+      else opts.onload({ status: 500, responseText: '{"message":"Server Error"}' });
+      poll += 1;
+      return;
+    }
+    if (step.live !== undefined) opts.onload({ status: 200, responseText: JSON.stringify(step.live) });
+    else opts.onload({ status: 500, responseText: '{"message":"Server Error"}' });
+    if (step.matches === undefined) poll += 1;
+  };
+}
+const livePayload = { divisions: [], teams: [], matches: [genuineLive] };
+const emptyLivePayload = { divisions: [], teams: [], matches: [] };
+const completedPayload = { reg: { Universal: { '2026-09-03': [
+  { id: 10258951, league_match_id: 10258951, status: 'C', division: 'Universal',
+    left: { id: 5765962, team_name: 'Harrison, James' }, right: { id: 5765923, team_name: 'Walton, Nick' } },
+] } } };
+// NOTE: refreshLive serializes via a module-level in-flight guard, so the
+// lifecycle scenarios below MUST run sequentially in one chain — concurrent
+// refreshLive calls return early without rendering.
+asyncChecks.push((async () => {
+  // live -> 500(+completed fallback) -> live: no flicker, then still marked.
+  const fx = lifecycleFixture();
+  const { ctx, notes } = lifecycleCtx(fx, scriptedTransport([
+    { live: livePayload },
+    { matches: completedPayload },
+    { live: livePayload },
+  ]));
+  await api.refreshLive(ctx);
+  check('lifecycle poll1 marks PLAYING', fx.status === 'playing' && ctx.live.playing === 1);
+  check('lifecycle poll1 note connected', notes[0].indexOf('Live: Connected · 1 playing') === 0);
+  await api.refreshLive(ctx);
+  check('lifecycle 500+fallback preserves PLAYING (no flicker)',
+    fx.status === 'playing' && ctx.live.playing === 1);
+  check('lifecycle fallback note is honest', notes[1].indexOf('schedule fallback') !== -1);
+  await api.refreshLive(ctx);
+  check('lifecycle recovery re-marks PLAYING', fx.status === 'playing' && ctx.live.playing === 1);
+
+  // live -> successful empty live: PLAYING clears (authoritative absence).
+  const fx2 = lifecycleFixture();
+  fx2.status = 'playing';
+  const c2 = lifecycleCtx(fx2, scriptedTransport([
+    { live: livePayload },
+    { live: emptyLivePayload },
+  ]));
+  await api.refreshLive(c2.ctx);
+  check('lifecycle relive marks', fx2.status === 'playing');
+  await api.refreshLive(c2.ctx);
+  check('lifecycle successful empty clears PLAYING', fx2.status === 'waiting' && c2.ctx.live.playing === 0);
+
+  // total outage (both endpoints fail): UNKNOWN preserves state + error note.
+  const fx3 = lifecycleFixture();
+  fx3.status = 'playing';
+  const c3 = lifecycleCtx(fx3, scriptedTransport([{}]));
+  await api.refreshLive(c3.ctx);
+  check('lifecycle total failure preserves PLAYING', fx3.status === 'playing' && c3.ctx.live.playing === 1);
+  check('lifecycle total failure reports connection error',
+    c3.notes[0].indexOf('Live: Connection error') === 0 && c3.notes[0].indexOf('last known') !== -1);
+
+  // live 500 + fallback carrying a live-status record: positive evidence adds.
+  const fx4 = lifecycleFixture();
+  const liveStatusFallback = { reg: { Universal: { '2026-10-01': [
+    { id: 10258951, league_match_id: 10258951, status: 'O', division: 'Universal',
+      left: { id: 5765962, team_name: 'Harrison, James' }, right: { id: 5765923, team_name: 'Walton, Nick' } },
+  ] } } };
+  const c4 = lifecycleCtx(fx4, scriptedTransport([{ matches: liveStatusFallback }]));
+  await api.refreshLive(c4.ctx);
+  check('lifecycle fallback positive evidence adds PLAYING',
+    fx4.status === 'playing' && c4.ctx.live.playing === 1 && c4.ctx.live.source === 'api-matches');
+})());
+// ---- live request construction (official body required; '{}' -> HTTP 500) ----
+check('official league POST body exported', api.LEAGUE_POST_BODY === '{"division_id":null,"competitor_id":null}');
+check('official body carries both filter keys', (() => {
+  const b = JSON.parse(api.LEAGUE_POST_BODY);
+  return 'division_id' in b && 'competitor_id' in b;
+})());
+asyncChecks.push(api.fetchLiveState((opts) => {
+  check('live request is official shape', (() => {
+    const okMethod = opts.method === 'POST';
+    const okUrl = opts.url === 'https://tv.dartconnect.com/api/league/SStaffSL/matches/live/24343';
+    const okData = opts.data === '{"division_id":null,"competitor_id":null}';
+    const h = opts.headers || {};
+    const okHeaders = h['Content-Type'] === 'application/json' &&
+      h.Accept === 'application/json' && h['X-Requested-With'] === 'XMLHttpRequest';
+    return okMethod && okUrl && okData && okHeaders;
+  })());
+  opts.onload({ status: 200, responseText: JSON.stringify({ divisions: [], teams: [], matches: [] }) });
+}, [], [], { division: 'Universal', selectedMatchDate: '2026-10-01' }).then((s) => {
+  check('official-body live request succeeds', s.ok && s.source === 'api-live');
+}));
+asyncChecks.push(api.fetchLiveState((opts) => {
+  if (opts.url.indexOf('/matches/live/') !== -1) {
+    check('matches fallback uses official body too',
+      opts.method === 'POST' && opts.data === '{"division_id":null,"competitor_id":null}');
+    opts.onload({ status: 500, responseText: '{"message":"Server Error"}' });
+    return;
+  }
+  opts.onload({ status: 200, responseText: JSON.stringify({ divisions: [], teams: [], matches: [] }) });
+}, [], [], { division: 'Universal', selectedMatchDate: '2026-10-01' }).then((s) => {
+  check('fallback path still records both attempts', s.attempts.length === 2);
+}));
+// ---- playing-row presentation (CSS/rendering only, both themes) ----
+const srcText = fs.readFileSync(path.join(__dirname, '..', 'src', 'SouthStaffs-MatchNight.user.js'), 'utf8');
+check('playing row green background rule', srcText.indexOf('.sssl-row.playing{position:relative;background:var(--playing-bg)}') !== -1);
+check('playing badge out of flex flow', srcText.indexOf('.sssl-playing{position:absolute;right:10px;top:50%;transform:translateY(-50%);margin-left:0;') !== -1);
+check('playing names bold rule', srcText.indexOf('.sssl-row.playing .sssl-pa,.sssl-row.playing .sssl-pb{font-weight:700') !== -1);
+check('playing theme vars in both themes',
+  (srcText.match(/--playing-bg:/g) || []).length >= 2 && (srcText.match(/--playing-ink:/g) || []).length >= 2);
+check('playing class applied from status', srcText.indexOf("f.status === 'playing' ? ' playing' : ''") !== -1);
 const counts = {
   rosterUniversal: roster.players.filter((p) => p.division === 'Universal').length,
   rosterWhiteEagle: roster.players.filter((p) => p.division === 'White Eagle').length,

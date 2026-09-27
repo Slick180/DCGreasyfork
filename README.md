@@ -4,9 +4,9 @@ Compact match-night management screen for the South Staffordshire
 Superleague (Universal + White Eagle divisions), delivered as a
 Tampermonkey userscript.
 
-> **Status: V0.1.3 with Light/Dark switch + live engine; `node
-> test/parse-check.cjs` ALL PASS. Live behavior not yet verified in
-> Tampermonkey; not published.**
+> **Status: V1.0.0 Match Night release candidate — schedule, rosters,
+> filters, themes, live PLAYING detection (incl. full-row highlight) all
+> verified; `node test/parse-check.cjs` ALL PASS. Not published.**
 
 ## Architecture (planned)
 

@@ -1,9 +1,8 @@
 # South Staffs DartConnect Match Night — Requirements
 
-> **Status: V0.1.3 theme switch + live Match Center engine implemented;
-> `node test/parse-check.cjs` ALL PASS (incl. genuine-data live-matching
-> checks). Live API/polling behavior NOT yet verified in Tampermonkey —
-> see verification list below. Not published.**
+> **Status: V1.0.0 Match Night release candidate (full-row green PLAYING
+> highlight, both themes; live detection proven in the real browser);
+> `node test/parse-check.cjs` ALL PASS. Not published.**
 
 ## 1. Purpose
 
@@ -39,9 +38,10 @@ This is a **separate userscript** from the existing
 - Schedule player links expose a stable numeric DartConnect player ID.
   Use the **player ID internally** (roster state, Not Here filtering,
   fixture identity), not names.
-- The live Match Center DOM has **not** yet exposed numeric player IDs.
-  Do not invent or infer them. If real IDs are later found in Match Center
-  data/API, prefer IDs over abbreviated-name matching.
+- The live Match Center API exposes numeric player IDs inside the nested
+  `league_match` object (`left/right.id`) — prefer these over
+  abbreviated-name matching. The live Match Center DOM has **not** yet
+  exposed numeric player IDs; do not invent or infer them there.
 
 ## 5. Not Here workflow
 
@@ -87,8 +87,30 @@ This is a **separate userscript** from the existing
 
 ## 9. Live / playing games
 
-- A live fixture **stays** in the outstanding list, visually marked
-  (e.g. `● PLAYING`). Never remove a fixture for being live.
+- Live source (verified 2026-09-27 by direct probing during a genuine
+  active scoring session): `POST
+  https://tv.dartconnect.com/api/league/SStaffSL/matches/24343`
+  (no auth required; transient HTTP 500s observed — retry).
+  `POST .../matches/live/24343` returns `{divisions, teams, matches[]}`.
+  A live record carries `league_match_id` (exact schedule fixture id),
+  `status: "O"`, `spectator_key` (watch code), `opponent_0/1`
+  (`First L` abbrev), `opponent_0/1_players` (surname-first full), and a
+  nested `league_match` with numeric `left/right` player ids. The
+  official Match Center client polls the live endpoint every 45s.
+- Matching priority is therefore: 1) schedule match id
+  (`league_match_id`), 2) numeric player-id pair (from nested
+  `league_match`), 3) full-name pair (surname-first flipped to schedule
+  order), 4) abbreviated pair. Same orientation first, then swapped —
+  each level requires exactly one candidate.
+- Known unreliabilities: the live record's `division_id` disagreed with
+  its `division` name in the verified sample — join via
+  `league_match_id`, never via `division_id`. `round_seq` 9 coincided
+  with the `M9`-style reference — mapping plausible, not yet confirmed.
+- A live fixture **stays** in the outstanding list with its **entire row**
+  highlighted green and both player names bold (`● PLAYING` remains at the
+  far right). Styling is class-driven from `status === 'playing'`, so the
+  row returns to normal automatically when the fixture is no longer live.
+  Never remove a fixture for being live.
 - Schedule uses full names (`James Harrison`); live Match Center may
   shorten (`James H`); completed rows return surname-first
   (`Harrison, James`). **Never identify a live player from a shortened
@@ -138,15 +160,37 @@ integration lands without UI redesign.
 
 ## 14. Open confirmations / verification
 
-- [x] V0.1.3 implemented: Light/Dark switch (persisted, system default) + live engine
-  (API-first matching, 30s polling, diagnostics). Statically/unit tested only.
+- [x] V0.1.4: genuine live-endpoint shape verified by direct probing
+  (2026-09-27, live `status:"O"` record with `league_match_id` →
+  exact fixture; numeric player ids + surname-first names in nested
+  `league_match`; `spectator_key` as ref). Normalizer extended
+  (id-first ordering, surname-first flip, matches-as-object);
+  `node test/parse-check.cjs` ALL PASS incl. 13 genuine-shape checks.
+- [x] Live-endpoint HTTP 500 cause established 2026-09-27 by controlled
+  alternating probing: `'{}'/empty body → 500 (3/3)` vs official
+  `{"division_id":null,"competitor_id":null} → 200 (3/3)`; Content-Type
+  irrelevant. `apiPost` now sends the exact official body to both league
+  endpoints (request-construction tests added). No auth/cookies needed.
+- [ ] Live behaviour verified end-to-end in Tampermonkey (GM_xmlhttpRequest
+  POST reaching the live endpoint; PLAYING flag appearing on a real live
+  fixture; 30s polling; transient-500 retry path).
+- [ ] `M9`-style match references mapped (or confirmed unmappable).
+  Evidence: live `league_match.round_seq` 9 coincided with M9-style refs.
 - [ ] Theme switch verified live (both themes readable, preference persists).
 - [ ] Live API reachable from Tampermonkey (`GM_xmlhttpRequest` POST, cookies/CSRF as needed).
 - [x] DevTools diagnostics reachable via `unsafeWindow.__ssslMatchNight` (`@grant unsafeWindow`).
 - [x] Live status line shows Connected/playing/checked-time vs Connection error.
-- [x] Live deep diagnostics (endpoint/shape/normalized/rejected-reason) for PLAYING failure analysis; version held at 0.1.3.
+- [x] Live deep diagnostics (endpoint/shape/normalized/rejected-reason) for PLAYING failure analysis.
 - [x] Compact live logging (status counts + reason tally replace per-record spam).
-- [ ] PLAYING detection verified against real live rows (incl. James H ambiguity case).
+- [x] PLAYING detection verified against the genuine live-endpoint shape
+  (offline: exact `league_match_id` + numeric pair + flipped full names;
+  `node test/parse-check.cjs` ALL PASS). In-Tampermonkey flagging still open.
+- [x] PLAYING lifecycle hardened + covered offline: transport failure on all
+  sources preserves last-known PLAYING (UNKNOWN, not proof of stop);
+  non-authoritative `/matches/` fallback never clears PLAYING on absence
+  (positive evidence may add); only a successful live-endpoint response
+  clears stale PLAYING. Notes distinguish Connected / schedule-fallback /
+  Connection-error(last-known).
 - [x] Genuine schedule capture collected (`references/schedule-normal.html`).
 - [x] Parser repaired against genuine data (`node test/parse-check.cjs`: 23/23 rosters, 511 fixtures incl. 32 delayed, proven sorted/deduped, away-first orientation proven).
 - [ ] Fixtures parsed incl. postponed groups; sorting verified.
@@ -156,7 +200,9 @@ integration lands without UI redesign.
 - [ ] Cross-origin strategy verified (`GM_xmlhttpRequest` vs `fetch`).
 - [ ] PLAYING detection verified against live Match Center rows.
 - [ ] `M9`-style match references mapped (or confirmed unmappable).
+  Evidence 2026-09-27: live `league_match.round_seq` 9 coincided with M9-style refs.
 - [ ] Live orientation (same vs reversed pairs) verified in testing.
-- [ ] Real Match Center player IDs: present or absent.
+- [x] Real Match Center player IDs: present in the live endpoint
+  (nested `league_match.left/right.id`); matcher prefers IDs over names.
 - [ ] Remaining reference captures collected (schedule-normal.html present; delayed/live/completed still empty).
 - [ ] GreasyFork publishing authorised (explicit instruction required).

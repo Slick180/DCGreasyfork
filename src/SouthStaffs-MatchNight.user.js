@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         South Staffs Match Night
 // @namespace    https://github.com/south-staffs-superleague
-// @version      0.1.3
+// @version      1.0.0
 // @description  Compact match-night management screen for the South Staffordshire Superleague (Universal / White Eagle): division rosters, Not Here filtering, postponed-fixture merging, live PLAYING detection.
 // @author       South Staffs Superleague
 // @match        https://my.dartconnect.com/league/schedule/SStaffSL/24343
@@ -13,7 +13,7 @@
 // @license      MIT
 // ==/UserScript==
 
-/* South Staffs Match Night — V0.1.1.
+/* South Staffs Match Night — V1.0.0.
  *
  * Schedule data comes from the page's embedded Inertia data-page JSON
  * (props.sidebar.divisions[].competitors for the roster;
@@ -30,7 +30,7 @@
 
   /* ============================== 1. Diagnostics ============================== */
 
-  const VERSION = '0.1.3';
+  const VERSION = '1.0.0';
   const TAG = '[SSSL Match Night]';
   const MAX_LOG_LINES = 40;
   let logCount = 0;
@@ -472,6 +472,16 @@
   const TV_API_BASE = 'https://tv.dartconnect.com';
   const TV_LEAGUE_SLUG = 'SStaffSL';
 
+  /**
+   * Exact POST body the official Match Center client sends to both league
+   * endpoints (verified in its JS bundle: {division_id, competitor_id},
+   * both null with no filter selected). The live endpoint HTTP-500s when
+   * these keys are absent (verified 2026-09-27: '{}'/no-body -> 500 3/3,
+   * this body -> 200 3/3, alternating trials, identical headers).
+   * Never send '{}' or an empty body here.
+   */
+  const LEAGUE_POST_BODY = '{"division_id":null,"competitor_id":null}';
+
   function tvApiUrl(kind) {
     // kind: 'live' | 'matches'. Season is the stage id on this league URL.
     const suffix = kind === 'live' ? '/matches/live/' + STAGE_ID : '/matches/' + STAGE_ID;
@@ -479,7 +489,7 @@
   }
 
   /** POST JSON via the Tampermonkey transport. Resolves {ok, status, json, error}. */
-  function apiPost(transport, url) {
+  function apiPost(transport, url, body) {
     return new Promise((resolve) => {
       if (!transport || typeof transport !== 'function') {
         resolve({ ok: false, status: 0, json: null, error: 'transport unavailable' });
@@ -490,7 +500,7 @@
           method: 'POST',
           url,
           headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-          data: '{}',
+          data: typeof body === 'string' ? body : LEAGUE_POST_BODY,
           timeout: 15000,
           onload: (resp) => {
             if (resp.status < 200 || resp.status >= 300) {
@@ -531,34 +541,73 @@
   }
 
   /**
-   * Normalize one API match record into {matchIds:[], ids:[a,b]|[], names:[a,b],
-   * state, ref, division}. Handles the observed reg shape (left/right with
-   * numeric ids + team_name) and generic variants defensively. Returns null
-   * when the record carries nothing matchable.
+   * Flip DartConnect's surname-first form ("Harrison, James") to schedule
+   * order ("James Harrison"). Passes anything else through cleaned.
+   * Genuine live/match payloads use surname-first in opponent_X_players and
+   * league_match left/right team_name; the schedule uses First Last.
+   */
+  function unflipName(v) {
+    const s = cleanName(v);
+    if (!s) return '';
+    const m = s.match(/^(.+?),\s*(.+)$/);
+    if (!m) return s;
+    const last = m[1].trim().replace(/\s+/g, ' ');
+    const first = m[2].trim().replace(/\s+/g, ' ');
+    if (!last || !first) return s;
+    return first + ' ' + last;
+  }
+
+  /**
+   * Normalize one API match record into {matchIds:[], ids:[a,b]|[],
+   * names:[a,b], state, ref, division}. Handles:
+   * - the observed reg shape (left/right with numeric ids + team_name);
+   * - the genuine live shape (verified 2026-09-27): top-level
+   *   league_match_id + status "O" + opponent_0/1 ("James H" abbrev) +
+   *   opponent_0/1_players (surname-first full) + nested league_match
+   *   {left/right with numeric ids + surname-first team_name};
+   * - generic players/competitors variants defensively.
+   * matchIds[0] is the schedule fixture id when known (league_match_id
+   * first): the live record's top-level id is a broadcast id, not a
+   * fixture id. ref carries the spectator watch key when present.
+   * Returns null when the record carries nothing matchable.
    */
   function normalizeApiRecord(m) {
     if (!m || typeof m !== 'object') return null;
     const matchIds = [];
-    ['league_match_id', 'id', 'match_id'].forEach((k) => {
-      const n = numId(m[k]);
-      if (n != null) matchIds.push(n);
-    });
+    const pushId = (v) => {
+      const n = numId(v);
+      if (n != null && matchIds.indexOf(n) === -1) matchIds.push(n);
+    };
+    pushId(m.league_match_id);
+    if (m.league_match && typeof m.league_match === 'object') {
+      pushId(m.league_match.league_match_id);
+      pushId(m.league_match.id);
+    }
+    pushId(m.match_id);
+    pushId(m.id);
     let aId = null, bId = null, aName = '', bName = '';
     const left = m.left || m.home || null;
     const right = m.right || m.away || null;
     if (left && right) {
       aId = numId(left.id); bId = numId(right.id);
-      aName = cleanName(left.team_name || left.name || left.competitor_name);
-      bName = cleanName(right.team_name || right.name || right.competitor_name);
+      aName = unflipName(left.team_name || left.name || left.competitor_name);
+      bName = unflipName(right.team_name || right.name || right.competitor_name);
+    } else if (m.league_match && m.league_match.left && m.league_match.right) {
+      aId = numId(m.league_match.left.id); bId = numId(m.league_match.right.id);
+      aName = unflipName(m.league_match.left.team_name || m.league_match.left.name);
+      bName = unflipName(m.league_match.right.team_name || m.league_match.right.name);
+    } else if (typeof m.opponent_0 === 'string' || typeof m.opponent_1 === 'string') {
+      aName = unflipName(m.opponent_0_players) || cleanName(m.opponent_0);
+      bName = unflipName(m.opponent_1_players) || cleanName(m.opponent_1);
     } else if (Array.isArray(m.players) && m.players.length >= 2) {
       aId = numId(m.players[0].id); bId = numId(m.players[1].id);
-      aName = cleanName(m.players[0].name); bName = cleanName(m.players[1].name);
+      aName = unflipName(m.players[0].name); bName = unflipName(m.players[1].name);
     } else if (Array.isArray(m.competitors) && m.competitors.length >= 2) {
       aId = numId(m.competitors[0].id); bId = numId(m.competitors[1].id);
-      aName = cleanName(m.competitors[0].name); bName = cleanName(m.competitors[1].name);
+      aName = unflipName(m.competitors[0].name); bName = unflipName(m.competitors[1].name);
     }
     const state = cleanName(m.status || m.state || m.stage || '');
-    const ref = cleanName(m.match_reference || m.reference || '');
+    const ref = cleanName(m.match_reference || m.reference || m.spectator_key || '');
     if (!matchIds.length && aId == null && !aName) return null;
     return { matchIds, ids: [aId, bId], names: [aName, bName], state, ref, division: cleanName(m.division || '') };
   }
@@ -587,6 +636,7 @@
     if (Array.isArray(payload)) { pushArray(payload); return out; }
     if (!payload || typeof payload !== 'object') return out;
     if (Array.isArray(payload.matches)) pushArray(payload.matches);
+    else if (payload.matches && typeof payload.matches === 'object') pushArray(Object.keys(payload.matches).map((k) => payload.matches[k]));
     Object.keys(payload).forEach((k) => {
       const v = payload[k];
       if (v && typeof v === 'object' && !Array.isArray(v)) {
@@ -604,7 +654,12 @@
     return out;
   }
 
-  /** A record counts as live when its state is set and not a completed marker. */
+  /**
+   * A record counts as live when its state is set and not a completed
+   * marker. Observed live-endpoint statuses (verified 2026-09-27): "O"
+   * (open/scoring now, carries spectator_key + opponent_0/1); "U"/"S"
+   * rows are tablet-linked upcoming/scheduled. "C" marks completed.
+   */
   function isLiveRecord(rec) {
     if (!rec.state) return true;
     return !/^(c|completed|complete|finished|final)$/i.test(rec.state);
@@ -799,13 +854,18 @@
   function liveNoteText(info) {
     const clock = formatClock(info.lastChecked);
     const checked = clock ? ' · checked ' + clock : '';
-    if (info.error && !info.rowsFound) {
-      currentLiveTitle = 'Match Center check failed (' + info.error + '). Showing schedule data only.';
-      return 'Live: Connection error' + checked;
+    const playing = info.playing || 0;
+    if (info.failed || (info.error && !info.rowsFound)) {
+      currentLiveTitle = 'Match Center check failed (' + (info.error || 'unknown') + '). Showing schedule data only; PLAYING is last-known.';
+      return 'Live: Connection error · ' + playing + ' playing (last known)' + checked;
+    }
+    if (info.fallback) {
+      currentLiveTitle = 'Live endpoint failed; schedule fallback in use. Source: ' + (info.source || 'none') + ' · HTTP ' + info.requestStatus;
+      return 'Live: Connected (schedule fallback) · ' + playing + ' playing' + checked;
     }
     currentLiveTitle = 'Source: ' + (info.source || 'none') + ' · HTTP ' + info.requestStatus +
       ' · rows ' + info.rowsFound + ' · ambiguous ' + (info.ambiguous ? info.ambiguous.length : 0);
-    return 'Live: Connected · ' + info.playing + ' playing' + checked;
+    return 'Live: Connected · ' + playing + ' playing' + checked;
   }
 
   function refreshLive(ctx) {
@@ -834,18 +894,37 @@
       info.consideredLive = result.consideredLive;
       info.normalized = result.normalized;
       info.error = result.error;
+      info.liveOk = result.liveOk;
+      info.failed = !result.ok;
+      info.fallback = result.ok && result.source !== 'api-live';
       log('live poll:', info.endpointUsed || info.source, 'HTTP', info.requestStatus,
         '| received', info.recordsReceived, '| by status', JSON.stringify(info.statusCounts),
         '| live', info.consideredLive, '| marked', result.marked.size,
         '| rejected', tallyReasons(info.rejected));
-      if (result.ok) {
+      if (result.ok && result.source === 'api-live') {
+        // Authoritative live response: absence of a record clears PLAYING.
         ctx.data.fixtures.forEach((f) => { if (f.status === 'playing') f.status = 'waiting'; });
         result.marked.forEach((rec, fixture) => {
           fixture.status = 'playing';
           log('PLAYING:', fixture.playerA.name, 'vs', fixture.playerB.name, rec.ref || '');
         });
-        info.playing = result.marked.size;
+      } else if (result.ok) {
+        // Non-authoritative fallback (schedule/completed data or DOM
+        // scrape): positive evidence may add PLAYING, but absence proves
+        // nothing, so never clear here. Completed (C) records can never
+        // match as live — they are filtered before matching.
+        result.marked.forEach((rec, fixture) => {
+          if (fixture.status !== 'playing') {
+            fixture.status = 'playing';
+            log('PLAYING (fallback):', fixture.playerA.name, 'vs', fixture.playerB.name, rec.ref || '');
+          }
+        });
+      } else {
+        // Transport failure on every source: UNKNOWN state, not proof the
+        // match stopped. Preserve PLAYING exactly as-is.
+        warn('live endpoints unreachable; preserving last-known PLAYING state.');
       }
+      info.playing = ctx.data.fixtures.filter((f) => f.status === 'playing').length;
       ctx.rerender(liveNoteText(info));
     }).catch((e) => {
       liveInFlight = false;
@@ -878,7 +957,7 @@
       marked: new Map(), ambiguous: [], unmatched: [], rejected: [],
       endpointUsed: '', responseShape: '', recordsReceived: 0, consideredLive: 0,
       statusCounts: {}, attempts: [],
-      normalized: [], error: null,
+      normalized: [], error: null, liveOk: false,
     };
     function apply(records, stats, source, status, shape) {
       summary.ok = true;
@@ -913,6 +992,7 @@
     }
     return apiPost(transport, tvApiUrl('live')).then((res) => {
       const att = attempt('live', res);
+      summary.liveOk = !!(res.ok && res.json !== null);
       if (res.ok && res.json !== null) {
         const stats = freshStats();
         const all = collectApiRecords(res.json, stats);
@@ -997,8 +1077,8 @@
   /* ============================== 7. Compact UI ============================== */
 
   const CSS = [
-    '.sssl-overlay{--bg:#0f172a;--panel:#1e293b;--roster:#111c30;--text:#e2e8f0;--muted:#b5c0cd;--faint:#94a3b8;--border:#334155;--control:#243244;--control-border:#475569;--accent:#14b8a6;--accent-ink:#06281c;--row-alt:rgba(148,163,184,0.08);--datebar:#243244;--datebar-text:#b5c0cd;--absent-bg:#3b2f14;--absent-border:#f59e0b;--absent-text:#fcd34d;--playing:#22c55e;--delayed:#f59e0b;--err-border:#ef4444;--err-bg:#3b2228;--err-text:#fecaca;position:fixed;inset:0;z-index:2147483647;background:var(--bg);color:var(--text);font-family:"Segoe UI",Arial,sans-serif;font-size:14px;display:flex;flex-direction:column}',
-    '.sssl-overlay[data-theme="light"]{--bg:#f1f5f9;--panel:#ffffff;--roster:#f8fafc;--text:#0f172a;--muted:#475569;--faint:#64748b;--border:#cbd5e1;--control:#ffffff;--control-border:#94a3b8;--accent:#0d9488;--accent-ink:#ffffff;--row-alt:rgba(15,23,42,0.045);--datebar:#334155;--datebar-text:#f8fafc;--absent-bg:#fef3c7;--absent-border:#b45309;--absent-text:#92400e;--playing:#15803d;--delayed:#b45309;--err-border:#dc2626;--err-bg:#fef2f2;--err-text:#991b1b;color-scheme:light}',
+    '.sssl-overlay{--bg:#0f172a;--panel:#1e293b;--roster:#111c30;--text:#e2e8f0;--muted:#b5c0cd;--faint:#94a3b8;--border:#334155;--control:#243244;--control-border:#475569;--accent:#14b8a6;--accent-ink:#06281c;--row-alt:rgba(148,163,184,0.08);--datebar:#243244;--datebar-text:#b5c0cd;--absent-bg:#3b2f14;--absent-border:#f59e0b;--absent-text:#fcd34d;--playing:#22c55e;--playing-bg:#166534;--playing-ink:#f0fdf4;--delayed:#f59e0b;--err-border:#ef4444;--err-bg:#3b2228;--err-text:#fecaca;position:fixed;inset:0;z-index:2147483647;background:var(--bg);color:var(--text);font-family:"Segoe UI",Arial,sans-serif;font-size:14px;display:flex;flex-direction:column}',
+    '.sssl-overlay[data-theme="light"]{--bg:#f1f5f9;--panel:#ffffff;--roster:#f8fafc;--text:#0f172a;--muted:#475569;--faint:#64748b;--border:#cbd5e1;--control:#ffffff;--control-border:#94a3b8;--accent:#0d9488;--accent-ink:#ffffff;--row-alt:rgba(15,23,42,0.045);--datebar:#334155;--datebar-text:#f8fafc;--absent-bg:#fef3c7;--absent-border:#b45309;--absent-text:#92400e;--playing:#15803d;--playing-bg:#15803d;--playing-ink:#ffffff;--delayed:#b45309;--err-border:#dc2626;--err-bg:#fef2f2;--err-text:#991b1b;color-scheme:light}',
     '.sssl-topbar{display:flex;align-items:center;gap:12px;padding:8px 16px;background:var(--panel);border-bottom:1px solid var(--border);flex:none}',
     '.sssl-title{font-size:16px;font-weight:700;white-space:nowrap}',
     '.sssl-divsel{display:flex;gap:6px}',
@@ -1019,7 +1099,10 @@
     '.sssl-pa{flex:1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.sssl-vs{flex:0 0 44px;text-align:center;font-weight:700;font-size:12px;color:var(--faint)}',
     '.sssl-pb{flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-    '.sssl-playing{color:var(--playing);font-weight:700;font-size:11px;margin-left:8px;white-space:nowrap}',
+    '.sssl-playing{position:absolute;right:10px;top:50%;transform:translateY(-50%);margin-left:0;color:var(--playing);font-weight:700;font-size:11px;white-space:nowrap}',
+    '.sssl-row.playing{position:relative;background:var(--playing-bg)}',
+    '.sssl-row.playing .sssl-pa,.sssl-row.playing .sssl-pb{font-weight:700;color:var(--playing-ink)}',
+    '.sssl-row.playing .sssl-vs,.sssl-row.playing .sssl-playing{color:var(--playing-ink)}',
     '.sssl-rhead{font-size:12px;font-weight:700;color:var(--muted);margin:2px 0 6px}',
     '.sssl-player{display:block;width:100%;text-align:left;background:transparent;border:1px solid transparent;border-radius:4px;color:var(--text);font-size:13px;padding:3px 8px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.sssl-player:hover{border-color:var(--control-border)}',
@@ -1126,7 +1209,7 @@
         if (f.delayed) bar.appendChild(el('span', 'delayed', 'DELAYED'));
         listPane.appendChild(bar);
       }
-      const row = el('div', 'sssl-row' + (alt ? ' alt' : ''));
+      const row = el('div', 'sssl-row' + (alt ? ' alt' : '') + (f.status === 'playing' ? ' playing' : ''));
       alt = !alt;
       row.appendChild(el('span', 'sssl-pa', f.playerA.name));
       row.appendChild(el('span', 'sssl-vs', 'vs'));
@@ -1302,7 +1385,7 @@
       parsed: 0, playing: 0, ambiguous: [], unmatched: [], rejected: [],
       endpointUsed: '', responseShape: '', recordsReceived: 0, consideredLive: 0,
       statusCounts: {}, attempts: [],
-      normalized: [], error: null,
+      normalized: [], error: null, liveOk: false, failed: false, fallback: false,
     };
     lastInfo.liveSource = live.source;
     lastInfo.liveLastChecked = live.lastChecked;
@@ -1322,6 +1405,7 @@
     lastInfo.liveRecordsConsideredLive = live.consideredLive;
     lastInfo.liveNormalizedRecords = live.normalized;
     lastInfo.liveError = live.error;
+    lastInfo.liveOk = live.liveOk;
     const liveCtx = {
       state, storage, data, transport, live,
       rerender: (note) => {
@@ -1343,6 +1427,7 @@
         lastInfo.liveRecordsConsideredLive = live.consideredLive;
         lastInfo.liveNormalizedRecords = live.normalized;
         lastInfo.liveError = live.error;
+        lastInfo.liveOk = live.liveOk;
         lastInfo.selectedDivision = state.division;
         lastInfo.selectedMatchDate = state.selectedMatchDate;
         render(state, storage, data, note, diagnosticsText(info));
@@ -1385,9 +1470,11 @@
     applyDisplayFilters,
     tvApiUrl,
     apiPost,
+    LEAGUE_POST_BODY,
     normalizeApiRecord,
     collectApiRecords,
     isLiveRecord,
+    unflipName,
     summarizeJsonShape,
     safeRecord,
     diagnoseLiveMatch,
