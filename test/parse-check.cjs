@@ -46,7 +46,11 @@ check('Adam Batchelor 6052051 White Eagle',
   !!(batchelor && batchelor.division === 'White Eagle'), JSON.stringify(batchelor));
 
 // ---- fixtures ----
-const parsed = api.parseFixturesFromProps(props);
+const discoveredSStaff = api.discoverDivisions(props);
+check('SStaffSL discovers Universal then White Eagle',
+  JSON.stringify(discoveredSStaff) === JSON.stringify(['Universal', 'White Eagle']),
+  JSON.stringify(discoveredSStaff));
+const parsed = api.parseFixturesFromProps(props, discoveredSStaff);
 check('pending groups found', api.findMatchGroups(props, 'pending_match_groups').length === 4);
 check('future groups found', api.findMatchGroups(props, 'future_match_groups').length >= 1);
 const delayed = parsed.fixtures.filter((f) => f.delayed);
@@ -516,6 +520,89 @@ asyncChecks.push((async () => {
   check('lifecycle fallback positive evidence adds PLAYING',
     fx4.status === 'playing' && c4.ctx.live.playing === 1 && c4.ctx.live.source === 'api-matches');
 })());
+// ---- dynamic divisions (V1.1 phase 2: no production allowlist) ----
+function synthProps(divNames, opts) {
+  const o = opts || {};
+  let pid = 1000, mid = 5000;
+  const sidebar = {
+    divisions: divNames.map((name) => ({
+      division: name,
+      competitors: [1, 2].map((n) => {
+        pid += 1;
+        return { id: pid, competitor_name: name + ' Player' + n, url: '/league/schedule/TESTLG/99999/' + pid };
+      }),
+    })),
+  };
+  function group(date, items, divName) {
+    return {
+      date, date_label: date, day_of_week: 'Thursday',
+      divisions: [{ division_name: 'Division: ' + divName, items }],
+    };
+  }
+  const good = divNames.map(() => {
+    mid += 1;
+    return {
+      item_type: 'match', id: mid, status: 'P', is_bye: false,
+      sched_time: 'Round 1', venue_board_label: 'Session 1',
+      home: { id: pid - 1, name: 'Home X' }, away: { id: pid, name: 'Away Y' },
+    };
+  });
+  return {
+    sidebar,
+    pending_match_groups: o.delayed === false ? [] : [group('2026-09-03', good.slice(0, 1), divNames[0])],
+    future_match_groups: [group('2026-10-01', good.slice(1).concat(o.bye ? [{ item_type: 'match', id: 9999, status: 'P', is_bye: true, home: { id: 1, name: 'A' }, away: { id: 2, name: 'B' } }] : []), o.ghostDivision || divNames[0])],
+  };
+}
+const solo = synthProps(['Solo']);
+check('A: single-division discovery', JSON.stringify(api.discoverDivisions(solo)) === JSON.stringify(['Solo']));
+check('A: single-division roster+fixtures', (() => {
+  const r = api.parseRosterFromProps(solo);
+  const f = api.parseFixturesFromProps(solo, api.discoverDivisions(solo));
+  return r.players.length === 2 && r.players.every((p) => p.division === 'Solo') &&
+    f.fixtures.length === 1 && f.fixtures.every((x) => x.division === 'Solo');
+})());
+const trio = synthProps(['Alpha', 'Beta', 'Gamma']);
+check('B/C/D: three divisions discovered in document order',
+  JSON.stringify(api.discoverDivisions(trio)) === JSON.stringify(['Alpha', 'Beta', 'Gamma']));
+check('E: roster associated per dynamic division', (() => {
+  const byDiv = {};
+  api.parseRosterFromProps(trio).players.forEach((p) => { (byDiv[p.division] = byDiv[p.division] || []).push(p.id); });
+  return Object.keys(byDiv).length === 3 &&
+    Object.keys(byDiv).every((d) => byDiv[d].length === 2) &&
+    byDiv.Alpha.every((id) => byDiv.Beta.indexOf(id) === -1 && byDiv.Gamma.indexOf(id) === -1);
+})());
+check('F: fixtures accepted for arbitrary divisions', (() => {
+  const f = api.parseFixturesFromProps(trio, api.discoverDivisions(trio));
+  return f.fixtures.length === 3 && f.skipped.unknownDivision === 0;
+})());
+check('G: saved invalid division falls back to first discovered', (() => {
+  const store = { data: JSON.stringify({ division: 'Nope', absentIds: [], selectedMatchDate: null, theme: null }),
+    getItem() { return this.data; }, setItem(_, v) { this.data = String(v); } };
+  return api.loadState(store, ['Alpha', 'Beta']).division === 'Alpha';
+})());
+check('G: saved valid division preserved', (() => {
+  const store = { data: JSON.stringify({ division: 'Beta', absentIds: [7], selectedMatchDate: null, theme: null }),
+    getItem() { return this.data; }, setItem(_, v) { this.data = String(v); } };
+  const st = api.loadState(store, ['Alpha', 'Beta']);
+  return st.division === 'Beta' && st.absentIds.join() === '7';
+})());
+check('H: ghost-division fixture diagnosed, not merged', (() => {
+  const g = synthProps(['Alpha', 'Beta'], { ghostDivision: 'Ghost' });
+  const divs = api.discoverDivisions(g);
+  const f = api.parseFixturesFromProps(g, divs);
+  return divs.length === 2 && f.fixtures.length === 1 && f.fixtures[0].division === 'Alpha' &&
+    f.skipped.unknownDivision === 1;
+})());
+check('H: ghost division absent from roster', api.parseRosterFromProps(
+  synthProps(['Alpha'], { ghostDivision: 'Ghost' })).players.every((p) => p.division === 'Alpha'));
+const srcLines = fs.readFileSync(path.join(__dirname, '..', 'src', 'SouthStaffs-MatchNight.user.js'), 'utf8').split('\n');
+check('I: no production DIVISIONS allowlist', api.DIVISIONS === undefined &&
+  srcLines.every((line) => line.indexOf('DIVISIONS') === -1 ||
+    /divisions|discoverDivisions|unknownFixtureDivisions|discoveredDivisions/.test(line)));
+check('I: division names only in metadata, never logic', srcLines.every((line) =>
+  line.indexOf('Universal') === -1 && line.indexOf('White Eagle') === -1 ||
+  line.trim().indexOf('// @') === 0));
+
 // ---- LeagueContext (V1.1 phase 1: dynamic league identity, SStaffSL unpinned) ----
 function sameContext(a, b) {
   return !!a && !!b && a.leagueCode === b.leagueCode && a.leagueId === b.leagueId && a.scheduleUrl === b.scheduleUrl;

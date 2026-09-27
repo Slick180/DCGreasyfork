@@ -177,6 +177,13 @@ integration lands without UI redesign.
   POST body, lifecycle, matching and polling unchanged. Divisions, roster
   handling and storage keys remain South Staffs runtime until later phases.
   No generic-league compatibility claimed yet.
+- [x] V1.1 phase 2: dynamic division/roster discovery from Inertia data
+  (ordered names; no production allowlist; numeric division IDs never used
+  for matching). Fixture parsing gated on discovered divisions with
+  unknown-division diagnostics; dynamic selector with wrapping; dynamic
+  diagnostics maps; saved-division validation against discovered list.
+  SStaffSL still discovers Universal/White Eagle (23/23, 511, 32 delayed).
+  Filtering, matcher, lifecycle, polling and row layout unchanged.
 - [ ] Live behaviour verified end-to-end in Tampermonkey (GM_xmlhttpRequest
   POST reaching the live endpoint; PLAYING flag appearing on a real live
   fixture; 30s polling; transient-500 retry path).

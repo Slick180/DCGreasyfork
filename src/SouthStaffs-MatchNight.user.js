@@ -68,11 +68,10 @@
   // runtime and later per-league storage migration. All endpoint URLs now
   // derive from LeagueContext (see section 2b).
 
-  const DIVISIONS = ['Universal', 'White Eagle'];
-
-  // Player schedule links look like: /league/schedule/SStaffSL/24343/5765962
-  const PLAYER_HREF_RE = /\/league\/schedule\/SStaffSL\/24343\/(\d+)(?:\/|[?#]|$)/;
-  const DIVISION_HREF_RE = /\/league\/schedule\/SStaffSL\/24343\/division\/(\d+)/;
+  // Player schedule links look like: /league/schedule/<code>/<stageId>/<playerId>.
+  // Segment-generic so any league schedule page works; the player id is the
+  // last numeric segment (division pages carry a non-numeric segment there).
+  const PLAYER_HREF_RE = /\/league\/schedule\/[^/]+\/\d+\/(\d+)(?:\/|[?#]|$)/;
 
   const KNOWN_SELECTORS = {
     postponedToggle: 'button[aria-expanded]',
@@ -223,8 +222,10 @@
 
   /* ============================== 4. Persistent state ============================== */
 
-  function defaultState() {
-    return { division: DIVISIONS[0], absentIds: [], selectedMatchDate: null, theme: null };
+  /** First discovered division is the default when no valid saved selection exists. */
+  function defaultState(divisions) {
+    const list = Array.isArray(divisions) ? divisions : [];
+    return { division: list.length ? list[0] : '', absentIds: [], selectedMatchDate: null, theme: null };
   }
 
   /** Resolve the effective theme: saved value wins, else system preference. */
@@ -240,12 +241,13 @@
     } catch (e) { return false; }
   }
 
-  function loadState(storage) {
+  function loadState(storage, divisions) {
+    const list = Array.isArray(divisions) ? divisions : [];
     try {
       const raw = storage.getItem(STORE_KEY);
-      if (!raw) return defaultState();
+      if (!raw) return defaultState(list);
       const parsed = JSON.parse(raw);
-      const division = DIVISIONS.indexOf(parsed.division) !== -1 ? parsed.division : DIVISIONS[0];
+      const division = list.indexOf(parsed.division) !== -1 ? parsed.division : defaultState(list).division;
       const absentIds = Array.isArray(parsed.absentIds)
         ? parsed.absentIds.filter((id) => Number.isSafeInteger(id))
         : [];
@@ -256,7 +258,7 @@
       return { division, absentIds, selectedMatchDate, theme };
     } catch (e) {
       warn('localStorage read failed, using defaults:', e);
-      return defaultState();
+      return defaultState(list);
     }
   }
 
@@ -373,17 +375,35 @@
   }
 
   /**
+   * Ordered unique division names from the Schedule Filter panel data
+   * (authoritative roster source). Document order is preserved. Pure.
+   */
+  function discoverDivisions(props) {
+    const out = [];
+    const seen = new Set();
+    findDivisionRosters(props).forEach((block) => {
+      const division = typeof block.division === 'string' ? block.division.trim().replace(/\s+/g, ' ') : '';
+      if (!division || seen.has(division)) return;
+      seen.add(division);
+      out.push(division);
+    });
+    return out;
+  }
+
+  /**
    * Authoritative roster from the Schedule Filter panel data.
    * Returns { players: [{id, name, division}], warnings }.
+   * Accepts every well-formed roster block; division filtering (if any)
+   * is the caller's decision, not the parser's.
    */
   function parseRosterFromProps(props) {
     const players = [];
     const warnings = [];
     const seen = new Set();
     findDivisionRosters(props).forEach((block) => {
-      const division = block.division;
-      if (DIVISIONS.indexOf(division) === -1) {
-        warnings.push('unknown roster division: ' + division);
+      const division = typeof block.division === 'string' ? block.division.trim().replace(/\s+/g, ' ') : '';
+      if (!division) {
+        warnings.push('roster block without division skipped');
         return;
       }
       block.competitors.forEach((c) => {
@@ -443,9 +463,13 @@
   /**
    * Outstanding fixtures from pending (delayed) + future (upcoming) groups.
    * Display order is away-first, home-second (the (H) marker sits on home).
+   * Only fixtures in `divisions` (discovered roster divisions) are accepted;
+   * fixtures referencing divisions without a roster are skipped and counted
+   * under skipped.unknownDivision (never silently merged, never invented).
    * Skips completed (status C), byes, and entries without numeric IDs.
    */
-  function parseFixturesFromProps(props) {
+  function parseFixturesFromProps(props, divisions) {
+    const allowed = new Set(Array.isArray(divisions) ? divisions : []);
     const fixtures = [];
     const warnings = [];
     const skipped = { completed: 0, bye: 0, noIds: 0, unknownDivision: 0, notMatch: 0 };
@@ -458,9 +482,9 @@
       (Array.isArray(group.divisions) ? group.divisions : []).forEach((divBlock) => {
         const division = cleanDivisionName(divBlock.division_name);
         const items = Array.isArray(divBlock.items) ? divBlock.items : [];
-        if (DIVISIONS.indexOf(division) === -1) {
+        if (!allowed.has(division)) {
           skipped.unknownDivision += items.length;
-          warnOnce('match group with unknown division skipped');
+          warnOnce('match group with unknown division skipped: ' + (division || '(empty)'));
           return;
         }
         items.forEach((item) => {
@@ -1116,7 +1140,7 @@
     '.sssl-overlay[data-theme="light"]{--bg:#f1f5f9;--panel:#ffffff;--roster:#f8fafc;--text:#0f172a;--muted:#475569;--faint:#64748b;--border:#cbd5e1;--control:#ffffff;--control-border:#94a3b8;--accent:#0d9488;--accent-ink:#ffffff;--row-alt:rgba(15,23,42,0.045);--datebar:#334155;--datebar-text:#f8fafc;--absent-bg:#fef3c7;--absent-border:#b45309;--absent-text:#92400e;--playing:#15803d;--playing-bg:#15803d;--playing-ink:#ffffff;--delayed:#b45309;--err-border:#dc2626;--err-bg:#fef2f2;--err-text:#991b1b;color-scheme:light}',
     '.sssl-topbar{display:flex;align-items:center;gap:12px;padding:8px 16px;background:var(--panel);border-bottom:1px solid var(--border);flex:none}',
     '.sssl-title{font-size:16px;font-weight:700;white-space:nowrap}',
-    '.sssl-divsel{display:flex;gap:6px}',
+    '.sssl-divsel{display:flex;gap:6px;flex-wrap:wrap}',
     '.sssl-divsel button{background:var(--control);color:var(--text);border:1px solid var(--control-border);border-radius:4px;padding:4px 12px;font-size:13px;cursor:pointer}',
     '.sssl-divsel button.on{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:700}',
     '.sssl-topbar .spacer{flex:1}',
@@ -1167,7 +1191,7 @@
     const topbar = el('div', 'sssl-topbar');
     topbar.appendChild(el('div', 'sssl-title', 'Match Night'));
     const divsel = el('div', 'sssl-divsel');
-    DIVISIONS.forEach((div) => {
+    (data.divisions && data.divisions.length ? data.divisions : [state.division]).forEach((div) => {
       const b = el('button', div === state.division ? 'on' : '', div);
       b.type = 'button';
       b.addEventListener('click', () => {
@@ -1308,15 +1332,14 @@
   }
 
   function diagnosticsText(info) {
-    return [
-      'Universal roster: ' + info.rosterUniversal,
-      'White Eagle roster: ' + info.rosterWhiteEagle,
+    const lines = Object.keys(info.rosterCounts || {}).map((div) => div + ' roster: ' + info.rosterCounts[div]);
+    return lines.concat([
       'Player links found: ' + info.playerLinks,
       'Fixture candidates found: ' + info.candidates,
       'Fixtures parsed: ' + info.parsed,
       'Delayed: ' + info.delayed,
       'Duplicates removed: ' + info.duplicates,
-    ].join('\n');
+    ]).join('\n');
   }
 
   /* ============================== 8. Boot ============================== */
@@ -1357,9 +1380,9 @@
     const state = loadState(storage);
     state.theme = defaultTheme(state.theme, systemPrefersDark());
     log('state restored:', state.division, '| absent:', state.absentIds.length);
-    const data = { fixtures: [], roster: [], parseFailed: false };
+    const data = { fixtures: [], roster: [], divisions: [], parseFailed: false };
     const info = {
-      rosterUniversal: 0, rosterWhiteEagle: 0, playerLinks: 0,
+      rosterCounts: {}, playerLinks: 0,
       candidates: 0, parsed: 0, delayed: 0, duplicates: 0,
     };
     try {
@@ -1368,10 +1391,18 @@
       const roster = parseRosterFromProps(props);
       roster.warnings.forEach(warnOnce);
       data.roster = roster.players;
-      info.rosterUniversal = roster.players.filter((p) => p.division === 'Universal').length;
-      info.rosterWhiteEagle = roster.players.filter((p) => p.division === 'White Eagle').length;
+      data.divisions = discoverDivisions(props);
+      // Re-validate the saved division against discovered divisions; fall
+      // back to the first discovered division (preserves valid SStaff state).
+      if (data.divisions.indexOf(state.division) === -1) {
+        state.division = data.divisions.length ? data.divisions[0] : '';
+        saveState(storage, state);
+      }
+      data.divisions.forEach((div) => {
+        info.rosterCounts[div] = roster.players.filter((p) => p.division === div).length;
+      });
       info.playerLinks = roster.players.length;
-      const parsed = parseFixturesFromProps(props);
+      const parsed = parseFixturesFromProps(props, data.divisions);
       parsed.warnings.forEach(warnOnce);
       info.candidates = parsed.fixtures.length;
       const deduped = dedupeFixtures(parsed.fixtures);
@@ -1389,21 +1420,24 @@
       lastInfo = {
         version: VERSION,
         selectedDivision: state.division,
-        rosterCounts: { Universal: info.rosterUniversal, 'White Eagle': info.rosterWhiteEagle },
+        discoveredDivisions: data.divisions.slice(),
+        rosterCounts: Object.assign({}, info.rosterCounts),
         totalFixtures: info.parsed,
-        fixturesByDivision: {
-          Universal: data.fixtures.filter((f) => f.division === 'Universal').length,
-          'White Eagle': data.fixtures.filter((f) => f.division === 'White Eagle').length,
-        },
+        fixturesByDivision: {},
+        unknownFixtureDivisions: parsed.skipped ? parsed.skipped.unknownDivision : 0,
         delayedFixtureCount: info.delayed,
         duplicateCountRemoved: info.duplicates,
         selectedMatchDate: state.selectedMatchDate,
         availableMatchDates: data.availableDates.slice(),
         fixturesWithinSelectedDate: withinSelectedDate(data.fixtures, state.selectedMatchDate).length,
       };
+      data.divisions.forEach((div) => {
+        lastInfo.fixturesByDivision[div] = data.fixtures.filter((f) => f.division === div).length;
+      });
       lastInfo.fixturesCopy = data.fixtures.map((f) => JSON.parse(JSON.stringify(f)));
       lastInfo.rosterCopy = data.roster.map((p) => ({ id: p.id, name: p.name, division: p.division }));
-      log('roster U/WE:', info.rosterUniversal, info.rosterWhiteEagle,
+      log('divisions:', JSON.stringify(data.divisions),
+        '| roster:', JSON.stringify(info.rosterCounts),
         '| fixtures:', info.parsed, '| delayed:', info.delayed,
         '| dupes:', info.duplicates, '| skipped:', JSON.stringify(parsed.skipped || {}));
       if (roster.players.length === 0 && data.fixtures.length === 0) {
@@ -1492,8 +1526,8 @@
 
   const api = {
     VERSION,
-    DIVISIONS,
     STORE_KEY,
+    discoverDivisions,
     parsePlayerIdFromHref,
     abbreviateName,
     pairKey,
