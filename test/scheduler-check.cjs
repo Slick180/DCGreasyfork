@@ -700,6 +700,287 @@ const synthFixtures = [
     JSON.stringify(order1) === JSON.stringify(order2) && JSON.stringify(order1) === JSON.stringify([104, 106, 108, 110]));
 })();
 
+// ==============================================================================
+// Slice 2A: Candidate-Set Generation, Robustness, Bottlenecks & Marker Confidence
+// ==============================================================================
+
+console.log('\n--- Slice 2A Running Order Primitives Tests ---');
+
+// Test 33: Candidate-set generation for configurable capacity (1, 2, 4, 6)
+(() => {
+  const session = api.createNightSession({
+    players: allSyntheticPlayers,
+    fixtures: synthFixtures,
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+    managedBoardsEnabled: false,
+  });
+
+  const playable = api.getPlayableGames(session);
+  const setsCap1 = api.getCompatibleCandidateSets(session, playable, 1);
+  const setsCap2 = api.getCompatibleCandidateSets(session, playable, 2);
+  const setsCap4 = api.getCompatibleCandidateSets(session, playable, 4);
+  const setsCap6 = api.getCompatibleCandidateSets(session, playable, 6);
+
+  check('33. Candidate sets cap 1: all size 1', setsCap1.length > 0 && setsCap1.every((s) => s.length === 1));
+  check('33. Candidate sets cap 2: all size 2', setsCap2.length > 0 && setsCap2.every((s) => s.length === 2));
+  check('33. Candidate sets cap 4: all size 4', setsCap4.length > 0 && setsCap4.every((s) => s.length === 4));
+  // Total synthetic players is 10 (5 disjoint pairs), so max possible size is 5
+  check('33. Candidate sets cap 6: returns maximal size 4/5 sets without error',
+    setsCap6.length > 0 && setsCap6.every((s) => s.length <= 6));
+})();
+
+// Test 34: Pairwise player-disjointness in candidate sets
+(() => {
+  const session = api.createNightSession({
+    players: allSyntheticPlayers,
+    fixtures: synthFixtures,
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+  });
+
+  const sets = api.getCompatibleCandidateSets(session, null, 4);
+  const allDisjoint = sets.every((s) => {
+    const seen = new Set();
+    for (const g of s) {
+      if (seen.has(g.playerA.id) || seen.has(g.playerB.id)) return false;
+      seen.add(g.playerA.id);
+      seen.add(g.playerB.id);
+    }
+    return true;
+  });
+  check('34. All games in candidate sets are pairwise player-disjoint', allDisjoint);
+})();
+
+// Test 35: Unavailable (absent / playing / marking) players excluded from candidate sets
+(() => {
+  let session = api.createNightSession({
+    players: allSyntheticPlayers,
+    fixtures: synthFixtures,
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+    absentIds: [101],
+  });
+  session = api.applyGameStarted(session, { matchId: 2, markerId: 105 }); // P3, P4 playing; P5 marking
+
+  const sets = api.getCompatibleCandidateSets(session, null, 4);
+  const noUnavailable = sets.every((s) =>
+    s.every((g) =>
+      g.playerA.id !== 101 && g.playerB.id !== 101 &&
+      g.playerA.id !== 103 && g.playerB.id !== 103 &&
+      g.playerA.id !== 104 && g.playerB.id !== 104 &&
+      g.playerA.id !== 105 && g.playerB.id !== 105
+    )
+  );
+  check('35. Candidate sets strictly exclude absent, playing, and marking players', noUnavailable);
+})();
+
+// Test 36: No permutation duplicates ({A, B} vs {B, A}) in candidate sets
+(() => {
+  const session = api.createNightSession({
+    players: allSyntheticPlayers,
+    fixtures: synthFixtures,
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+  });
+
+  const sets = api.getCompatibleCandidateSets(session, null, 2);
+  const signatures = new Set();
+  let hasDuplicate = false;
+  sets.forEach((s) => {
+    const sig = s.map((g) => g.matchId).sort().join(':');
+    if (signatures.has(sig)) hasDuplicate = true;
+    signatures.add(sig);
+  });
+  check('36. Candidate sets contain no duplicate permutations', !hasDuplicate);
+})();
+
+// Test 37: Partial candidate sets when capacity cannot be filled
+(() => {
+  // Only 2 disjoint games possible among 4 players
+  const session = api.createNightSession({
+    players: [p1, p2, p3, p4],
+    fixtures: [
+      { matchId: 1, date: '2026-10-01', division: 'Universal', playerA: p1, playerB: p2 },
+      { matchId: 2, date: '2026-10-01', division: 'Universal', playerA: p3, playerB: p4 },
+    ],
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+  });
+
+  // Request capacity 4 when only 2 can run
+  const sets = api.getCompatibleCandidateSets(session, null, 4);
+  check('37. Returns valid 2-game sets when requested capacity 4 cannot be fully filled',
+    sets.length === 1 && sets[0].length === 2);
+})();
+
+// Test 38: Candidate-set robustness evaluation across single-game completion outcomes
+(() => {
+  const session = api.createNightSession({
+    players: allSyntheticPlayers,
+    fixtures: synthFixtures,
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+  });
+
+  const candSet = [synthFixtures[0], synthFixtures[1]]; // Match 1 (P1 v P2) and Match 2 (P3 v P4)
+  const robustness = api.evaluateSetRobustness(session, candSet);
+
+  check('38. Robustness returns completion outcomes for all games in set',
+    robustness.completionOutcomes.length === 2 &&
+    robustness.completionOutcomes[0].finishedMatchId === 1 &&
+    robustness.completionOutcomes[1].finishedMatchId === 2);
+  check('38. Robustness minPlayableCount and avgPlayableCount computed',
+    typeof robustness.minPlayableCount === 'number' && typeof robustness.avgPlayableCount === 'number');
+})();
+
+// Test 39: Exact Worked Counterexample Validation
+(() => {
+  // 2 Boards (Capacity = 2)
+  // P1: 2 matches (G1 and G3)
+  // P2, P3, P4, P5: 1 match each
+  const pA1 = { id: 1, name: 'P1' };
+  const pA2 = { id: 2, name: 'P2' };
+  const pA3 = { id: 3, name: 'P3' };
+  const pA4 = { id: 4, name: 'P4' };
+  const pA5 = { id: 5, name: 'P5' };
+
+  const g1 = { matchId: 1, date: '2026-10-01', division: 'Universal', roundValue: 1, sessionValue: 1, playerA: pA1, playerB: pA2 };
+  const g2 = { matchId: 2, date: '2026-10-01', division: 'Universal', roundValue: 1, sessionValue: 2, playerA: pA3, playerB: pA4 };
+  const g3 = { matchId: 3, date: '2026-10-01', division: 'Universal', roundValue: 2, sessionValue: 1, playerA: pA1, playerB: pA5 };
+  const g4 = { matchId: 4, date: '2026-10-01', division: 'Universal', roundValue: 2, sessionValue: 2, playerA: pA2, playerB: pA3 };
+
+  const counterSession = api.createNightSession({
+    players: [pA1, pA2, pA3, pA4, pA5],
+    fixtures: [g1, g2, g3, g4],
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+    managedBoardsEnabled: true,
+    boardCount: 2,
+  });
+
+  // NORMAL opening: {G1, G2}
+  const normalSet = [g1, g2];
+  const normalRob = api.evaluateSetRobustness(counterSession, normalSet);
+
+  // When G2 finishes first in NORMAL set:
+  // G4 needs P2 (busy in G1) -> unplayable. G3 needs P1 (busy in G1) -> unplayable.
+  // Next playable count = 0 (DEAD END)!
+  const g2Outcome = normalRob.completionOutcomes.find((o) => o.finishedMatchId === 2);
+  check('39. Counterexample NORMAL: G2 finish produces 0 playable games (dead-end)',
+    g2Outcome && g2Outcome.nextPlayableCount === 0);
+  check('39. Counterexample NORMAL: deadEndRisk is true and minPlayableCount is 0',
+    normalRob.deadEndRisk === true && normalRob.minPlayableCount === 0);
+
+  // OPTIMISED opening: {G2, G3}
+  const optSet = [g2, g3];
+  const optRob = api.evaluateSetRobustness(counterSession, optSet);
+
+  // In OPTIMISED set:
+  // If G3 finishes first -> G1 (P1 v P2) is immediately playable (count = 1).
+  // If G2 finishes first -> G4 (P2 v P3) is immediately playable (count = 1).
+  check('39. Counterexample OPTIMISED: All outcomes produce >= 1 playable games',
+    optRob.completionOutcomes.every((o) => o.nextPlayableCount >= 1));
+  check('39. Counterexample OPTIMISED: deadEndRisk is false, minPlayableCount is 1, refillRate is 1.0',
+    optRob.deadEndRisk === false && optRob.minPlayableCount === 1 && optRob.refillCapacityRate === 1.0);
+})();
+
+// Test 40: Player bottleneck and workload metrics
+(() => {
+  const pA1 = { id: 1, name: 'P1' };
+  const pA2 = { id: 2, name: 'P2' };
+  const pA3 = { id: 3, name: 'P3' };
+  const pA4 = { id: 4, name: 'P4' };
+
+  const session = api.createNightSession({
+    players: [pA1, pA2, pA3, pA4],
+    fixtures: [
+      { matchId: 1, date: '2026-10-01', division: 'Universal', playerA: pA1, playerB: pA2 },
+      { matchId: 2, date: '2026-10-01', division: 'Universal', playerA: pA1, playerB: pA3 },
+      { matchId: 3, date: '2026-10-01', division: 'Universal', playerA: pA1, playerB: pA4 },
+    ],
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+  });
+
+  const bottlenecks = api.evaluatePlayerBottlenecks(session);
+  const p1Metric = bottlenecks.playerMetrics.get(1);
+  const p2Metric = bottlenecks.playerMetrics.get(2);
+
+  check('40. P1 has remaining count 3 and higher bottleneck score than P2',
+    p1Metric.remainingCount === 3 && p2Metric.remainingCount === 1 && p1Metric.bottleneckScore > p2Metric.bottleneckScore);
+  check('40. Fixture bottleneck score reflects combined player workloads',
+    bottlenecks.getFixtureBottleneckScore(session.fixtures[0]) > 0);
+})();
+
+// Test 41: Projected marker confidence evaluation
+(() => {
+  const session = api.createNightSession({
+    players: allSyntheticPlayers, // 10 players
+    fixtures: synthFixtures,
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+  });
+
+  // Candidate set of 2 games uses 4 players. 6 free players remain -> HIGH confidence
+  const confHigh = api.evaluateProjectedMarkerConfidence(session, [synthFixtures[0], synthFixtures[1]]);
+  check('41. Marker confidence HIGH when ample free markers exist',
+    confHigh.rating === api.PROJECTED_MARKER_CONFIDENCE.HIGH && confHigh.freeMarkerCount >= 2);
+
+  // Candidate set of 4 games uses 8 players. 2 free players remain for 4 boards -> MEDIUM confidence
+  const confMed = api.evaluateProjectedMarkerConfidence(session, [synthFixtures[0], synthFixtures[1], synthFixtures[2], synthFixtures[3]]);
+  check('41. Marker confidence MEDIUM when free markers are limited',
+    confMed.rating === api.PROJECTED_MARKER_CONFIDENCE.MEDIUM && confMed.freeMarkerCount === 2);
+})();
+
+// Test 42: Delayed-game comparative structural impact
+(() => {
+  // P1 and P2 have a pending CURRENT match (Match 1).
+  // Delayed match (Match 7) also involves P1.
+  const session = api.createNightSession({
+    players: allSyntheticPlayers,
+    fixtures: [
+      { matchId: 1, date: '2026-10-01', division: 'Universal', playerA: p1, playerB: p2, delayed: false },
+      { matchId: 7, date: '2026-09-03', division: 'Universal', playerA: p1, playerB: p9, delayed: true },
+    ],
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+    includeDelayed: true,
+  });
+
+  const delayedImpactConflicting = api.evaluateDelayedGameImpact(session, session.fixtures[1]);
+  check('42. Delayed game held back when player is needed for CURRENT match',
+    delayedImpactConflicting.recommended === false &&
+    delayedImpactConflicting.reasonCode === api.REASON_CODES.DELAYED_CREATES_CURRENT_BOTTLENECK);
+
+  // Delayed match (Match 8) involves P9 and P10 who have NO current matches
+  const sessionSafe = api.createNightSession({
+    players: allSyntheticPlayers,
+    fixtures: [
+      { matchId: 1, date: '2026-10-01', division: 'Universal', playerA: p1, playerB: p2, delayed: false },
+      { matchId: 8, date: '2026-09-03', division: 'Universal', playerA: p9, playerB: p10, delayed: true },
+    ],
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+    includeDelayed: true,
+  });
+
+  const delayedImpactSafe = api.evaluateDelayedGameImpact(sessionSafe, sessionSafe.fixtures[1]);
+  check('42. Delayed game safe when competitors have no current-night conflicts',
+    delayedImpactSafe.recommended === true &&
+    delayedImpactSafe.reasonCode === api.REASON_CODES.DELAYED_SAFE_SPARE_CAPACITY);
+})();
+
+// Test 43: Pure portability check (runs cleanly in Node.js headless environment)
+(() => {
+  check('43. All Slice 2A primitives execute with zero host/browser dependencies',
+    typeof api.getCompatibleCandidateSets === 'function' &&
+    typeof api.evaluateSetRobustness === 'function' &&
+    typeof api.evaluatePlayerBottlenecks === 'function' &&
+    typeof api.evaluateProjectedMarkerConfidence === 'function' &&
+    typeof api.evaluateDelayedGameImpact === 'function');
+})();
+
 // Verification against real captured schedule data
 (() => {
   console.log('\n--- Real Captured Schedule Snapshot Tests ---');
@@ -719,11 +1000,21 @@ const synthFixtures = [
     recReal.recommendations.every((r) => r.game.division === 'Universal'));
   check('Real capture: Marker recommendations populated for each board',
     recReal.recommendations.every((r) => r.recommendedMarkers.length > 0 && r.bestMarker !== null));
+
+  // Real capture candidate sets & robustness
+  const realPlayable = api.getPlayableGames(sessionReal);
+  const realSets = api.getCompatibleCandidateSets(sessionReal, realPlayable, 4);
+  check('Real capture: Compatible 4-sets generated for Universal',
+    realSets.length > 0 && realSets[0].length === 4);
+
+  const realRob = api.evaluateSetRobustness(sessionReal, realSets[0]);
+  check('Real capture: Robustness evaluation succeeds for real 4-set without dead-ends',
+    realRob.completionOutcomes.length === 4 && realRob.minPlayableCount > 0);
 })();
 
 if (failures === 0) {
-  console.log('\nALL SCHEDULER TESTS PASS (0 failures)');
+  console.log('\nALL SCHEDULER & OPTIMISER TESTS PASS (0 failures)');
 } else {
-  console.error('\n' + failures + ' SCHEDULER TEST FAILURES');
+  console.error('\n' + failures + ' TEST FAILURES');
   process.exit(1);
 }

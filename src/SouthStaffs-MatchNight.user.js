@@ -1729,6 +1729,373 @@
     });
   }
 
+  /* ============================== 6e. Match Night Running Order Optimiser Primitives (Slice 2A) ============================== */
+
+  const PROJECTED_MARKER_CONFIDENCE = {
+    HIGH: 'HIGH',
+    MEDIUM: 'MEDIUM',
+    LOW: 'LOW',
+  };
+
+  const REASON_CODES = {
+    REC_BOTTLENECK_PROGRESS: 'REC_BOTTLENECK_PROGRESS',
+    REC_UNLOCKS_SUBSEQUENT: 'REC_UNLOCKS_SUBSEQUENT',
+    REC_MAX_CONCURRENCY: 'REC_MAX_CONCURRENCY',
+    REC_SAFE_MARKER_AVAIL: 'REC_SAFE_MARKER_AVAIL',
+    DELAYED_SAFE_SPARE_CAPACITY: 'DELAYED_SAFE_SPARE_CAPACITY',
+    DELAYED_CREATES_CURRENT_BOTTLENECK: 'DELAYED_CREATES_CURRENT_BOTTLENECK',
+    MARKER_RED_BLOCKED: 'MARKER_RED_BLOCKED',
+    NO_PLAYABLE_GAMES: 'NO_PLAYABLE_GAMES',
+  };
+
+  /**
+   * Generates mutually compatible sets of playable games up to the specified capacity.
+   * A candidate set is valid if all competitors across all games in the set are pairwise disjoint
+   * and currently available (not active, absent, or marking).
+   * Pure, deterministic, and returns partial sets if complete capacity cannot be filled.
+   */
+  function getCompatibleCandidateSets(session, playableGames, capacity, options) {
+    const opts = options || {};
+    const cap = typeof capacity === 'number' && capacity > 0 ? Math.floor(capacity) : (session.managedBoardsEnabled ? session.boardCount : 4);
+    const pool = Array.isArray(playableGames) ? playableGames : getPlayableGames(session);
+
+    if (pool.length === 0 || cap <= 0) return [];
+
+    const maxSets = typeof opts.maxSets === 'number' && opts.maxSets > 0 ? opts.maxSets : 500;
+    const allSets = [];
+
+    function isCompatible(candidateSet, game) {
+      const gA = game.playerA && game.playerA.id;
+      const gB = game.playerB && game.playerB.id;
+      if (gA == null || gB == null || gA === gB) return false;
+
+      for (let i = 0; i < candidateSet.length; i++) {
+        const existing = candidateSet[i];
+        const eA = existing.playerA && existing.playerA.id;
+        const eB = existing.playerB && existing.playerB.id;
+        if (gA === eA || gA === eB || gB === eA || gB === eB) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    function search(index, currentSet) {
+      if (allSets.length >= maxSets) return;
+      if (currentSet.length > 0) {
+        allSets.push(currentSet.slice());
+      }
+      if (currentSet.length === cap) return;
+
+      for (let i = index; i < pool.length; i++) {
+        const g = pool[i];
+        if (isCompatible(currentSet, g)) {
+          currentSet.push(g);
+          search(i + 1, currentSet);
+          currentSet.pop();
+        }
+      }
+    }
+
+    search(0, []);
+
+    if (allSets.length === 0) return [];
+
+    // Find maximum set size achieved
+    let maxFoundSize = 0;
+    for (let i = 0; i < allSets.length; i++) {
+      if (allSets[i].length > maxFoundSize) maxFoundSize = allSets[i].length;
+    }
+
+    const includeAllPartials = opts.includeAllPartials === true;
+    const targetSets = includeAllPartials ? allSets : allSets.filter((s) => s.length === maxFoundSize);
+
+    // Sort candidate sets deterministically:
+    // 1. Set size descending
+    // 2. Sum of fixture priority ranks
+    // 3. String composite of match IDs
+    targetSets.sort((a, b) => {
+      if (a.length !== b.length) return b.length - a.length;
+      const sumRankA = a.reduce((sum, g) => sum + (pool.indexOf(g) >= 0 ? pool.indexOf(g) : 999), 0);
+      const sumRankB = b.reduce((sum, g) => sum + (pool.indexOf(g) >= 0 ? pool.indexOf(g) : 999), 0);
+      if (sumRankA !== sumRankB) return sumRankA - sumRankB;
+      const idStrA = a.map((g) => g.matchId || 0).join(':');
+      const idStrB = b.map((g) => g.matchId || 0).join(':');
+      return idStrA < idStrB ? -1 : idStrA > idStrB ? 1 : 0;
+    });
+
+    return targetSets.slice(0, maxSets);
+  }
+
+  /**
+   * Evaluates candidate set robustness across all possible single-game completion outcomes.
+   * For each game in the candidate set, simulates what becomes playable if that game completes first
+   * while the remaining games in the set continue playing.
+   * Pure and duration-independent.
+   */
+  function evaluateSetRobustness(session, candidateSet, options) {
+    if (!Array.isArray(candidateSet) || candidateSet.length === 0) {
+      return {
+        candidateMatchIds: [],
+        setSize: 0,
+        minPlayableCount: 0,
+        avgPlayableCount: 0,
+        deadEndRisk: true,
+        completionOutcomes: [],
+        refillCapacityRate: 0,
+      };
+    }
+
+    const candidateMatchIds = candidateSet.map((g) => g.matchId);
+    const k = candidateSet.length;
+    const outcomes = [];
+    let minPlayable = Number.MAX_SAFE_INTEGER;
+    let sumPlayable = 0;
+    let successfulRefillCount = 0;
+
+    for (let i = 0; i < k; i++) {
+      const finishedGame = candidateSet[i];
+
+      // Simulate state: start all games in candidateSet, then complete finishedGame
+      let simState = session;
+      for (let j = 0; j < k; j++) {
+        simState = applyGameStarted(simState, {
+          matchId: candidateSet[j].matchId,
+          playerA: candidateSet[j].playerA,
+          playerB: candidateSet[j].playerB,
+        });
+      }
+
+      simState = applyGameCompleted(simState, {
+        matchId: finishedGame.matchId,
+      });
+
+      const nextPlayable = getPlayableGames(simState);
+      const nextCount = nextPlayable.length;
+
+      if (nextCount < minPlayable) minPlayable = nextCount;
+      sumPlayable += nextCount;
+      if (nextCount >= 1) successfulRefillCount += 1;
+
+      outcomes.push({
+        finishedMatchId: finishedGame.matchId,
+        nextPlayableCount: nextCount,
+        nextPlayableMatchIds: nextPlayable.map((f) => f.matchId),
+      });
+    }
+
+    const minPlayableCount = minPlayable === Number.MAX_SAFE_INTEGER ? 0 : minPlayable;
+    const avgPlayableCount = k > 0 ? (sumPlayable / k) : 0;
+    const deadEndRisk = minPlayableCount === 0;
+    const refillCapacityRate = k > 0 ? (successfulRefillCount / k) : 0;
+
+    return {
+      candidateMatchIds,
+      setSize: k,
+      minPlayableCount,
+      avgPlayableCount,
+      deadEndRisk,
+      completionOutcomes: outcomes,
+      refillCapacityRate,
+    };
+  }
+
+  /**
+   * Evaluates player dependency and bottleneck metrics across remaining unplayed fixtures.
+   * Pure and deterministic.
+   */
+  function evaluatePlayerBottlenecks(session, options) {
+    const uncompletedFixtures = (session.fixtures || []).filter((f) => {
+      if (session.completedMatchIds && session.completedMatchIds.has(f.matchId)) return false;
+      if (f.status === 'completed' || f.status === 'C') return false;
+      if (session.selectedDivision && f.division && f.division !== session.selectedDivision) return false;
+      return true;
+    });
+
+    const playerCounts = new Map();
+    const playerOpponents = new Map();
+
+    (session.players || []).forEach((p) => {
+      if (p && Number.isSafeInteger(p.id)) {
+        playerCounts.set(p.id, 0);
+        playerOpponents.set(p.id, new Set());
+      }
+    });
+
+    uncompletedFixtures.forEach((f) => {
+      const aId = f.playerA && f.playerA.id;
+      const bId = f.playerB && f.playerB.id;
+      if (aId != null) {
+        playerCounts.set(aId, (playerCounts.get(aId) || 0) + 1);
+        if (bId != null) {
+          if (!playerOpponents.has(aId)) playerOpponents.set(aId, new Set());
+          playerOpponents.get(aId).add(bId);
+        }
+      }
+      if (bId != null) {
+        playerCounts.set(bId, (playerCounts.get(bId) || 0) + 1);
+        if (aId != null) {
+          if (!playerOpponents.has(bId)) playerOpponents.set(bId, new Set());
+          playerOpponents.get(bId).add(aId);
+        }
+      }
+    });
+
+    const playerMetrics = new Map();
+    playerCounts.forEach((count, pId) => {
+      const opps = playerOpponents.get(pId) || new Set();
+      let unlockingCount = 0;
+      opps.forEach((oppId) => {
+        if ((playerCounts.get(oppId) || 0) <= 1) {
+          unlockingCount += 1;
+        }
+      });
+
+      const bottleneckScore = count * 10 + unlockingCount * 5;
+      playerMetrics.set(pId, {
+        id: pId,
+        remainingCount: count,
+        unlockingCount,
+        bottleneckScore,
+      });
+    });
+
+    function getFixtureBottleneckScore(f) {
+      if (!f) return 0;
+      const aMetric = playerMetrics.get(f.playerA && f.playerA.id) || { remainingCount: 0, bottleneckScore: 0 };
+      const bMetric = playerMetrics.get(f.playerB && f.playerB.id) || { remainingCount: 0, bottleneckScore: 0 };
+      const maxRemaining = Math.max(aMetric.remainingCount, bMetric.remainingCount);
+      return aMetric.bottleneckScore + bMetric.bottleneckScore + (maxRemaining * 5);
+    }
+
+    return {
+      playerMetrics,
+      getFixtureBottleneckScore,
+    };
+  }
+
+  /**
+   * Assesses structural/advisory marker confidence for candidate sets during planning.
+   * Returns structural rating (HIGH, MEDIUM, LOW) without probabilistic claims.
+   */
+  function evaluateProjectedMarkerConfidence(session, candidateSet, options) {
+    const opts = options || {};
+    const set = Array.isArray(candidateSet) ? candidateSet : [];
+    const k = set.length;
+
+    if (k === 0) {
+      return {
+        rating: PROJECTED_MARKER_CONFIDENCE.HIGH,
+        freeMarkerCount: 0,
+        requiredCount: 0,
+        reasonCode: REASON_CODES.REC_SAFE_MARKER_AVAIL,
+        reason: 'No games in set; marker requirement is zero',
+      };
+    }
+
+    const playerStates = derivePlayerStates(session, opts.externalPlayers);
+    const setPlayerIds = new Set();
+    set.forEach((g) => {
+      if (g.playerA && g.playerA.id != null) setPlayerIds.add(g.playerA.id);
+      if (g.playerB && g.playerB.id != null) setPlayerIds.add(g.playerB.id);
+    });
+
+    let availableFreeCount = 0;
+    playerStates.forEach((p) => {
+      if (p.state === PLAYER_STATES.AVAILABLE && !setPlayerIds.has(p.id)) {
+        availableFreeCount += 1;
+      }
+    });
+
+    let rating = PROJECTED_MARKER_CONFIDENCE.HIGH;
+    let reasonCode = REASON_CODES.REC_SAFE_MARKER_AVAIL;
+    let reason = 'Abundant free markers available during match execution';
+
+    if (availableFreeCount >= k) {
+      rating = PROJECTED_MARKER_CONFIDENCE.HIGH;
+      reasonCode = REASON_CODES.REC_SAFE_MARKER_AVAIL;
+      reason = 'Sufficient independent free markers available for all concurrent boards';
+    } else if (availableFreeCount > 0) {
+      rating = PROJECTED_MARKER_CONFIDENCE.MEDIUM;
+      reasonCode = REASON_CODES.REC_SAFE_MARKER_AVAIL;
+      reason = 'Limited initial free markers; match completions will replenish marker supply';
+    } else {
+      rating = PROJECTED_MARKER_CONFIDENCE.LOW;
+      reasonCode = REASON_CODES.MARKER_RED_BLOCKED;
+      reason = 'Marker supply tightly constrained; initial matches will rely on immediate finishers';
+    }
+
+    return {
+      rating,
+      freeMarkerCount: availableFreeCount,
+      requiredCount: k,
+      reasonCode,
+      reason,
+    };
+  }
+
+  /**
+   * Comparative structural evaluation of a delayed fixture vs current-night programme.
+   * Pure and deterministic.
+   */
+  function evaluateDelayedGameImpact(session, delayedFixture, options) {
+    if (!delayedFixture) {
+      return { recommended: false, reasonCode: REASON_CODES.NO_PLAYABLE_GAMES, reason: 'Invalid fixture' };
+    }
+
+    if (!session.includeDelayed) {
+      return { recommended: false, reasonCode: REASON_CODES.DELAYED_CREATES_CURRENT_BOTTLENECK, reason: 'Delayed games are disabled in session settings' };
+    }
+
+    if (session.rejectedDelayedMatchIds && session.rejectedDelayedMatchIds.has(delayedFixture.matchId)) {
+      return { recommended: false, reasonCode: REASON_CODES.DELAYED_CREATES_CURRENT_BOTTLENECK, reason: 'Delayed game rejected for current session (NOT TONIGHT)' };
+    }
+
+    const pStates = derivePlayerStates(session);
+    const pa = pStates.get(delayedFixture.playerA && delayedFixture.playerA.id);
+    const pb = pStates.get(delayedFixture.playerB && delayedFixture.playerB.id);
+
+    if (!pa || pa.state !== PLAYER_STATES.AVAILABLE || !pb || pb.state !== PLAYER_STATES.AVAILABLE) {
+      return { recommended: false, reasonCode: REASON_CODES.NO_PLAYABLE_GAMES, reason: 'Competitors are not currently available' };
+    }
+
+    const pendingCurrentForCompetitors = (session.fixtures || []).filter((f) => {
+      if (f.delayed || f.isExtra) return false;
+      if (session.completedMatchIds && session.completedMatchIds.has(f.matchId)) return false;
+      if (f.status === 'completed' || f.status === 'C') return false;
+      if (session.selectedDivision && f.division && f.division !== session.selectedDivision) return false;
+      if (session.selectedMatchDate && f.date && f.date > session.selectedMatchDate) return false;
+
+      const aId = f.playerA && f.playerA.id;
+      const bId = f.playerB && f.playerB.id;
+      return aId === pa.id || bId === pa.id || aId === pb.id || bId === pb.id;
+    });
+
+    if (pendingCurrentForCompetitors.length > 0) {
+      const currentlyPlayableCurrent = pendingCurrentForCompetitors.filter((cf) => {
+        const cpa = pStates.get(cf.playerA && cf.playerA.id);
+        const cpb = pStates.get(cf.playerB && cf.playerB.id);
+        return cpa && cpa.state === PLAYER_STATES.AVAILABLE && cpb && cpb.state === PLAYER_STATES.AVAILABLE;
+      });
+
+      if (currentlyPlayableCurrent.length > 0) {
+        return {
+          recommended: false,
+          reasonCode: REASON_CODES.DELAYED_CREATES_CURRENT_BOTTLENECK,
+          reason: 'Delayed game held back: competitors needed for immediately playable current-night matches',
+          conflictingCurrentMatchIds: currentlyPlayableCurrent.map((f) => f.matchId),
+        };
+      }
+    }
+
+    return {
+      recommended: true,
+      reasonCode: REASON_CODES.DELAYED_SAFE_SPARE_CAPACITY,
+      reason: 'Delayed game is safe to play without disrupting current programme',
+      conflictingCurrentMatchIds: [],
+    };
+  }
+
   /* ============================== 7. Compact UI ============================== */
 
   const CSS = [
@@ -2195,6 +2562,13 @@
     applyGameCompleted,
     applyUnexpectedActiveGame,
     rejectDelayedGame,
+    PROJECTED_MARKER_CONFIDENCE,
+    REASON_CODES,
+    getCompatibleCandidateSets,
+    evaluateSetRobustness,
+    evaluatePlayerBottlenecks,
+    evaluateProjectedMarkerConfidence,
+    evaluateDelayedGameImpact,
   };
 
   api.getDiagnostics = function () {
