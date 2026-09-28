@@ -981,6 +981,420 @@ console.log('\n--- Slice 2A Running Order Primitives Tests ---');
     typeof api.evaluateDelayedGameImpact === 'function');
 })();
 
+console.log('\n--- Slice 2B Global Running Order Planner Tests ---');
+
+// Test 44: NORMAL Strategy Complete Running Order
+(() => {
+  const session = api.createNightSession({
+    players: allSyntheticPlayers,
+    fixtures: synthFixtures.slice(0, 6), // 6 current fixtures
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+    managedBoardsEnabled: true,
+    boardCount: 2,
+  });
+
+  const planNormal = api.getProjectedRunningOrder(session, { strategy: api.SCHEDULING_STRATEGIES.NORMAL });
+  check('44. NORMAL strategy generates valid projected waves',
+    planNormal.strategy === 'NORMAL' && planNormal.projectedWaves.length > 0);
+  check('44. NORMAL openingRecommendations populated with marker analyses',
+    planNormal.openingRecommendations.length > 0 && planNormal.openingRecommendations[0].recommendedMarkers.length > 0);
+  check('44. NORMAL projectedNextPriorities matches Wave 2',
+    Array.isArray(planNormal.projectedNextPriorities) &&
+    (planNormal.projectedWaves.length < 2 || planNormal.projectedNextPriorities.length === planNormal.projectedWaves[1].games.length));
+  check('44. NORMAL reasonCodes include PLAN_NORMAL_FIXTURE_ORDER',
+    planNormal.reasonCodes.includes(api.REASON_CODES.PLAN_NORMAL_FIXTURE_ORDER));
+})();
+
+// Test 45: OPTIMISED Strategy Complete Running Order
+(() => {
+  const session = api.createNightSession({
+    players: allSyntheticPlayers,
+    fixtures: synthFixtures.slice(0, 6),
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+    managedBoardsEnabled: true,
+    boardCount: 2,
+  });
+
+  const planOpt = api.getProjectedRunningOrder(session, { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED });
+  check('45. OPTIMISED strategy generates valid projected waves',
+    planOpt.strategy === 'OPTIMISED' && planOpt.projectedWaves.length > 0);
+  check('45. OPTIMISED metrics include totalWaves, bottleneckTailDepth, robustnessScore',
+    typeof planOpt.metrics.totalWaves === 'number' &&
+    typeof planOpt.metrics.bottleneckTailDepth === 'number' &&
+    typeof planOpt.metrics.robustnessScore === 'number' &&
+    typeof planOpt.metrics.planScore === 'number');
+  check('45. OPTIMISED reasonCodes include PLAN_OPTIMISED_REDUCED_WAVES',
+    planOpt.reasonCodes.includes(api.REASON_CODES.PLAN_OPTIMISED_REDUCED_WAVES));
+})();
+
+// Test 46: Slice 2A Counterexample in getProjectedRunningOrder (Dead-End Avoidance)
+(() => {
+  const ceFixtures = [
+    { matchId: 101, date: '2026-10-01', division: 'Universal', playerA: p1, playerB: p2, delayed: false },
+    { matchId: 102, date: '2026-10-01', division: 'Universal', playerA: p3, playerB: p4, delayed: false },
+    { matchId: 103, date: '2026-10-01', division: 'Universal', playerA: p1, playerB: p5, delayed: false },
+    { matchId: 104, date: '2026-10-01', division: 'Universal', playerA: p2, playerB: p3, delayed: false },
+  ];
+
+  const session = api.createNightSession({
+    players: [p1, p2, p3, p4, p5],
+    fixtures: ceFixtures,
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+    managedBoardsEnabled: true,
+    boardCount: 2,
+  });
+
+  const planNormal = api.getProjectedRunningOrder(session, { strategy: api.SCHEDULING_STRATEGIES.NORMAL, capacity: 2 });
+  const planOpt = api.getProjectedRunningOrder(session, { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED, capacity: 2 });
+
+  // Normal picks G1 (101) and G2 (102) -> Dead end risk when G2 completes first
+  const normalOpeningIds = planNormal.projectedWaves[0].games.map((g) => g.matchId);
+  check('46. Counterexample NORMAL picks greedy opening [101, 102]',
+    normalOpeningIds.includes(101) && normalOpeningIds.includes(102));
+  check('46. Counterexample NORMAL robustnessScore is 0 (dead-end)',
+    planNormal.metrics.robustnessScore === 0);
+
+  // Optimised picks G2 (102) and G3 (103) -> No dead-end risk
+  const optOpeningIds = planOpt.projectedWaves[0].games.map((g) => g.matchId);
+  check('46. Counterexample OPTIMISED picks robust opening [102, 103]',
+    optOpeningIds.includes(102) && optOpeningIds.includes(103));
+  check('46. Counterexample OPTIMISED robustnessScore is >= 1',
+    planOpt.metrics.robustnessScore >= 1);
+})();
+
+// Test 47: Deep Multi-Wave Look-Ahead Proof Test
+(() => {
+  // Scenario: 6 players, 7 fixtures, Cap = 2
+  // Opening set choice A leads to 4 total waves due to poor subsequent wave grouping.
+  // Opening set choice B leads to 3 total waves.
+  const fixturesLookahead = [
+    { matchId: 201, date: '2026-10-01', roundValue: 1, sessionValue: 1, division: 'Universal', playerA: p1, playerB: p2, delayed: false },
+    { matchId: 202, date: '2026-10-01', roundValue: 1, sessionValue: 2, division: 'Universal', playerA: p3, playerB: p4, delayed: false },
+    { matchId: 203, date: '2026-10-01', roundValue: 2, sessionValue: 1, division: 'Universal', playerA: p1, playerB: p3, delayed: false },
+    { matchId: 204, date: '2026-10-01', roundValue: 2, sessionValue: 2, division: 'Universal', playerA: p2, playerB: p4, delayed: false },
+    { matchId: 205, date: '2026-10-01', roundValue: 3, sessionValue: 1, division: 'Universal', playerA: p5, playerB: p6, delayed: false },
+    { matchId: 206, date: '2026-10-01', roundValue: 3, sessionValue: 2, division: 'Universal', playerA: p5, playerB: p1, delayed: false },
+    { matchId: 207, date: '2026-10-01', roundValue: 4, sessionValue: 1, division: 'Universal', playerA: p6, playerB: p2, delayed: false },
+  ];
+
+  const session = api.createNightSession({
+    players: [p1, p2, p3, p4, p5, p6],
+    fixtures: fixturesLookahead,
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+    managedBoardsEnabled: true,
+    boardCount: 2,
+  });
+
+  const planOpt = api.getProjectedRunningOrder(session, { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED, capacity: 2 });
+  const planNormal = api.getProjectedRunningOrder(session, { strategy: api.SCHEDULING_STRATEGIES.NORMAL, capacity: 2 });
+
+  check('47. Deep lookahead: OPTIMISED schedules all 7 fixtures',
+    planOpt.metrics.totalScheduledGames === 7);
+  check('47. Deep lookahead: OPTIMISED total waves is <= NORMAL total waves',
+    planOpt.metrics.totalWaves <= planNormal.metrics.totalWaves);
+})();
+
+// Test 48: Dynamic Replanning on Real Event Completion
+(() => {
+  const session1 = api.createNightSession({
+    players: allSyntheticPlayers,
+    fixtures: synthFixtures.slice(0, 6),
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+    managedBoardsEnabled: true,
+    boardCount: 2,
+  });
+
+  const plan1 = api.getProjectedRunningOrder(session1, { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED });
+
+  // Factual event: Match 1 finishes
+  const session2 = api.applyGameCompleted(session1, { matchId: 1 });
+  const plan2 = api.getProjectedRunningOrder(session2, { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED });
+
+  check('48. Dynamic replanning: Session 1 completedMatchIds size is 0',
+    session1.completedMatchIds.size === 0);
+  check('48. Dynamic replanning: Session 2 completedMatchIds contains Match 1',
+    session2.completedMatchIds.has(1));
+  check('48. Dynamic replanning: Plan 2 schedules remaining 5 fixtures only',
+    plan2.metrics.totalScheduledGames === 5);
+})();
+
+// Test 49: Strategy Switching Isolation (Zero Side-Effects)
+(() => {
+  const session = api.createNightSession({
+    players: allSyntheticPlayers,
+    fixtures: synthFixtures.slice(0, 6),
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+    managedBoardsEnabled: true,
+    boardCount: 2,
+  });
+
+  const beforeJson = JSON.stringify({
+    players: session.players.length,
+    active: session.activeGames.length,
+    completed: Array.from(session.completedMatchIds),
+  });
+
+  const planN = api.getProjectedRunningOrder(session, { strategy: api.SCHEDULING_STRATEGIES.NORMAL });
+  const planO = api.getProjectedRunningOrder(session, { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED });
+
+  const afterJson = JSON.stringify({
+    players: session.players.length,
+    active: session.activeGames.length,
+    completed: Array.from(session.completedMatchIds),
+  });
+
+  check('49. Strategy switching: Session remains completely immutable',
+    beforeJson === afterJson);
+  check('49. Strategy switching: Returns distinct plan structures for NORMAL and OPTIMISED',
+    planN.strategy === 'NORMAL' && planO.strategy === 'OPTIMISED');
+})();
+
+// Test 50: Configurable Capacities (1, 2, 4, 6)
+(() => {
+  const session = api.createNightSession({
+    players: allSyntheticPlayers,
+    fixtures: synthFixtures.slice(0, 6),
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+  });
+
+  const planCap1 = api.getProjectedRunningOrder(session, { capacity: 1 });
+  const planCap2 = api.getProjectedRunningOrder(session, { capacity: 2 });
+  const planCap4 = api.getProjectedRunningOrder(session, { capacity: 4 });
+  const planCap6 = api.getProjectedRunningOrder(session, { capacity: 6 });
+
+  check('50. Capacity 1: Every wave has size 1',
+    planCap1.projectedWaves.every((w) => w.games.length === 1));
+  check('50. Capacity 2: Every wave has size <= 2',
+    planCap2.projectedWaves.every((w) => w.games.length <= 2));
+  check('50. Capacity 4: Waves respect max capacity 4',
+    planCap4.projectedWaves.every((w) => w.games.length <= 4));
+  check('50. Capacity 6: Waves respect max capacity 6',
+    planCap6.projectedWaves.every((w) => w.games.length <= 6));
+})();
+
+// Test 51: Partial Capacity and Asymmetric Schedules
+(() => {
+  // 3 players, 3 fixtures (triangle) -> max concurrency is 1 match at a time
+  const triFixtures = [
+    { matchId: 301, date: '2026-10-01', division: 'Universal', playerA: p1, playerB: p2, delayed: false },
+    { matchId: 302, date: '2026-10-01', division: 'Universal', playerA: p2, playerB: p3, delayed: false },
+    { matchId: 303, date: '2026-10-01', division: 'Universal', playerA: p1, playerB: p3, delayed: false },
+  ];
+
+  const session = api.createNightSession({
+    players: [p1, p2, p3],
+    fixtures: triFixtures,
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+    managedBoardsEnabled: true,
+    boardCount: 4, // 4 boards available, but only 1 can be used at a time
+  });
+
+  const planTri = api.getProjectedRunningOrder(session, { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED });
+  check('51. Asymmetric schedule: 3-player triangle plans into 3 sequential 1-game waves',
+    planTri.metrics.totalWaves === 3 && planTri.metrics.totalScheduledGames === 3);
+  check('51. Asymmetric schedule: Zero unschedulable fixtures',
+    planTri.unschedulableFixtures.length === 0);
+})();
+
+// Test 52: Delayed Games Handling in Planner
+(() => {
+  // Session with delayed game OFF
+  const sessionDelayedOff = api.createNightSession({
+    players: allSyntheticPlayers,
+    fixtures: synthFixtures, // contains Match 7 delayed
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+    includeDelayed: false,
+    managedBoardsEnabled: true,
+    boardCount: 2,
+  });
+
+  const planOff = api.getProjectedRunningOrder(sessionDelayedOff);
+  const allMatchIdsOff = planOff.projectedWaves.flatMap ? planOff.projectedWaves.flatMap((w) => w.games.map((g) => g.matchId)) : planOff.projectedWaves.reduce((acc, w) => acc.concat(w.games.map((g) => g.matchId)), []);
+  check('52. Delayed OFF: Delayed match 7 is not scheduled',
+    !allMatchIdsOff.includes(7));
+
+  // Session with delayed game ON
+  const sessionDelayedOn = api.createNightSession({
+    players: allSyntheticPlayers,
+    fixtures: synthFixtures,
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+    includeDelayed: true,
+    managedBoardsEnabled: true,
+    boardCount: 2,
+  });
+
+  const planOn = api.getProjectedRunningOrder(sessionDelayedOn);
+  const allMatchIdsOn = planOn.projectedWaves.reduce((acc, w) => acc.concat(w.games.map((g) => g.matchId)), []);
+  check('52. Delayed ON: Delayed match 7 is scheduled in waves',
+    allMatchIdsOn.includes(7));
+
+  // Session with NOT TONIGHT rejection
+  const sessionRejected = api.rejectDelayedGame(sessionDelayedOn, 7);
+  const planRejected = api.getProjectedRunningOrder(sessionRejected);
+  const allMatchIdsRej = planRejected.projectedWaves.reduce((acc, w) => acc.concat(w.games.map((g) => g.matchId)), []);
+  check('52. NOT TONIGHT: Rejected delayed match 7 is excluded from waves',
+    !allMatchIdsRej.includes(7));
+})();
+
+// Test 53: Active EXTRA/FUTURE Semantics in Planner
+(() => {
+  const sessionActive = api.createNightSession({
+    players: allSyntheticPlayers,
+    fixtures: synthFixtures.slice(0, 6),
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+    managedBoardsEnabled: true,
+    boardCount: 2,
+    activeGames: [{ matchId: 999, isExtra: true, playerA: p1, playerB: p4 }],
+  });
+
+  const plan = api.getProjectedRunningOrder(sessionActive, { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED });
+
+  // 1. Active match itself is not in projected waves or opening recommendations
+  const allProjectedMatchIds = plan.projectedWaves.reduce((acc, w) => acc.concat(w.games.map((g) => g.matchId)), []);
+  const recMatchIds = plan.openingRecommendations.map((r) => r.game.matchId);
+  check('53. Active game is not in projected waves',
+    !allProjectedMatchIds.includes(999));
+  check('53. Active game is not in opening recommendations',
+    !recMatchIds.includes(999));
+
+  // 2. Active players P1 and P4 are excluded from Wave 1
+  const wave1 = plan.projectedWaves[0] || { games: [] };
+  const wave1PlayerIds = [];
+  wave1.games.forEach((g) => {
+    wave1PlayerIds.push(g.playerA.id);
+    wave1PlayerIds.push(g.playerB.id);
+  });
+  check('53. Active competitors P1 and P4 are excluded from Wave 1',
+    !wave1PlayerIds.includes(p1.id) && !wave1PlayerIds.includes(p4.id));
+
+  // 3. Blocked fixtures involving P1/P4 remain deferred in unschedulableFixtures
+  const unschedulableIds = plan.unschedulableFixtures.map((f) => f.matchId);
+  check('53. Fixtures blocked by currently active players are deferred as unschedulable',
+    unschedulableIds.includes(1) && unschedulableIds.includes(2));
+
+  // 4. When real active game 999 completes, replanning incorporates newly freed fixtures
+  const sessionAfterCompletion = api.applyGameCompleted(sessionActive, { matchId: 999 });
+  const planAfter = api.getProjectedRunningOrder(sessionAfterCompletion, { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED });
+  const newScheduledIds = planAfter.projectedWaves.reduce((acc, w) => acc.concat(w.games.map((g) => g.matchId)), []);
+  check('53. Completing active game unlocks previously deferred fixtures',
+    newScheduledIds.includes(1) && newScheduledIds.includes(2));
+})();
+
+// Test 54: Performance and Scalability Safety (10, 20, 30 synthetic fixtures)
+(() => {
+  function generateSyntheticFixtures(count, playerCount) {
+    const players = [];
+    for (let i = 1; i <= playerCount; i++) {
+      players.push({ id: 500 + i, name: 'Player ' + i, division: 'Universal' });
+    }
+    const fixtures = [];
+    let mId = 1000;
+    for (let i = 0; i < players.length; i++) {
+      for (let j = i + 1; j < players.length && fixtures.length < count; j++) {
+        fixtures.push({
+          matchId: ++mId,
+          date: '2026-10-01',
+          division: 'Universal',
+          playerA: players[i],
+          playerB: players[j],
+          delayed: false,
+        });
+      }
+    }
+    return { players, fixtures };
+  }
+
+  // 10 Fixtures
+  const pool10 = generateSyntheticFixtures(10, 8);
+  const session10 = api.createNightSession({
+    players: pool10.players,
+    fixtures: pool10.fixtures,
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+    managedBoardsEnabled: true,
+    boardCount: 4,
+  });
+  const t0_10 = Date.now();
+  const plan10 = api.getProjectedRunningOrder(session10, { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED, capacity: 4 });
+  const ms10 = Date.now() - t0_10;
+  check('54. 10 fixtures: Planning completes with valid wave breakdown',
+    plan10.metrics.totalScheduledGames === 10 && plan10.projectedWaves.length > 0);
+
+  // 20 Fixtures
+  const pool20 = generateSyntheticFixtures(20, 10);
+  const session20 = api.createNightSession({
+    players: pool20.players,
+    fixtures: pool20.fixtures,
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+    managedBoardsEnabled: true,
+    boardCount: 4,
+  });
+  const t0_20 = Date.now();
+  const plan20 = api.getProjectedRunningOrder(session20, { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED, capacity: 4 });
+  const ms20 = Date.now() - t0_20;
+  check('54. 20 fixtures: Planning completes with valid wave breakdown',
+    plan20.metrics.totalScheduledGames === 20 && plan20.projectedWaves.length > 0);
+
+  // 30 Fixtures
+  const pool30 = generateSyntheticFixtures(30, 12);
+  const session30 = api.createNightSession({
+    players: pool30.players,
+    fixtures: pool30.fixtures,
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+    managedBoardsEnabled: true,
+    boardCount: 4,
+  });
+  const t0_30 = Date.now();
+  const plan30A = api.getProjectedRunningOrder(session30, { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED, capacity: 4 });
+  const ms30 = Date.now() - t0_30;
+  const plan30B = api.getProjectedRunningOrder(session30, { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED, capacity: 4 });
+
+  check('54. 30 fixtures: Planning completes with valid wave breakdown',
+    plan30A.metrics.totalScheduledGames === 30 && plan30A.projectedWaves.length > 0);
+  check('54. Determinism: Repeated 30-fixture runs yield identical plans',
+    JSON.stringify(plan30A) === JSON.stringify(plan30B));
+  check('54. Search bounds: Maximum wave capacity of 4 strictly respected',
+    plan30A.projectedWaves.every((w) => w.games.length <= 4));
+
+  // Diagnostic log only (non-failing)
+  console.log(`[Diagnostic Performance] 10 fixtures: ${ms10}ms | 20 fixtures: ${ms20}ms | 30 fixtures: ${ms30}ms`);
+})();
+
+// Test 55: Real Captured Schedule Snapshot Full Running Order
+(() => {
+  const sessionReal = api.createNightSession({
+    players: parsedRoster.players,
+    fixtures: parsedFixtures,
+    selectedDivision: 'Universal',
+    selectedMatchDate: '2026-10-01',
+    managedBoardsEnabled: true,
+    boardCount: 4,
+  });
+
+  const planRealNormal = api.getProjectedRunningOrder(sessionReal, { strategy: api.SCHEDULING_STRATEGIES.NORMAL });
+  const planRealOpt = api.getProjectedRunningOrder(sessionReal, { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED });
+
+  check('55. Real capture: NORMAL generates full running order across multiple waves',
+    planRealNormal.projectedWaves.length > 0 && planRealNormal.metrics.totalScheduledGames > 0);
+  check('55. Real capture: OPTIMISED generates full running order across multiple waves',
+    planRealOpt.projectedWaves.length > 0 && planRealOpt.metrics.totalScheduledGames > 0);
+  check('55. Real capture: All scheduled games belong to Universal division',
+    planRealOpt.projectedWaves.every((w) => w.games.every((g) => g.division === 'Universal')));
+})();
+
 // Verification against real captured schedule data
 (() => {
   console.log('\n--- Real Captured Schedule Snapshot Tests ---');

@@ -1729,7 +1729,12 @@
     });
   }
 
-  /* ============================== 6e. Match Night Running Order Optimiser Primitives (Slice 2A) ============================== */
+  /* ============================== 6e. Match Night Running Order Optimiser (Slice 2A & 2B) ============================== */
+
+  const SCHEDULING_STRATEGIES = {
+    NORMAL: 'NORMAL',
+    OPTIMISED: 'OPTIMISED',
+  };
 
   const PROJECTED_MARKER_CONFIDENCE = {
     HIGH: 'HIGH',
@@ -1746,6 +1751,8 @@
     DELAYED_CREATES_CURRENT_BOTTLENECK: 'DELAYED_CREATES_CURRENT_BOTTLENECK',
     MARKER_RED_BLOCKED: 'MARKER_RED_BLOCKED',
     NO_PLAYABLE_GAMES: 'NO_PLAYABLE_GAMES',
+    PLAN_OPTIMISED_REDUCED_WAVES: 'PLAN_OPTIMISED_REDUCED_WAVES',
+    PLAN_NORMAL_FIXTURE_ORDER: 'PLAN_NORMAL_FIXTURE_ORDER',
   };
 
   /**
@@ -1780,8 +1787,9 @@
       return true;
     }
 
+    const searchLimit = typeof opts.searchLimit === 'number' && opts.searchLimit > 0 ? opts.searchLimit : 2000;
     function search(index, currentSet) {
-      if (allSets.length >= maxSets) return;
+      if (allSets.length >= searchLimit) return;
       if (currentSet.length > 0) {
         allSets.push(currentSet.slice());
       }
@@ -2093,6 +2101,315 @@
       reasonCode: REASON_CODES.DELAYED_SAFE_SPARE_CAPACITY,
       reason: 'Delayed game is safe to play without disrupting current programme',
       conflictingCurrentMatchIds: [],
+    };
+  }
+
+  /**
+   * Simulates a multi-wave execution rollout starting from the given session.
+   * Pure, deterministic, and duration-independent.
+   */
+  function simulateWaveRollout(session, openingCandidateSet, capacity, maxWaves, isOptimised) {
+    const waves = [];
+    let simSession = session;
+    const waveLimit = typeof maxWaves === 'number' && maxWaves > 0 ? Math.floor(maxWaves) : 50;
+
+    if (Array.isArray(openingCandidateSet) && openingCandidateSet.length > 0) {
+      waves.push({
+        waveNumber: 1,
+        games: openingCandidateSet.slice(),
+      });
+      for (let i = 0; i < openingCandidateSet.length; i++) {
+        simSession = applyGameStarted(simSession, {
+          matchId: openingCandidateSet[i].matchId,
+          playerA: openingCandidateSet[i].playerA,
+          playerB: openingCandidateSet[i].playerB,
+        });
+      }
+      for (let i = 0; i < openingCandidateSet.length; i++) {
+        simSession = applyGameCompleted(simSession, {
+          matchId: openingCandidateSet[i].matchId,
+        });
+      }
+    }
+
+    while (waves.length < waveLimit) {
+      const playable = getPlayableGames(simSession);
+      if (playable.length === 0) {
+        break;
+      }
+
+      let waveGames = [];
+      if (!isOptimised) {
+        const candSets = getCompatibleCandidateSets(simSession, playable, capacity, { maxSets: 1 });
+        waveGames = (candSets && candSets[0]) || [];
+      } else {
+        const candSets = getCompatibleCandidateSets(simSession, playable, capacity, { maxSets: 6 });
+        if (!candSets || candSets.length === 0) break;
+
+        const bMetrics = evaluatePlayerBottlenecks(simSession);
+        let bestSet = candSets[0];
+        let bestScore = -Infinity;
+
+        for (let i = 0; i < candSets.length; i++) {
+          const cSet = candSets[i];
+          let score = cSet.length * 100;
+          for (let j = 0; j < cSet.length; j++) {
+            score += bMetrics.getFixtureBottleneckScore(cSet[j]);
+          }
+          if (score > bestScore) {
+            bestScore = score;
+            bestSet = cSet;
+          }
+        }
+        waveGames = bestSet;
+      }
+
+      if (waveGames.length === 0) break;
+
+      waves.push({
+        waveNumber: waves.length + 1,
+        games: waveGames,
+      });
+
+      for (let i = 0; i < waveGames.length; i++) {
+        simSession = applyGameStarted(simSession, {
+          matchId: waveGames[i].matchId,
+          playerA: waveGames[i].playerA,
+          playerB: waveGames[i].playerB,
+        });
+      }
+      for (let i = 0; i < waveGames.length; i++) {
+        simSession = applyGameCompleted(simSession, {
+          matchId: waveGames[i].matchId,
+        });
+      }
+    }
+
+    let tailCount = 0;
+    for (let i = waves.length - 1; i >= 0; i--) {
+      if (waves[i].games.length === 1 && waves.length > 1) {
+        tailCount++;
+      } else {
+        break;
+      }
+    }
+
+    const totalScheduledGames = waves.reduce((sum, w) => sum + w.games.length, 0);
+
+    return {
+      waves,
+      totalWaves: waves.length,
+      totalScheduledGames,
+      bottleneckTailDepth: tailCount,
+    };
+  }
+
+  /**
+   * Computes a projected multi-wave running order for the match night.
+   * Supports NORMAL (greedy fixture order) and OPTIMISED (global look-ahead) strategies.
+   * Pure, immutable, and host-independent.
+   */
+  function getProjectedRunningOrder(session, options) {
+    const opts = options || {};
+    const strategy = (opts.strategy === SCHEDULING_STRATEGIES.OPTIMISED)
+      ? SCHEDULING_STRATEGIES.OPTIMISED
+      : SCHEDULING_STRATEGIES.NORMAL;
+
+    const capacity = (typeof opts.capacity === 'number' && opts.capacity > 0)
+      ? Math.floor(opts.capacity)
+      : (session.managedBoardsEnabled ? (session.boardCount || 4) : 4);
+
+    const maxWaves = typeof opts.maxWaves === 'number' && opts.maxWaves > 0 ? Math.floor(opts.maxWaves) : 50;
+
+    const initialPlayable = getPlayableGames(session);
+    const activeMatchIds = new Set((session.activeGames || []).map((ag) => ag.matchId));
+    const uncompletedFixtures = (session.fixtures || []).filter((f) => {
+      if (session.completedMatchIds && session.completedMatchIds.has(f.matchId)) return false;
+      if (activeMatchIds.has(f.matchId)) return false;
+      if (f.status === 'completed' || f.status === 'C') return false;
+      if (session.selectedDivision && f.division && f.division !== session.selectedDivision) return false;
+      if (!session.includeDelayed && f.delayed) return false;
+      if (session.rejectedDelayedMatchIds && session.rejectedDelayedMatchIds.has(f.matchId)) return false;
+      if (session.selectedMatchDate && f.date && f.date > session.selectedMatchDate && !f.delayed) return false;
+      return true;
+    });
+
+    if (uncompletedFixtures.length === 0 || initialPlayable.length === 0) {
+      return {
+        strategy,
+        openingRecommendations: [],
+        projectedWaves: [],
+        projectedNextPriorities: [],
+        projectedLater: [],
+        unschedulableFixtures: uncompletedFixtures.slice(),
+        metrics: {
+          totalWaves: 0,
+          totalScheduledGames: 0,
+          bottleneckTailDepth: 0,
+          robustnessScore: 0,
+          markerConfidence: PROJECTED_MARKER_CONFIDENCE.HIGH,
+          refillCapacityRate: 0,
+          planScore: 0,
+        },
+        reasonCodes: [REASON_CODES.NO_PLAYABLE_GAMES],
+      };
+    }
+
+    let selectedRollout = null;
+    let openingRob = null;
+    let openingMarkerConf = null;
+    let computedPlanScore = 0;
+
+    if (strategy === SCHEDULING_STRATEGIES.NORMAL) {
+      selectedRollout = simulateWaveRollout(session, null, capacity, maxWaves, false);
+      const openingSet = (selectedRollout.waves[0] && selectedRollout.waves[0].games) || [];
+      openingRob = evaluateSetRobustness(session, openingSet);
+      openingMarkerConf = evaluateProjectedMarkerConfidence(session, openingSet, opts);
+      computedPlanScore = (selectedRollout.totalScheduledGames * 50) - (selectedRollout.totalWaves * 100);
+    } else {
+      const candidateOpenings = getCompatibleCandidateSets(session, initialPlayable, capacity, { maxSets: 16 });
+      if (candidateOpenings.length === 0) {
+        selectedRollout = simulateWaveRollout(session, null, capacity, maxWaves, false);
+        const openingSet = (selectedRollout.waves[0] && selectedRollout.waves[0].games) || [];
+        openingRob = evaluateSetRobustness(session, openingSet);
+        openingMarkerConf = evaluateProjectedMarkerConfidence(session, openingSet, opts);
+      } else {
+        const bottlenecks = evaluatePlayerBottlenecks(session);
+        let bestPlan = null;
+        let bestScore = -Infinity;
+
+        for (let i = 0; i < candidateOpenings.length; i++) {
+          const openingSet = candidateOpenings[i];
+          const rollout = simulateWaveRollout(session, openingSet, capacity, maxWaves, true);
+          const rob = evaluateSetRobustness(session, openingSet);
+          const markerConf = evaluateProjectedMarkerConfidence(session, openingSet, opts);
+
+          let unlockingScore = 0;
+          rollout.waves.forEach((w, wIdx) => {
+            const weight = 1 / (wIdx + 1);
+            w.games.forEach((g) => {
+              unlockingScore += weight * bottlenecks.getFixtureBottleneckScore(g);
+            });
+          });
+
+          let score = 0;
+          score -= (rollout.totalWaves * 100);
+          score -= (rollout.bottleneckTailDepth * 40);
+          score += (rollout.totalScheduledGames * 50);
+          score += (unlockingScore * 2);
+          score += (rob.minPlayableCount * 25);
+          score += (rob.avgPlayableCount * 10);
+          if (rob.deadEndRisk) score -= 300;
+
+          if (markerConf.rating === PROJECTED_MARKER_CONFIDENCE.HIGH) score += 20;
+          else if (markerConf.rating === PROJECTED_MARKER_CONFIDENCE.MEDIUM) score += 10;
+          else score -= 20;
+
+          if (score > bestScore || !bestPlan) {
+            bestScore = score;
+            bestPlan = {
+              rollout,
+              openingRob: rob,
+              openingMarkerConf: markerConf,
+              planScore: score,
+            };
+          }
+        }
+
+        selectedRollout = bestPlan.rollout;
+        openingRob = bestPlan.openingRob;
+        openingMarkerConf = bestPlan.openingMarkerConf;
+        computedPlanScore = bestPlan.planScore;
+      }
+    }
+
+    const scheduledMatchIds = new Set();
+    selectedRollout.waves.forEach((w) => {
+      w.games.forEach((g) => scheduledMatchIds.add(g.matchId));
+    });
+
+    const unschedulable = uncompletedFixtures.filter((f) => !scheduledMatchIds.has(f.matchId));
+
+    // Marker recommendations for opening wave
+    const openingGames = (selectedRollout.waves[0] && selectedRollout.waves[0].games) || [];
+    const candidatePool = [];
+    if (Array.isArray(opts.eligibleMarkerPool) && opts.eligibleMarkerPool.length > 0) {
+      opts.eligibleMarkerPool.forEach((p) => {
+        const id = typeof p === 'number' ? p : (p && p.id);
+        if (Number.isSafeInteger(id) && candidatePool.indexOf(id) === -1) candidatePool.push(id);
+      });
+    } else {
+      const currentStates = derivePlayerStates(session, opts.externalPlayers);
+      currentStates.forEach((p) => {
+        if (p.state === PLAYER_STATES.AVAILABLE) candidatePool.push(p.id);
+      });
+    }
+
+    const openingRecommendations = [];
+    openingGames.forEach((game) => {
+      const markerCandidates = candidatePool.filter((id) => id !== game.playerA.id && id !== game.playerB.id);
+      const evaluatedMarkers = markerCandidates.map((cId) =>
+        evaluateMarkerImpact(session, cId, {
+          externalPlayers: opts.externalPlayers,
+          recentFinisherIds: opts.recentFinisherIds,
+        })
+      );
+
+      evaluatedMarkers.sort((x, y) => {
+        const tierRank = (imp) => (imp === MARKER_IMPACTS.GREEN ? 0 : imp === MARKER_IMPACTS.AMBER ? 1 : 2);
+        const dt = tierRank(x.impact) - tierRank(y.impact);
+        if (dt !== 0) return dt;
+        const ds = y.score - x.score;
+        if (ds !== 0) return ds;
+        return (x.candidateId || 0) - (y.candidateId || 0);
+      });
+
+      const bestMarker = evaluatedMarkers.find((m) =>
+        m.impact === MARKER_IMPACTS.GREEN || m.impact === MARKER_IMPACTS.AMBER
+      ) || null;
+
+      openingRecommendations.push({
+        game,
+        recommendedMarkers: evaluatedMarkers,
+        bestMarker,
+      });
+    });
+
+    const projectedNextPriorities = (selectedRollout.waves[1] && selectedRollout.waves[1].games.slice()) || [];
+    const projectedLater = selectedRollout.waves.slice(2).reduce((acc, w) => acc.concat(w.games), []);
+
+    const reasonCodes = [];
+    if (strategy === SCHEDULING_STRATEGIES.OPTIMISED) {
+      reasonCodes.push(REASON_CODES.PLAN_OPTIMISED_REDUCED_WAVES);
+      reasonCodes.push(REASON_CODES.REC_MAX_CONCURRENCY);
+      if (openingRob && !openingRob.deadEndRisk) {
+        reasonCodes.push(REASON_CODES.REC_BOTTLENECK_PROGRESS);
+      }
+      if (openingMarkerConf && openingMarkerConf.rating !== PROJECTED_MARKER_CONFIDENCE.LOW) {
+        reasonCodes.push(REASON_CODES.REC_SAFE_MARKER_AVAIL);
+      }
+    } else {
+      reasonCodes.push(REASON_CODES.PLAN_NORMAL_FIXTURE_ORDER);
+      reasonCodes.push(REASON_CODES.REC_MAX_CONCURRENCY);
+    }
+
+    return {
+      strategy,
+      openingRecommendations,
+      projectedWaves: selectedRollout.waves,
+      projectedNextPriorities,
+      projectedLater,
+      unschedulableFixtures: unschedulable,
+      metrics: {
+        totalWaves: selectedRollout.totalWaves,
+        totalScheduledGames: selectedRollout.totalScheduledGames,
+        bottleneckTailDepth: selectedRollout.bottleneckTailDepth,
+        robustnessScore: openingRob ? openingRob.minPlayableCount : 0,
+        markerConfidence: openingMarkerConf ? openingMarkerConf.rating : PROJECTED_MARKER_CONFIDENCE.HIGH,
+        refillCapacityRate: openingRob ? openingRob.refillCapacityRate : 0,
+        planScore: computedPlanScore,
+      },
+      reasonCodes,
     };
   }
 
@@ -2562,6 +2879,7 @@
     applyGameCompleted,
     applyUnexpectedActiveGame,
     rejectDelayedGame,
+    SCHEDULING_STRATEGIES,
     PROJECTED_MARKER_CONFIDENCE,
     REASON_CODES,
     getCompatibleCandidateSets,
@@ -2569,6 +2887,7 @@
     evaluatePlayerBottlenecks,
     evaluateProjectedMarkerConfidence,
     evaluateDelayedGameImpact,
+    getProjectedRunningOrder,
   };
 
   api.getDiagnostics = function () {
