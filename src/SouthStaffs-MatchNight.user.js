@@ -1216,6 +1216,519 @@
     return rows;
   }
 
+  /* ============================== 6d. Match Night Scheduler Domain Model (Slice 1) ============================== */
+
+  const PLAYER_STATES = {
+    AVAILABLE: 'AVAILABLE',
+    PLAYING: 'PLAYING',
+    MARKING: 'MARKING',
+    ABSENT: 'ABSENT',
+  };
+
+  const GAME_TYPES = {
+    CURRENT: 'CURRENT',
+    DELAYED: 'DELAYED',
+    EXTRA: 'EXTRA',
+  };
+
+  const GAME_STATUSES = {
+    WAITING: 'WAITING',
+    ALLOCATED: 'ALLOCATED',
+    PLAYING: 'PLAYING',
+    COMPLETED: 'COMPLETED',
+    DELAYED_REJECTED: 'DELAYED_REJECTED',
+  };
+
+  const MARKER_IMPACTS = {
+    GREEN: 'GREEN',
+    AMBER: 'AMBER',
+    RED: 'RED',
+  };
+
+  const BOARD_STATUSES = {
+    AVAILABLE: 'AVAILABLE',
+    OCCUPIED: 'OCCUPIED',
+  };
+
+  function createBoard(boardNumber) {
+    return {
+      boardNumber,
+      status: BOARD_STATUSES.AVAILABLE,
+      activeMatchId: null,
+      markerPlayerId: null,
+      activeGame: null,
+    };
+  }
+
+  function createInitialBoards(boardCount) {
+    const count = typeof boardCount === 'number' && boardCount > 0 ? Math.floor(boardCount) : 4;
+    const boards = [];
+    for (let i = 1; i <= count; i++) {
+      boards.push(createBoard(i));
+    }
+    return boards;
+  }
+
+  function classifyGameType(fixture, selectedMatchDate) {
+    if (!fixture) return GAME_TYPES.CURRENT;
+    if (fixture.isExtra) return GAME_TYPES.EXTRA;
+    if (fixture.delayed) return GAME_TYPES.DELAYED;
+    if (selectedMatchDate && fixture.date && fixture.date > selectedMatchDate) return GAME_TYPES.EXTRA;
+    return GAME_TYPES.CURRENT;
+  }
+
+  function createNightSession(config) {
+    const cfg = config || {};
+    const managedBoardsEnabled = !!cfg.managedBoardsEnabled;
+    const boardCount = typeof cfg.boardCount === 'number' && cfg.boardCount > 0 ? Math.floor(cfg.boardCount) : 4;
+
+    let boards = [];
+    if (managedBoardsEnabled) {
+      if (Array.isArray(cfg.boards) && cfg.boards.length > 0) {
+        boards = cfg.boards.map((b, idx) => ({
+          boardNumber: b.boardNumber || (idx + 1),
+          status: b.status || (b.activeMatchId ? BOARD_STATUSES.OCCUPIED : BOARD_STATUSES.AVAILABLE),
+          activeMatchId: b.activeMatchId || null,
+          markerPlayerId: b.markerPlayerId || null,
+          activeGame: b.activeGame || null,
+        }));
+      } else {
+        boards = createInitialBoards(boardCount);
+      }
+    }
+
+    const toSet = (v) => {
+      if (v instanceof Set) return new Set(v);
+      if (Array.isArray(v)) return new Set(v);
+      return new Set();
+    };
+
+    return {
+      players: Array.isArray(cfg.players) ? cfg.players.slice() : [],
+      fixtures: Array.isArray(cfg.fixtures) ? cfg.fixtures.slice() : [],
+      selectedDivision: typeof cfg.selectedDivision === 'string' ? cfg.selectedDivision : '',
+      selectedMatchDate: typeof cfg.selectedMatchDate === 'string' ? cfg.selectedMatchDate : null,
+      managedBoardsEnabled,
+      boardCount,
+      boards,
+      includeDelayed: !!cfg.includeDelayed,
+      rejectedDelayedMatchIds: toSet(cfg.rejectedDelayedMatchIds),
+      absentIds: toSet(cfg.absentIds),
+      activeGames: Array.isArray(cfg.activeGames) ? cfg.activeGames.slice() : [],
+      completedMatchIds: toSet(cfg.completedMatchIds),
+      lastCompleted: cfg.lastCompleted || null,
+    };
+  }
+
+  function derivePlayerStates(session, externalPlayers) {
+    const map = new Map();
+    const allPlayers = (session.players || []).concat(Array.isArray(externalPlayers) ? externalPlayers : []);
+
+    allPlayers.forEach((p) => {
+      if (p && Number.isSafeInteger(p.id) && !map.has(p.id)) {
+        map.set(p.id, {
+          id: p.id,
+          name: p.name || '',
+          division: p.division || '',
+          state: PLAYER_STATES.AVAILABLE,
+          currentMatchId: null,
+          currentBoard: null,
+        });
+      }
+    });
+
+    session.absentIds.forEach((id) => {
+      if (map.has(id)) {
+        map.get(id).state = PLAYER_STATES.ABSENT;
+      } else {
+        map.set(id, { id, name: '', division: '', state: PLAYER_STATES.ABSENT, currentMatchId: null, currentBoard: null });
+      }
+    });
+
+    (session.activeGames || []).forEach((ag) => {
+      const aId = ag.playerA && ag.playerA.id;
+      const bId = ag.playerB && ag.playerB.id;
+      if (aId != null) {
+        const p = map.get(aId) || { id: aId, name: (ag.playerA && ag.playerA.name) || '', division: '', state: PLAYER_STATES.AVAILABLE };
+        p.state = PLAYER_STATES.PLAYING;
+        p.currentMatchId = ag.matchId;
+        p.currentBoard = ag.boardNumber || null;
+        map.set(aId, p);
+      }
+      if (bId != null) {
+        const p = map.get(bId) || { id: bId, name: (ag.playerB && ag.playerB.name) || '', division: '', state: PLAYER_STATES.AVAILABLE };
+        p.state = PLAYER_STATES.PLAYING;
+        p.currentMatchId = ag.matchId;
+        p.currentBoard = ag.boardNumber || null;
+        map.set(bId, p);
+      }
+      if (ag.markerId != null) {
+        const m = map.get(ag.markerId) || { id: ag.markerId, name: '', division: '', state: PLAYER_STATES.AVAILABLE };
+        if (m.state !== PLAYER_STATES.PLAYING) {
+          m.state = PLAYER_STATES.MARKING;
+          m.currentMatchId = ag.matchId;
+          m.currentBoard = ag.boardNumber || null;
+        }
+        map.set(ag.markerId, m);
+      }
+    });
+
+    if (session.managedBoardsEnabled && Array.isArray(session.boards)) {
+      session.boards.forEach((b) => {
+        if (b.status === BOARD_STATUSES.OCCUPIED) {
+          if (b.markerPlayerId != null && map.has(b.markerPlayerId)) {
+            const m = map.get(b.markerPlayerId);
+            if (m.state !== PLAYER_STATES.PLAYING) {
+              m.state = PLAYER_STATES.MARKING;
+              m.currentBoard = b.boardNumber;
+              m.currentMatchId = b.activeMatchId;
+            }
+          }
+        }
+      });
+    }
+
+    return map;
+  }
+
+  function rankPlayableGames(games) {
+    const rank = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : Number.MAX_SAFE_INTEGER);
+    return games.slice().sort((x, y) => {
+      const typeX = x.gameType === GAME_TYPES.CURRENT ? 0 : 1;
+      const typeY = y.gameType === GAME_TYPES.CURRENT ? 0 : 1;
+      if (typeX !== typeY) return typeX - typeY;
+
+      const dx = (x.dateValue || 0) - (y.dateValue || 0);
+      if (dx !== 0) return dx;
+
+      const dr = rank(x.roundValue) - rank(y.roundValue);
+      if (dr !== 0) return dr;
+
+      const ds = rank(x.sessionValue) - rank(y.sessionValue);
+      if (ds !== 0) return ds;
+
+      return (x.matchId || 0) - (y.matchId || 0);
+    });
+  }
+
+  function getPlayableGames(session, playerStates) {
+    const pStates = playerStates || derivePlayerStates(session);
+    const playable = [];
+    const activeMatchIds = new Set((session.activeGames || []).map((ag) => ag.matchId));
+
+    (session.fixtures || []).forEach((f) => {
+      if (session.selectedDivision && f.division && f.division !== session.selectedDivision) {
+        return;
+      }
+      if (session.completedMatchIds.has(f.matchId) || f.status === 'completed' || f.status === 'C') {
+        return;
+      }
+      if (activeMatchIds.has(f.matchId) || f.status === 'playing') {
+        return;
+      }
+      const gType = classifyGameType(f, session.selectedMatchDate);
+      if (gType === GAME_TYPES.DELAYED) {
+        if (!session.includeDelayed) return;
+        if (session.rejectedDelayedMatchIds.has(f.matchId)) return;
+      } else if (gType === GAME_TYPES.EXTRA) {
+        return;
+      } else {
+        if (session.selectedMatchDate && f.date && f.date > session.selectedMatchDate) {
+          return;
+        }
+      }
+
+      const pa = pStates.get(f.playerA.id);
+      const pb = pStates.get(f.playerB.id);
+      const paAvail = pa && pa.state === PLAYER_STATES.AVAILABLE;
+      const pbAvail = pb && pb.state === PLAYER_STATES.AVAILABLE;
+
+      if (paAvail && pbAvail) {
+        playable.push(Object.assign({}, f, { gameType: gType }));
+      }
+    });
+
+    return rankPlayableGames(playable);
+  }
+
+  function evaluateMarkerImpact(session, candidatePlayerId, options) {
+    const opts = options || {};
+    const currentStates = derivePlayerStates(session, opts.externalPlayers);
+    const candidate = currentStates.get(candidatePlayerId);
+
+    if (!candidate || candidate.state !== PLAYER_STATES.AVAILABLE) {
+      return {
+        candidateId: candidatePlayerId,
+        impact: MARKER_IMPACTS.RED,
+        score: -100,
+        reason: 'Candidate is not available (state: ' + (candidate ? candidate.state : 'UNKNOWN') + ')',
+        blockedGames: [],
+        hypoPlayableCount: 0,
+      };
+    }
+
+    const baselinePlayable = getPlayableGames(session, currentStates);
+    const baselineCount = baselinePlayable.length;
+
+    const directlyBlocked = baselinePlayable.filter((g) =>
+      g.playerA.id === candidatePlayerId || g.playerB.id === candidatePlayerId
+    );
+
+    let availableBoards = 1;
+    if (session.managedBoardsEnabled) {
+      const freeBoards = (session.boards || []).filter((b) => b.status === BOARD_STATUSES.AVAILABLE);
+      availableBoards = Math.max(1, freeBoards.length);
+    }
+
+    const hypoStates = new Map(currentStates);
+    hypoStates.set(candidatePlayerId, Object.assign({}, candidate, { state: PLAYER_STATES.MARKING }));
+    const hypoPlayable = getPlayableGames(session, hypoStates);
+    const hypoCount = hypoPlayable.length;
+
+    const allOutstandingForCandidate = (session.fixtures || []).filter((f) => {
+      if (session.completedMatchIds.has(f.matchId)) return false;
+      if (f.division && session.selectedDivision && f.division !== session.selectedDivision) return false;
+      if (session.selectedMatchDate && f.date && f.date > session.selectedMatchDate) return false;
+      return f.playerA.id === candidatePlayerId || f.playerB.id === candidatePlayerId;
+    });
+
+    let impact = MARKER_IMPACTS.GREEN;
+    let reason = 'Candidate has no upcoming game conflicts; no playable games blocked';
+    let score = 100;
+
+    if (baselinePlayable.length > 0 && directlyBlocked.length > 0) {
+      const isTopRanked = baselinePlayable[0].playerA.id === candidatePlayerId || baselinePlayable[0].playerB.id === candidatePlayerId;
+
+      if (isTopRanked) {
+        impact = MARKER_IMPACTS.RED;
+        reason = 'Candidate is needed for the top-priority immediately playable game';
+        score = 10;
+      } else if (hypoCount < availableBoards && baselineCount >= availableBoards) {
+        impact = MARKER_IMPACTS.RED;
+        reason = 'Assigning candidate would starve available boards (playable count drops below board capacity)';
+        score = 20;
+      } else if (hypoCount === 0) {
+        impact = MARKER_IMPACTS.RED;
+        reason = 'Assigning candidate removes all immediately playable games';
+        score = 15;
+      } else {
+        impact = MARKER_IMPACTS.AMBER;
+        reason = 'Candidate is in an immediately playable game, but other playable games exist to fill capacity';
+        score = 50;
+      }
+    } else if (allOutstandingForCandidate.length > 0) {
+      impact = MARKER_IMPACTS.GREEN;
+      reason = 'Candidate is not in any immediately playable game; safe to mark';
+      score = 80;
+    } else {
+      impact = MARKER_IMPACTS.GREEN;
+      reason = 'Candidate has completed all scheduled fixtures; ideal marker';
+      score = 120;
+    }
+
+    if (session.managedBoardsEnabled && Array.isArray(opts.recentFinisherIds) && opts.recentFinisherIds.indexOf(candidatePlayerId) !== -1) {
+      score += 10;
+    }
+
+    return {
+      candidateId: candidatePlayerId,
+      candidateName: candidate.name,
+      candidateDivision: candidate.division,
+      impact,
+      score,
+      reason,
+      blockedGames: directlyBlocked.map((g) => g.matchId),
+      hypoPlayableCount: hypoCount,
+    };
+  }
+
+  function recommendNextGames(session, options) {
+    const opts = options || {};
+    const currentStates = derivePlayerStates(session, opts.externalPlayers);
+    const playable = getPlayableGames(session, currentStates);
+
+    if (playable.length === 0) {
+      return {
+        recommendations: [],
+        playableCount: 0,
+        reason: 'NO_PLAYABLE_GAMES',
+      };
+    }
+
+    let limit = opts.limit;
+    if (!limit) {
+      if (session.managedBoardsEnabled) {
+        const freeBoards = (session.boards || []).filter((b) => b.status === BOARD_STATUSES.AVAILABLE);
+        limit = Math.max(1, freeBoards.length);
+      } else {
+        limit = Math.min(playable.length, 4);
+      }
+    }
+
+    const candidatePool = [];
+    if (Array.isArray(opts.eligibleMarkerPool) && opts.eligibleMarkerPool.length > 0) {
+      opts.eligibleMarkerPool.forEach((p) => {
+        const id = typeof p === 'number' ? p : (p && p.id);
+        if (Number.isSafeInteger(id) && candidatePool.indexOf(id) === -1) candidatePool.push(id);
+      });
+    } else {
+      currentStates.forEach((p) => {
+        if (p.state === PLAYER_STATES.AVAILABLE) candidatePool.push(p.id);
+      });
+    }
+
+    const recommendations = [];
+    const selectedGameCandidates = playable.slice(0, limit);
+
+    selectedGameCandidates.forEach((game) => {
+      const markerCandidates = candidatePool.filter((id) => id !== game.playerA.id && id !== game.playerB.id);
+      const evaluatedMarkers = markerCandidates.map((cId) =>
+        evaluateMarkerImpact(session, cId, {
+          externalPlayers: opts.externalPlayers,
+          recentFinisherIds: opts.recentFinisherIds,
+        })
+      );
+
+      evaluatedMarkers.sort((x, y) => {
+        const tierRank = (imp) => (imp === MARKER_IMPACTS.GREEN ? 0 : imp === MARKER_IMPACTS.AMBER ? 1 : 2);
+        const dt = tierRank(x.impact) - tierRank(y.impact);
+        if (dt !== 0) return dt;
+        const ds = y.score - x.score;
+        if (ds !== 0) return ds;
+        return (x.candidateId || 0) - (y.candidateId || 0);
+      });
+
+      const bestMarker = evaluatedMarkers.find((m) =>
+        m.impact === MARKER_IMPACTS.GREEN || m.impact === MARKER_IMPACTS.AMBER
+      ) || null;
+
+      recommendations.push({
+        game,
+        recommendedMarkers: evaluatedMarkers,
+        bestMarker,
+      });
+    });
+
+    return {
+      recommendations,
+      playableCount: playable.length,
+      reason: 'OK',
+    };
+  }
+
+  function applyGameStarted(session, action) {
+    const act = action || {};
+    const matchId = act.matchId;
+    const boardNumber = act.boardNumber;
+    const markerId = act.markerId || null;
+
+    const targetFixture = (session.fixtures || []).find((f) => f.matchId === matchId) || act.customGame || null;
+    const playerA = act.playerA || (targetFixture && targetFixture.playerA) || null;
+    const playerB = act.playerB || (targetFixture && targetFixture.playerB) || null;
+
+    const newActiveGames = (session.activeGames || []).filter((ag) => ag.matchId !== matchId);
+    newActiveGames.push({
+      matchId,
+      playerA,
+      playerB,
+      boardNumber: boardNumber || null,
+      markerId,
+      isExtra: !!act.isExtra,
+    });
+
+    let newBoards = session.boards;
+    if (session.managedBoardsEnabled && Array.isArray(session.boards)) {
+      newBoards = session.boards.map((b) => {
+        if (b.boardNumber === boardNumber) {
+          return Object.assign({}, b, {
+            status: BOARD_STATUSES.OCCUPIED,
+            activeMatchId: matchId,
+            markerPlayerId: markerId,
+            activeGame: targetFixture,
+          });
+        }
+        return b;
+      });
+    }
+
+    return Object.assign({}, session, {
+      activeGames: newActiveGames,
+      boards: newBoards,
+    });
+  }
+
+  function applyGameCompleted(session, action) {
+    const act = action || {};
+    const matchId = act.matchId;
+    const boardNumber = act.boardNumber;
+
+    const activeGame = (session.activeGames || []).find((ag) =>
+      (matchId != null && ag.matchId === matchId) || (boardNumber != null && ag.boardNumber === boardNumber)
+    );
+
+    const completedId = matchId != null ? matchId : (activeGame && activeGame.matchId);
+    const newCompletedMatchIds = new Set(session.completedMatchIds);
+    if (completedId != null) newCompletedMatchIds.add(completedId);
+
+    const newActiveGames = (session.activeGames || []).filter((ag) => ag !== activeGame && ag.matchId !== completedId);
+
+    let newBoards = session.boards;
+    if (session.managedBoardsEnabled && Array.isArray(session.boards)) {
+      newBoards = session.boards.map((b) => {
+        if ((boardNumber != null && b.boardNumber === boardNumber) || (completedId != null && b.activeMatchId === completedId)) {
+          return Object.assign({}, b, {
+            status: BOARD_STATUSES.AVAILABLE,
+            activeMatchId: null,
+            markerPlayerId: null,
+            activeGame: null,
+          });
+        }
+        return b;
+      });
+    }
+
+    const lastCompleted = activeGame ? {
+      matchId: activeGame.matchId,
+      playerAId: activeGame.playerA ? activeGame.playerA.id : null,
+      playerBId: activeGame.playerB ? activeGame.playerB.id : null,
+      boardNumber: activeGame.boardNumber || boardNumber || null,
+    } : null;
+
+    return Object.assign({}, session, {
+      completedMatchIds: newCompletedMatchIds,
+      activeGames: newActiveGames,
+      boards: newBoards,
+      lastCompleted: lastCompleted || session.lastCompleted,
+    });
+  }
+
+  function applyUnexpectedActiveGame(session, action) {
+    const act = action || {};
+    const matchId = act.matchId || ('extra-' + Date.now());
+    const playerA = act.playerA || { id: null, name: 'Player A' };
+    const playerB = act.playerB || { id: null, name: 'Player B' };
+    const boardNumber = act.boardNumber || null;
+    const markerId = act.markerId || null;
+
+    return applyGameStarted(session, {
+      matchId,
+      playerA,
+      playerB,
+      boardNumber,
+      markerId,
+      isExtra: true,
+    });
+  }
+
+  function rejectDelayedGame(session, matchId) {
+    if (matchId == null) return session;
+    const newRejected = new Set(session.rejectedDelayedMatchIds);
+    newRejected.add(matchId);
+    return Object.assign({}, session, {
+      rejectedDelayedMatchIds: newRejected,
+    });
+  }
+
   /* ============================== 7. Compact UI ============================== */
 
   const CSS = [
@@ -1664,6 +2177,24 @@
     parseSessionNumber,
     parseDateValue,
     diagnosticsText,
+    PLAYER_STATES,
+    GAME_TYPES,
+    GAME_STATUSES,
+    MARKER_IMPACTS,
+    BOARD_STATUSES,
+    createBoard,
+    createInitialBoards,
+    classifyGameType,
+    createNightSession,
+    derivePlayerStates,
+    rankPlayableGames,
+    getPlayableGames,
+    evaluateMarkerImpact,
+    recommendNextGames,
+    applyGameStarted,
+    applyGameCompleted,
+    applyUnexpectedActiveGame,
+    rejectDelayedGame,
   };
 
   api.getDiagnostics = function () {
