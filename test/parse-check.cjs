@@ -790,6 +790,22 @@ check('playing names bold rule', srcText.indexOf('.sssl-row.playing .sssl-pa,.ss
 check('playing theme vars in both themes',
   (srcText.match(/--playing-bg:/g) || []).length >= 2 && (srcText.match(/--playing-ink:/g) || []).length >= 2);
 check('playing class applied from status', srcText.indexOf("f.status === 'playing' ? ' playing' : ''") !== -1);
+// ---- fixture-row centre invariance (Slice 3B board indicator layout) ----
+// The pa/vs/pb matchup must stay centred identically regardless of right-side
+// overlays: controls are absolute (out of flex flow) and the only concession
+// is a SYMMETRIC edge reserve on the two name spans (equal left margin on pa,
+// equal right margin on pb), which never moves the centre point.
+check('fixture row is a positioning context', srcText.indexOf('.sssl-row{display:flex;align-items:center;padding:var(--pad-row);border-radius:3px;line-height:1.35;position:relative}') !== -1);
+check('board ownership indicator is an absolute overlay', srcText.indexOf('.sssl-row .bown{position:absolute;right:10px;top:50%') !== -1);
+check('board indicator slots behind PLAYING on playing rows', srcText.indexOf('.sssl-row.playing .bown{right:var(--edge-reserve)}') !== -1);
+check('board assign select is an absolute overlay', srcText.indexOf('.sssl-row .bassign-slot{position:absolute;right:var(--edge-reserve);top:50%') !== -1);
+check('symmetric edge reserve on fixture name spans',
+  srcText.indexOf('.sssl-row .sssl-pa{margin-left:var(--edge-reserve)}') !== -1 &&
+  srcText.indexOf('.sssl-row .sssl-pb{margin-right:var(--edge-reserve)}') !== -1);
+check('edge reserve defined for every scale step',
+  (srcText.match(/--edge-reserve:/g) || []).length === 6 && (srcText.match(/--edge-reserve:96px/) || []).length === 1);
+check('no in-flow board controls on fixture rows (old layout hacks removed)',
+  srcText.indexOf('margin-right:64px') === -1 && srcText.indexOf('.sssl-bassign{margin-right') === -1);
 const counts = {
   rosterUniversal: roster.players.filter((p) => p.division === 'Universal').length,
   rosterWhiteEagle: roster.players.filter((p) => p.division === 'White Eagle').length,

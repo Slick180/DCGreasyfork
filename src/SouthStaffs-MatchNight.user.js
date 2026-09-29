@@ -2,7 +2,7 @@
 // @name         Match Night Singles Manager
 // @namespace    https://github.com/south-staffs-superleague
 // @version      1.1.0
-// @description  Compact DartConnect singles match-night manager: division rosters, Not Here attendance filtering, delayed fixtures and live PLAYING status.
+// @description  Compact DartConnect singles match-night manager: division rosters, Not Here attendance filtering, delayed fixtures, live PLAYING status, scheduler advice and managed physical boards.
 // @author       South Staffs Superleague
 // @match        https://my.dartconnect.com/league/schedule/*
 // @connect      tv.dartconnect.com
@@ -16,17 +16,20 @@
  *
  * League-independent DartConnect singles match-night manager: league
  * context, divisions, rosters and fixtures are discovered from the
- * schedule page data; per-league attendance state; live PLAYING status.
+ * schedule page data; per-league attendance state; live PLAYING status;
+ * scheduler advice (plan globally, execute locally, re-plan globally);
+ * optional managed physical board ownership (factual operator state).
  *
  * Schedule data comes from the page's embedded Inertia data-page JSON
  * (props.sidebar.divisions[].competitors for the roster;
  * props.pending_match_groups / future_match_groups for fixtures).
  * This is deterministic page data, not scraped markup.
  *
- * Pure logic (extract / parse / sort / filter / match) is separate from
- * DOM rendering and is unit-tested against the genuine captured HTML in
- * references/schedule-normal.html (see test/parse-check.cjs).
- * No DartConnect markup is invented anywhere.
+ * Pure logic (extract / parse / sort / filter / match / schedule / board
+ * ownership / scale steps) is separate from DOM rendering and is
+ * unit-tested against the genuine captured HTML in
+ * references/schedule-normal.html (see test/parse-check.cjs and
+ * test/scheduler-check.cjs). No DartConnect markup is invented anywhere.
  */
 (function () {
   'use strict';
@@ -70,6 +73,10 @@
   const STORE_PREFIX = 'match-night-singles:';
   // Theme is a device/user preference, not league data: one global key.
   const THEME_KEY = 'match-night-singles:theme';
+  // UI scale is a presentation preference (Slice 3B): one global key.
+  // Deliberately separate from league state, scheduler runtime state and
+  // managed-board runtime state (which is never persisted at all).
+  const SCALE_KEY = 'match-night-singles:ui-scale';
 
   // Legacy V1.0 compatibility ONLY (South Staffordshire baseline).
   // This is the single permitted league-specific runtime exception: a
@@ -2413,7 +2420,240 @@
     };
   }
 
-  /* ============================== 6f. Slice 3A UI planning adapter (browser-dependent; NOT scheduler core) ============================== */
+  /* ============================== 6f. Slice 3B managed physical boards (browser-independent core) ============================== */
+
+  const MANAGED_BOARD_UNASSIGNED = 'UNASSIGNED';
+  const MAX_MANAGED_BOARDS = 6;
+
+  /** Lowercase name/id token for id-less live rows. Pure. */
+  function boardPlayerToken(player) {
+    if (player && Number.isSafeInteger(player.id)) return String(player.id);
+    return String((player && player.name) || '?').toLowerCase();
+  }
+
+  /** Stable game key for any fixture/live row, id-less included. Pure. */
+  function boardKeyForGame(game) {
+    if (!game) return null;
+    if (game.matchId != null) return 'id:' + game.matchId;
+    return 'pair:' + boardPlayerToken(game.playerA) + ':' + boardPlayerToken(game.playerB);
+  }
+
+  /**
+   * Managed-board runtime state: N physical boards, all UNASSIGNED.
+   * No board identity is invented when managed boards are OFF.
+   */
+  function createManagedBoardRuntime(boardCount) {
+    const count = typeof boardCount === 'number' && boardCount > 0 ? Math.floor(boardCount) : 4;
+    const boards = [];
+    for (let i = 1; i <= count; i++) {
+      boards.push({ boardNumber: i, gameKey: null });
+    }
+    return { boards };
+  }
+
+  /** Find the board currently owning a game. Pure. */
+  function findBoardOwningGame(runtime, game) {
+    if (!runtime || !runtime.boards || !Array.isArray(runtime.boards)) return null;
+    const key = boardKeyForGame(game);
+    if (!key) return null;
+    return runtime.boards.find((b) => b.gameKey === key) || null;
+  }
+
+  /** Free boards: every physical board with no assigned game. Pure. */
+  function getAvailableManagedBoards(runtime) {
+    if (!runtime || !runtime.boards || !Array.isArray(runtime.boards)) return [];
+    return runtime.boards.filter((b) => b.gameKey === null);
+  }
+
+  /**
+   * Assign a game to a board. Fails when the board is occupied, the game is
+   * already on another board, the board number is out of range, or the game
+   * is not currently eligible per the existing scheduler rules (a player is
+   * ABSENT, the game is factual PLAYING/active, or already completed).
+   * Returns { ok, runtime, reason } — never throws, never mutates input.
+   */
+  function assignGameToBoard(runtime, game, boardNumber, context) {
+    if (!runtime || !Array.isArray(runtime.boards)) return { ok: false, runtime, reason: 'no-runtime' };
+    if (!game || typeof game !== 'object') return { ok: false, runtime, reason: 'invalid-game' };
+    if (game.status === 'playing') return { ok: false, runtime, reason: 'game-active' };
+    const ctx = context || {};
+    const absentIds = ctx.absentIds || [];
+    const completedMatchIds = ctx.completedMatchIds || [];
+    const activeMatchIds = ctx.activeMatchIds || [];
+    const aId = game.playerA && game.playerA.id;
+    const bId = game.playerB && game.playerB.id;
+    if ((aId != null && absentIds.indexOf(aId) !== -1) || (bId != null && absentIds.indexOf(bId) !== -1)) {
+      return { ok: false, runtime, reason: 'player-unavailable' };
+    }
+    if ((game.matchId != null && (completedMatchIds.indexOf(game.matchId) !== -1 || activeMatchIds.indexOf(game.matchId) !== -1))) {
+      return { ok: false, runtime, reason: 'game-active' };
+    }
+    const key = boardKeyForGame(game);
+    if (!key) return { ok: false, runtime, reason: 'invalid-game' };
+    const n = typeof boardNumber === 'number' ? Math.floor(boardNumber) : 0;
+    if (n < 1 || n > runtime.boards.length) return { ok: false, runtime, reason: 'invalid-board' };
+    if (runtime.boards.some((b) => b.gameKey === key)) return { ok: false, runtime, reason: 'game-already-assigned' };
+    const board = runtime.boards.find((b) => b.boardNumber === n);
+    if (!board) return { ok: false, runtime, reason: 'invalid-board' };
+    if (board.gameKey !== null) return { ok: false, runtime, reason: 'board-occupied' };
+    const boards = runtime.boards.map((b) => (b.boardNumber === n ? Object.assign({}, b, { gameKey: key }) : b));
+    return { ok: true, runtime: { boards }, reason: null };
+  }
+
+  /**
+   * Release a board back to UNASSIGNED. RELEASE means ONLY "this physical
+   * board is no longer assigned to this game": it is not completion, not
+   * abandonment, and changes no DartConnect/live state. No-op when already
+   * free. Returns { ok, runtime, reason } — never throws, never mutates input.
+   */
+  function releaseBoard(runtime, boardNumber) {
+    if (!runtime || !Array.isArray(runtime.boards)) return { ok: false, runtime, reason: 'no-runtime' };
+    const n = typeof boardNumber === 'number' ? Math.floor(boardNumber) : 0;
+    const board = runtime.boards.find((b) => b.boardNumber === n);
+    if (!board) return { ok: false, runtime, reason: 'invalid-board' };
+    if (board.gameKey === null) return { ok: true, runtime, reason: 'already-unassigned' };
+    const boards = runtime.boards.map((b) => (b.boardNumber === n ? Object.assign({}, b, { gameKey: null }) : b));
+    return { ok: true, runtime: { boards }, reason: null };
+  }
+
+  /**
+   * Board-count changes are protected:
+   * - increase: existing assignments are preserved exactly, new boards UNASSIGNED;
+   * - decrease: rejected while any removed board still owns a game, so an
+   *   assignment is never silently destroyed. Returns
+   *   { ok, runtime, reason } with reason 'occupied-boards-removed'
+   *   (carrying their numbers) when the reduction must be refused.
+   */
+  function resizeManagedBoards(runtime, newCount) {
+    if (!runtime || !Array.isArray(runtime.boards)) return { ok: false, runtime, reason: 'no-runtime' };
+    const count = typeof newCount === 'number' && newCount > 0 ? Math.floor(newCount) : 0;
+    if (count < 1 || count > MAX_MANAGED_BOARDS) return { ok: false, runtime, reason: 'invalid-count' };
+    if (count === runtime.boards.length) return { ok: true, runtime, reason: 'unchanged' };
+    if (count > runtime.boards.length) {
+      const boards = runtime.boards.slice();
+      for (let i = runtime.boards.length + 1; i <= count; i++) {
+        boards.push({ boardNumber: i, gameKey: null });
+      }
+      return { ok: true, runtime: { boards }, reason: null };
+    }
+    const removed = runtime.boards.slice(count);
+    const occupied = removed.filter((b) => b.gameKey !== null).map((b) => b.boardNumber);
+    if (occupied.length > 0) {
+      return { ok: false, runtime, reason: 'occupied-boards-removed', occupiedBoards: occupied };
+    }
+    return { ok: true, runtime: { boards: runtime.boards.slice(0, count) }, reason: null };
+  }
+
+  /**
+   * Ownership conflicts with factual state, computed for presentation.
+   * NEVER mutates: an assignment surviving a factual change (e.g. an
+   * assigned player is marked NOT HERE) is preserved and surfaced
+   * compactly instead of being silently rewritten.
+   */
+  function detectManagedBoardConflicts(runtime, view) {
+    const out = [];
+    if (!runtime || !Array.isArray(runtime.boards)) return out;
+    const absent = (view && view.absentIds) || [];
+    const fixtures = (view && view.fixtures) || [];
+    runtime.boards.forEach((b) => {
+      if (b.gameKey === null) return;
+      const game = fixtures.find((f) => boardKeyForGame(f) === b.gameKey);
+      if (!game) return;
+      const aId = game.playerA && game.playerA.id;
+      const bId = game.playerB && game.playerB.id;
+      if ((aId != null && absent.indexOf(aId) !== -1) || (bId != null && absent.indexOf(bId) !== -1)) {
+        out.push({ boardNumber: b.boardNumber, gameKey: b.gameKey, conflict: 'not-here' });
+      }
+    });
+    return out;
+  }
+
+  /* ============================== 6g. UI scale (pure steps + FIT) ============================== */
+
+  const UI_SCALE_VALUES = [75, 80, 90, 100, 110, 125];
+  const UI_SCALE_DEFAULT = 100;
+
+  /** Round any candidate to the nearest supported step; ties round down. Pure. */
+  function normalizeUiScale(value) {
+    const n = typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : NaN;
+    if (Number.isNaN(n)) return UI_SCALE_DEFAULT;
+    let best = UI_SCALE_VALUES[0];
+    for (let i = 1; i < UI_SCALE_VALUES.length; i++) {
+      const v = UI_SCALE_VALUES[i];
+      if (Math.abs(v - n) <= Math.abs(best - n)) best = v;
+    }
+    return best;
+  }
+
+  /** One supported step down/up, clamped at the boundaries. Pure. */
+  function previousUiScale(value) {
+    const n = normalizeUiScale(value);
+    const idx = UI_SCALE_VALUES.indexOf(n);
+    return idx <= 0 ? UI_SCALE_VALUES[0] : UI_SCALE_VALUES[idx - 1];
+  }
+
+  function nextUiScale(value) {
+    const n = normalizeUiScale(value);
+    const idx = UI_SCALE_VALUES.indexOf(n);
+    return idx === -1 || idx >= UI_SCALE_VALUES.length - 1
+      ? UI_SCALE_VALUES[UI_SCALE_VALUES.length - 1]
+      : UI_SCALE_VALUES[idx + 1];
+  }
+
+  /** Parse a raw stored preference value; anything unsupported -> 100. Pure. */
+  function parseStoredUiScale(raw) {
+    if (raw == null) return UI_SCALE_DEFAULT;
+    const n = typeof raw === 'number' ? raw : parseInt(String(raw).trim(), 10);
+    if (!Number.isFinite(n)) return UI_SCALE_DEFAULT;
+    return normalizeUiScale(n);
+  }
+
+  /**
+   * Scale preference storage wrappers (UI adapter; the only browser-adjacent
+   * part of the scale feature). The scale key is dedicated: it must never
+   * mix with league state, scheduler runtime state or board runtime state.
+   * loadUiScale returns a supported value or 100 — never throws.
+   */
+  function loadUiScale(storage) {
+    try {
+      const raw = storage && typeof storage.getItem === 'function' ? storage.getItem(SCALE_KEY) : null;
+      return parseStoredUiScale(raw);
+    } catch (e) {
+      warn('ui-scale read failed; using 100%:', e);
+      return UI_SCALE_DEFAULT;
+    }
+  }
+
+  /** Best-effort persist of the scale preference; never throws. */
+  function saveUiScale(storage, value) {
+    try {
+      const v = parseStoredUiScale(value);
+      if (storage && typeof storage.setItem === 'function') storage.setItem(SCALE_KEY, String(v));
+    } catch (e) {
+      warn('ui-scale write failed:', e);
+    }
+  }
+
+  /**
+   * Explicit FIT action: choose one supported step from viewport geometry.
+   * Considers height first (vertical density is the point of FIT), then
+   * width. Returns a supported value only; never below 75 or above 125.
+   * Pure — the caller supplies viewport dimensions; FIT computes exactly
+   * once per explicit selection and is never an active auto-layout mode.
+   */
+  function fitUiScale(viewportWidth, viewportHeight) {
+    const h = typeof viewportHeight === 'number' && Number.isFinite(viewportHeight) ? viewportHeight : 0;
+    const w = typeof viewportWidth === 'number' && Number.isFinite(viewportWidth) ? viewportWidth : 0;
+    let fit = UI_SCALE_DEFAULT;
+    if (h > 0 && h < 640) fit = 75;
+    else if (h < 720) fit = 80;
+    else if (h < 810) fit = 90;
+    if (w > 0 && w < 1100 && fit > 80) fit = 80;
+    else if (w > 0 && w < 1280 && fit > 90) fit = 90;
+    return fit;
+  }
+
+  /* ============================== 6h. Slice 3A UI planning adapter (browser-dependent; NOT scheduler core) ============================== */
 
   // Memory-only Slice 3A control state. Deliberately NOT persisted: every
   // page load starts fresh. Existing division/date/absent/theme persistence
@@ -2439,6 +2679,12 @@
    * be recommended — including live rows whose DartConnect match id is
    * unknown (projection-local key, never shown, never written back).
    *
+   * Managed-board ownership is factual operator state: when supplied, each
+   * owned game is also projected as an activeGame (boardNumber included),
+   * consuming player capacity in the planner exactly like live games. This
+   * is how the planner learns about ownership without any duplicated
+   * scheduling logic in the UI.
+   *
    * No board identity is invented: unmanaged capacity is capacity only.
    */
   function buildNightSession(schedulerUiState, data, state) {
@@ -2456,6 +2702,23 @@
         markerId: null,
         isExtra: false,
       }));
+    if (ui.managedBoardsEnabled && data.boardRuntime && Array.isArray(data.boardRuntime.boards)) {
+      data.boardRuntime.boards.forEach((b) => {
+        if (b.gameKey === null) return;
+        const game = sessionFixtures.find((f) => boardKeyForGame(f) === b.gameKey);
+        if (!game) return;
+        const liveIds = new Set(activeGames.filter((ag) => typeof ag.matchId === 'number').map((ag) => ag.matchId));
+        if (game.matchId != null && liveIds.has(game.matchId)) return;
+        activeGames.push({
+          matchId: game.matchId != null ? game.matchId : boardKeyForGame(game),
+          playerA: game.playerA,
+          playerB: game.playerB,
+          boardNumber: b.boardNumber,
+          markerId: null,
+          isExtra: false,
+        });
+      });
+    }
     return createNightSession({
       players: Array.isArray(data.roster) ? data.roster : [],
       fixtures: sessionFixtures,
@@ -2506,59 +2769,106 @@
   /* ============================== 7. Compact UI ============================== */
 
   const CSS = [
-    '.sssl-overlay{--bg:#0f172a;--panel:#1e293b;--roster:#111c30;--text:#e2e8f0;--muted:#b5c0cd;--faint:#94a3b8;--border:#334155;--control:#243244;--control-border:#475569;--accent:#14b8a6;--accent-ink:#06281c;--row-alt:rgba(148,163,184,0.08);--datebar:#243244;--datebar-text:#b5c0cd;--absent-bg:#3b2f14;--absent-border:#f59e0b;--absent-text:#fcd34d;--playing:#22c55e;--playing-bg:#166534;--playing-ink:#f0fdf4;--delayed:#f59e0b;--err-border:#ef4444;--err-bg:#3b2228;--err-text:#fecaca;position:fixed;inset:0;z-index:2147483647;background:var(--bg);color:var(--text);font-family:"Segoe UI",Arial,sans-serif;font-size:14px;display:flex;flex-direction:column}',
+    '.sssl-overlay{--bg:#0f172a;--panel:#1e293b;--roster:#111c30;--text:#e2e8f0;--muted:#b5c0cd;--faint:#94a3b8;--border:#334155;--control:#243244;--control-border:#475569;--accent:#14b8a6;--accent-ink:#06281c;--row-alt:rgba(148,163,184,0.08);--datebar:#243244;--datebar-text:#b5c0cd;--absent-bg:#3b2f14;--absent-border:#f59e0b;--absent-text:#fcd34d;--playing:#22c55e;--playing-bg:#166534;--playing-ink:#f0fdf4;--delayed:#f59e0b;--err-border:#ef4444;--err-bg:#3b2228;--err-text:#fecaca;--fs:14px;--fs-sm:13px;--fs-xs:12px;--fs-2xs:11px;--fs-3xs:10px;--pad-strip:5px 16px;--pad-row:3px 10px;--pad-btn:4px 12px;--pad-btn-sm:2px 10px;--pad-pane:8px 16px;--pad-pane-side:8px 12px;--pad-player:3px 8px;--pad-sel:4px 8px;--gap-bar:12px;--gap-ctrl:6px;--gap-strip:10px;--edge-reserve:96px;position:fixed;inset:0;z-index:2147483647;background:var(--bg);color:var(--text);font-family:"Segoe UI",Arial,sans-serif;font-size:var(--fs);display:flex;flex-direction:column}',
     '.sssl-overlay[data-theme="light"]{--bg:#f1f5f9;--panel:#ffffff;--roster:#f8fafc;--text:#0f172a;--muted:#475569;--faint:#64748b;--border:#cbd5e1;--control:#ffffff;--control-border:#94a3b8;--accent:#0d9488;--accent-ink:#ffffff;--row-alt:rgba(15,23,42,0.045);--datebar:#334155;--datebar-text:#f8fafc;--absent-bg:#fef3c7;--absent-border:#b45309;--absent-text:#92400e;--playing:#15803d;--playing-bg:#15803d;--playing-ink:#ffffff;--delayed:#b45309;--err-border:#dc2626;--err-bg:#fef2f2;--err-text:#991b1b;color-scheme:light}',
-    '.sssl-topbar{display:flex;align-items:center;gap:12px;padding:8px 16px;background:var(--panel);border-bottom:1px solid var(--border);flex:none}',
-    '.sssl-title{font-size:16px;font-weight:700;white-space:nowrap}',
-    '.sssl-divsel{display:flex;gap:6px;flex-wrap:wrap}',
-    '.sssl-divsel button{background:var(--control);color:var(--text);border:1px solid var(--control-border);border-radius:4px;padding:4px 12px;font-size:13px;cursor:pointer}',
+    '.sssl-overlay[data-zoom="75"]{--fs:10.5px;--fs-sm:9.75px;--fs-xs:9px;--fs-2xs:8.25px;--fs-3xs:7.5px;--pad-strip:3.75px 12px;--pad-row:2.25px 7.5px;--pad-btn:3px 9px;--pad-btn-sm:1.5px 7.5px;--pad-pane:6px 12px;--pad-pane-side:6px 9px;--pad-player:2.25px 6px;--pad-sel:3px 6px;--gap-bar:9px;--gap-ctrl:4.5px;--gap-strip:7.5px;--edge-reserve:72px}',
+    '.sssl-overlay[data-zoom="80"]{--fs:11.2px;--fs-sm:10.4px;--fs-xs:9.6px;--fs-2xs:8.8px;--fs-3xs:8px;--pad-strip:4px 12.8px;--pad-row:2.4px 8px;--pad-btn:3.2px 9.6px;--pad-btn-sm:1.6px 8px;--pad-pane:6.4px 12.8px;--pad-pane-side:6.4px 9.6px;--pad-player:2.4px 6.4px;--pad-sel:3.2px 6.4px;--gap-bar:9.6px;--gap-ctrl:4.8px;--gap-strip:8px;--edge-reserve:76.8px}',
+    '.sssl-overlay[data-zoom="90"]{--fs:12.6px;--fs-sm:11.7px;--fs-xs:10.8px;--fs-2xs:9.9px;--fs-3xs:9px;--pad-strip:4.5px 14.4px;--pad-row:2.7px 9px;--pad-btn:3.6px 10.8px;--pad-btn-sm:1.8px 9px;--pad-pane:7.2px 14.4px;--pad-pane-side:7.2px 10.8px;--pad-player:2.7px 7.2px;--pad-sel:3.6px 7.2px;--gap-bar:10.8px;--gap-ctrl:5.4px;--gap-strip:9px;--edge-reserve:86.4px}',
+    '.sssl-overlay[data-zoom="110"]{--fs:15.4px;--fs-sm:14.3px;--fs-xs:13.2px;--fs-2xs:12.1px;--fs-3xs:11px;--pad-strip:5.5px 17.6px;--pad-row:3.3px 11px;--pad-btn:4.4px 13.2px;--pad-btn-sm:2.2px 11px;--pad-pane:8.8px 17.6px;--pad-pane-side:8.8px 13.2px;--pad-player:3.3px 8.8px;--pad-sel:4.4px 8.8px;--gap-bar:13.2px;--gap-ctrl:6.6px;--gap-strip:11px;--edge-reserve:105.6px}',
+    '.sssl-overlay[data-zoom="125"]{--fs:17.5px;--fs-sm:16.25px;--fs-xs:15px;--fs-2xs:13.75px;--fs-3xs:12.5px;--pad-strip:6.25px 20px;--pad-row:3.75px 12.5px;--pad-btn:5px 15px;--pad-btn-sm:2.5px 12.5px;--pad-pane:10px 20px;--pad-pane-side:10px 15px;--pad-player:3.75px 10px;--pad-sel:5px 10px;--gap-bar:15px;--gap-ctrl:7.5px;--gap-strip:12.5px;--edge-reserve:120px}',
+    '.sssl-topbar{display:flex;align-items:center;gap:var(--gap-bar);padding:var(--pad-strip);background:var(--panel);border-bottom:1px solid var(--border);flex:none}',
+    '.sssl-title{font-size:calc(var(--fs) + 2px);font-weight:700;white-space:nowrap}',
+    '.sssl-divsel{display:flex;gap:var(--gap-ctrl);flex-wrap:wrap}',
+    '.sssl-divsel button{background:var(--control);color:var(--text);border:1px solid var(--control-border);border-radius:4px;padding:var(--pad-btn);font-size:var(--fs-sm);cursor:pointer}',
     '.sssl-divsel button.on{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:700}',
     '.sssl-topbar .spacer{flex:1}',
-    '.sssl-btn{background:var(--control);color:var(--text);border:1px solid var(--control-border);border-radius:4px;padding:4px 12px;font-size:13px;cursor:pointer;white-space:nowrap}',
+    '.sssl-btn{background:var(--control);color:var(--text);border:1px solid var(--control-border);border-radius:4px;padding:var(--pad-btn);font-size:var(--fs-sm);cursor:pointer;white-space:nowrap}',
     '.sssl-btn:hover{border-color:var(--accent)}',
-    '.sssl-datelabel{font-size:13px;color:var(--muted);white-space:nowrap}',
-    '.sssl-datesel{background:var(--control);color:var(--text);border:1px solid var(--control-border);border-radius:4px;padding:4px 8px;font-size:13px;max-width:190px}',
+    '.sssl-datelabel{font-size:var(--fs-sm);color:var(--muted);white-space:nowrap}',
+    '.sssl-datesel{background:var(--control);color:var(--text);border:1px solid var(--control-border);border-radius:4px;padding:var(--pad-sel);font-size:var(--fs-sm);max-width:190px}',
+    '.sssl-zoom{display:flex;align-items:center;gap:4px}',
+    '.sssl-zoom button{background:var(--control);color:var(--text);border:1px solid var(--control-border);border-radius:4px;padding:var(--pad-btn-sm);font-size:var(--fs-sm);cursor:pointer;min-width:24px;text-align:center}',
+    '.sssl-zoom button:hover{border-color:var(--accent)}',
+    '.sssl-zoom .val{font-size:var(--fs-sm);color:var(--muted);min-width:42px;text-align:center;white-space:nowrap}',
     '.sssl-main{flex:1;display:flex;min-height:0}',
-    '.sssl-fixtures{flex:1 1 77%;overflow-y:auto;padding:8px 16px;min-width:0}',
-    '.sssl-roster{flex:0 0 23%;min-width:220px;max-width:250px;border-left:1px solid var(--border);overflow-y:auto;padding:8px 12px;background:var(--roster)}',
-    '.sssl-datebar{background:var(--datebar);color:var(--datebar-text);font-size:12px;font-weight:700;padding:3px 10px;border-radius:4px;margin:10px 0 4px;position:sticky;top:0}',
-    '.sssl-datebar .delayed{color:var(--delayed);font-weight:700;margin-left:8px;font-size:11px}',
-    '.sssl-row{display:flex;align-items:center;padding:3px 10px;border-radius:3px;line-height:1.35}',
+    '.sssl-fixtures{flex:1 1 77%;overflow-y:auto;padding:var(--pad-pane);min-width:0}',
+    '.sssl-roster{flex:0 0 23%;min-width:220px;max-width:250px;border-left:1px solid var(--border);overflow-y:auto;padding:var(--pad-pane-side);background:var(--roster)}',
+    '.sssl-datebar{background:var(--datebar);color:var(--datebar-text);font-size:var(--fs-xs);font-weight:700;padding:3px var(--gap-strip);border-radius:4px;margin:10px 0 4px;position:sticky;top:0}',
+    '.sssl-datebar .delayed{color:var(--delayed);font-weight:700;margin-left:8px;font-size:var(--fs-2xs)}',
+    '.sssl-row{display:flex;align-items:center;padding:var(--pad-row);border-radius:3px;line-height:1.35;position:relative}',
+    // Matchup centre invariance: right-side status/action controls are
+    // absolute overlays and never consume flex width. The two name spans
+    // keep EQUAL flex growth and carry SYMMETRIC edge reserves, so the
+    // pa/vs/pb centre point is identical with no indicator, BOARD N ×,
+    // PLAYING, or both. The reserve also ellipsises long names before
+    // they can run underneath any right-edge overlay.
+    '.sssl-row .sssl-pa{margin-left:var(--edge-reserve)}',
+    '.sssl-row .sssl-pb{margin-right:var(--edge-reserve)}',
     '.sssl-row.alt{background:var(--row-alt)}',
     '.sssl-pa{flex:1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-    '.sssl-vs{flex:0 0 44px;text-align:center;font-weight:700;font-size:12px;color:var(--faint)}',
+    '.sssl-vs{flex:0 0 44px;text-align:center;font-weight:700;font-size:var(--fs-xs);color:var(--faint)}',
     '.sssl-pb{flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-    '.sssl-playing{position:absolute;right:10px;top:50%;transform:translateY(-50%);margin-left:0;color:var(--playing);font-weight:700;font-size:11px;white-space:nowrap}',
+    '.sssl-playing{position:absolute;right:10px;top:50%;transform:translateY(-50%);margin-left:0;color:var(--playing);font-weight:700;font-size:var(--fs-2xs);white-space:nowrap}',
     '.sssl-row.playing{position:relative;background:var(--playing-bg)}',
     '.sssl-row.playing .sssl-pa,.sssl-row.playing .sssl-pb{font-weight:700;color:var(--playing-ink)}',
     '.sssl-row.playing .sssl-vs,.sssl-row.playing .sssl-playing{color:var(--playing-ink)}',
-    '.sssl-rhead{font-size:12px;font-weight:700;color:var(--muted);margin:2px 0 6px}',
-    '.sssl-player{display:block;width:100%;text-align:left;background:transparent;border:1px solid transparent;border-radius:4px;color:var(--text);font-size:13px;padding:3px 8px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.sssl-row.playing .sssl-vs,.sssl-row.playing .sssl-playing{color:var(--playing-ink)}',
+    // Deterministic right-edge overlay slots (never in-flow):
+    //   slot 1 (right:10px)              = ● PLAYING
+    //   slot 2 (right:edge-reserve)      = BOARD N × on a playing row,
+    //                                      or the assign select on an
+    //                                      unassigned playing row
+    //   BOARD N × on a non-playing row   = right:10px (slot 1, free)
+    // Slot 2 scales with zoom so PLAYING and the controls cannot overlap.
+    '.sssl-row .bown{position:absolute;right:10px;top:50%;transform:translateY(-50%);display:inline-flex;align-items:center;gap:4px}',
+    '.sssl-row.playing .bown{right:var(--edge-reserve)}',
+    '.sssl-row .bassign-slot{position:absolute;right:var(--edge-reserve);top:50%;transform:translateY(-50%)}',
+    '.sssl-row .bown .sssl-brel{padding:1px 6px;min-width:18px;text-align:center;line-height:1.2}',
+    '.sssl-rhead{font-size:var(--fs-xs);font-weight:700;color:var(--muted);margin:2px 0 6px}',
+    '.sssl-player{display:block;width:100%;text-align:left;background:transparent;border:1px solid transparent;border-radius:4px;color:var(--text);font-size:var(--fs-sm);padding:var(--pad-player);cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.sssl-player:hover{border-color:var(--control-border)}',
     '.sssl-player.absent{background:var(--absent-bg);border-color:var(--absent-border);color:var(--absent-text);font-weight:600}',
-    '.sssl-note{font-size:11px;color:var(--faint);margin-top:8px}',
-    '.sssl-error{margin:16px;padding:12px;border:1px solid var(--err-border);border-radius:6px;background:var(--err-bg);color:var(--err-text);font-size:13px;white-space:pre-wrap}',
-    '.sssl-empty{padding:24px;color:var(--faint);font-size:13px}',
+    '.sssl-note{font-size:var(--fs-2xs);color:var(--faint);margin-top:8px}',
+    '.sssl-error{margin:16px;padding:12px;border:1px solid var(--err-border);border-radius:6px;background:var(--err-bg);color:var(--err-text);font-size:var(--fs-sm);white-space:pre-wrap}',
+    '.sssl-empty{padding:24px;color:var(--faint);font-size:var(--fs-sm)}',
     // Slice 3A scheduler strip + advice rows.
-    '.sssl-ctrlstrip{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:5px 16px;background:var(--panel);border-bottom:1px solid var(--border);font-size:12px;color:var(--muted);flex:none}',
-    '.sssl-ctrlstrip .grp{display:flex;align-items:center;gap:6px;white-space:nowrap}',
-    '.sssl-ctrlstrip .lbl{font-size:11px;color:var(--muted)}',
-    '.sssl-ctrlstrip button{background:var(--control);color:var(--text);border:1px solid var(--control-border);border-radius:4px;padding:2px 10px;font-size:12px;cursor:pointer}',
+    '.sssl-ctrlstrip{display:flex;align-items:center;gap:var(--gap-strip);flex-wrap:wrap;padding:var(--pad-strip);background:var(--panel);border-bottom:1px solid var(--border);font-size:var(--fs-xs);color:var(--muted);flex:none}',
+    '.sssl-ctrlstrip .grp{display:flex;align-items:center;gap:var(--gap-ctrl);white-space:nowrap}',
+    '.sssl-ctrlstrip .lbl{font-size:var(--fs-2xs);color:var(--muted)}',
+    '.sssl-ctrlstrip button{background:var(--control);color:var(--text);border:1px solid var(--control-border);border-radius:4px;padding:var(--pad-btn-sm);font-size:var(--fs-xs);cursor:pointer}',
     '.sssl-ctrlstrip button:hover{border-color:var(--accent)}',
     '.sssl-ctrlstrip button.on{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:700}',
-    '.sssl-ctrlstrip .hint{font-size:11px;color:var(--faint);margin-left:auto;white-space:nowrap}',
-    '.sssl-advicehead{font-size:11px;font-weight:700;letter-spacing:0.08em;color:var(--muted);margin:12px 0 4px}',
-    '.sssl-advicehead .badge{display:inline-block;padding:0 6px;border-radius:8px;margin-right:6px;font-size:10px;color:var(--accent-ink);background:var(--accent)}',
+    '.sssl-ctrlstrip .hint{font-size:var(--fs-2xs);color:var(--faint);margin-left:auto;white-space:nowrap}',
+    '.sssl-advicehead{font-size:var(--fs-2xs);font-weight:700;letter-spacing:0.08em;color:var(--muted);margin:12px 0 4px}',
+    '.sssl-advicehead .badge{display:inline-block;padding:0 6px;border-radius:8px;margin-right:6px;font-size:var(--fs-3xs);color:var(--accent-ink);background:var(--accent)}',
     '.sssl-advicehead.projected .badge{background:var(--border);color:var(--text)}',
-    '.sssl-advice{display:flex;align-items:center;padding:3px 10px;border-radius:3px;border:1px dashed var(--accent);margin-bottom:2px}',
-    '.sssl-advice .mark{flex:0 0 26px;font-weight:700;font-size:11px;color:var(--accent);text-align:center}',
+    '.sssl-advice{display:flex;align-items:center;padding:var(--pad-row);border-radius:3px;border:1px dashed var(--accent);margin-bottom:2px}',
+    '.sssl-advice .mark{flex:0 0 26px;font-weight:700;font-size:var(--fs-2xs);color:var(--accent);text-align:center}',
     '.sssl-advice.projected{border-style:dotted;border-color:var(--faint);opacity:0.9}',
     '.sssl-advice.projected .mark{color:var(--muted)}',
     '.sssl-advice .pa{flex:1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-    '.sssl-advice .vs{flex:0 0 44px;text-align:center;font-weight:700;font-size:12px;color:var(--faint)}',
+    '.sssl-advice .vs{flex:0 0 44px;text-align:center;font-weight:700;font-size:var(--fs-xs);color:var(--faint)}',
     '.sssl-advice .pb{flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-    '.sssl-advice .note{font-size:11px;color:var(--muted);white-space:nowrap;margin-left:8px}',
-    '.sssl-advice .proj{font-size:10px;color:var(--faint);margin-left:10px;white-space:nowrap}',
+    '.sssl-advice .note{font-size:var(--fs-2xs);color:var(--muted);white-space:nowrap;margin-left:8px}',
+    '.sssl-advice .proj{font-size:var(--fs-3xs);color:var(--faint);margin-left:10px;white-space:nowrap}',
+    '.sssl-advice .ctrl{margin-left:8px;flex:none}',
+    // Slice 3B managed physical boards.
+    '.sssl-boards{margin-top:2px}',
+    '.sssl-boards .brow{display:flex;align-items:center;padding:var(--pad-row);border-radius:3px;border:1px solid var(--border);margin-bottom:2px;min-height:calc(var(--fs) + 8px)}',
+    '.sssl-boards .brow .num{flex:0 0 22px;font-weight:700;font-size:var(--fs-xs);color:var(--muted)}',
+    '.sssl-boards .brow .names{flex:1;display:flex;align-items:center;overflow:hidden;white-space:nowrap}',
+    '.sssl-boards .brow .names .pa{flex:1;text-align:right;overflow:hidden;text-overflow:ellipsis}',
+    '.sssl-boards .brow .names .vs{flex:0 0 32px;text-align:center;font-weight:700;font-size:var(--fs-xs);color:var(--faint)}',
+    '.sssl-boards .brow .names .pb{flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis}',
+    '.sssl-boards .brow .un{color:var(--faint);font-size:var(--fs-2xs);letter-spacing:0.06em}',
+    '.sssl-boards .brow .rel{margin-left:8px;flex:none}',
+    '.sssl-bassign{background:var(--control);color:var(--text);border:1px solid var(--control-border);border-radius:4px;padding:1px 6px;font-size:var(--fs-xs);cursor:pointer;max-width:96px}',
+    '.sssl-bassign:hover{border-color:var(--accent)}',
+    '.sssl-bassign:disabled{opacity:0.5;cursor:default}',
+    '.sssl-brel{background:var(--control);color:var(--text);border:1px solid var(--control-border);border-radius:4px;padding:1px 8px;font-size:var(--fs-2xs);cursor:pointer;white-space:nowrap}',
+    '.sssl-brel:hover{border-color:var(--delayed)}',
+    '.sssl-chip{display:inline-block;font-size:var(--fs-3xs);font-weight:700;letter-spacing:0.06em;padding:0 6px;border-radius:8px;margin-right:6px;color:var(--accent-ink);background:var(--accent);vertical-align:1px}',
+    '.sssl-chip.warn{background:var(--absent-border);color:#fff}',
   ].join('\n');
 
   function el(tag, cls, text) {
@@ -2568,10 +2878,42 @@
     return node;
   }
 
+  /** Compact board <select> offering only currently free boards ('B1'…). */
+  function boardSelectEl(rtv, onPick) {
+    const sel = document.createElement('select');
+    sel.className = 'sssl-bassign';
+    sel.setAttribute('aria-label', 'Assign to board');
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'BOARD ▾';
+    sel.appendChild(placeholder);
+    const free = getAvailableManagedBoards(rtv);
+    free.forEach((b) => {
+      const opt = document.createElement('option');
+      opt.value = String(b.boardNumber);
+      opt.textContent = 'Board ' + b.boardNumber;
+      sel.appendChild(opt);
+    });
+    if (free.length === 0) {
+      sel.disabled = true;
+      placeholder.textContent = 'NO FREE BOARD';
+    }
+    sel.addEventListener('change', () => {
+      const n = parseInt(sel.value, 10);
+      sel.value = '';
+      if (Number.isSafeInteger(n) && n >= 1) onPick(n);
+    });
+    return sel;
+  }
+
   let activeSchedulerUi = null;
+  let activeBoardRuntime = null;
 
   function render(state, storage, data, liveNote, diagnostics, schedulerUi) {
     if (!schedulerUi) schedulerUi = activeSchedulerUi || defaultSchedulerUiState();
+    if (!data.boardRuntime) data.boardRuntime = createManagedBoardRuntime(schedulerUi.boardCount);
+    const rtv = data.boardRuntime;
+    activeBoardRuntime = rtv;
     closeOverlay();
     const style = document.createElement('style');
     style.textContent = CSS;
@@ -2580,6 +2922,7 @@
     const overlay = el('div', 'sssl-overlay');
     overlay.id = 'sssl-match-night';
     overlay.dataset.theme = state.theme === 'light' ? 'light' : 'dark';
+    overlay.dataset.zoom = String(schedulerUi.zoom);
 
     const topbar = el('div', 'sssl-topbar');
     topbar.appendChild(el('div', 'sssl-title', 'Match Night'));
@@ -2617,6 +2960,42 @@
       topbar.appendChild(select);
     }
     topbar.appendChild(el('div', 'spacer'));
+    // Application UI scale: presentation only, persisted as a preference.
+    // Never touches scheduler, factual or NOT HERE state.
+    const zoomWrap = el('div', 'sssl-zoom');
+    const zoomLabel = el('span', 'val', schedulerUi.zoom + '%');
+    const zoomOut = el('button', '', '−');
+    zoomOut.type = 'button';
+    zoomOut.title = 'Smaller interface';
+    zoomOut.setAttribute('aria-label', 'Decrease interface scale');
+    zoomOut.addEventListener('click', () => {
+      schedulerUi.zoom = previousUiScale(schedulerUi.zoom);
+      saveUiScale(storage, schedulerUi.zoom);
+      render(state, storage, data, liveNote, diagnostics, schedulerUi);
+    });
+    const zoomIn = el('button', '', '+');
+    zoomIn.type = 'button';
+    zoomIn.title = 'Larger interface';
+    zoomIn.setAttribute('aria-label', 'Increase interface scale');
+    zoomIn.addEventListener('click', () => {
+      schedulerUi.zoom = nextUiScale(schedulerUi.zoom);
+      saveUiScale(storage, schedulerUi.zoom);
+      render(state, storage, data, liveNote, diagnostics, schedulerUi);
+    });
+    const zoomFit = el('button', '', 'FIT');
+    zoomFit.type = 'button';
+    zoomFit.title = 'Fit interface to this window (one explicit step)';
+    zoomFit.setAttribute('aria-label', 'Fit interface to window');
+    zoomFit.addEventListener('click', () => {
+      schedulerUi.zoom = fitUiScale(window.innerWidth, window.innerHeight);
+      saveUiScale(storage, schedulerUi.zoom);
+      render(state, storage, data, liveNote, diagnostics, schedulerUi);
+    });
+    zoomWrap.appendChild(zoomOut);
+    zoomWrap.appendChild(zoomLabel);
+    zoomWrap.appendChild(zoomIn);
+    zoomWrap.appendChild(zoomFit);
+    topbar.appendChild(zoomWrap);
     const themeBtn = el('button', 'sssl-btn', state.theme === 'light' ? '☀ Light' : '☾ Dark');
     themeBtn.type = 'button';
     themeBtn.title = 'Switch appearance (theme is saved)';
@@ -2679,13 +3058,20 @@
     strip.appendChild(el('span', 'lbl', 'Managed Boards'));
     const mbGroup = el('span', 'grp');
     [[false, 'OFF', 'Advisory scheduling without physical board identity (effective capacity only)'],
-     [true, 'ON', 'Plan against a fixed number of boards (no board assignment in this slice)']].forEach(([on, label, tip]) => {
+     [true, 'ON', 'Plan and operate against physical boards you assign explicitly (runtime only)']].forEach(([on, label, tip]) => {
       const b = el('button', schedulerUi.managedBoardsEnabled === on ? 'on' : '', label);
       b.type = 'button';
       b.title = tip;
       b.setAttribute('aria-pressed', schedulerUi.managedBoardsEnabled === on ? 'true' : 'false');
       b.addEventListener('click', () => {
         schedulerUi.managedBoardsEnabled = on;
+        // OFF only hides board presentation; the runtime assignments are
+        // factual operator state and survive until an explicit release or
+        // a protected board-count change. ON in the same session reveals
+        // them again.
+        if (on && !data.boardRuntime) {
+          data.boardRuntime = createManagedBoardRuntime(schedulerUi.boardCount);
+        }
         render(state, storage, data, liveNote, diagnostics, schedulerUi);
       });
       mbGroup.appendChild(b);
@@ -2700,12 +3086,35 @@
         b.title = n + ' board' + (n === 1 ? '' : 's') + ' available for the plan';
         b.setAttribute('aria-pressed', schedulerUi.boardCount === n ? 'true' : 'false');
         b.addEventListener('click', () => {
+          const res = resizeManagedBoards(data.boardRuntime, n);
+          if (!res.ok) {
+            data.boardNotice = 'Board ' + res.occupiedBoards.join(' and Board ') +
+              ' still assigned — RELEASE first, then reduce.';
+            return;
+          }
+          data.boardNotice = null;
           schedulerUi.boardCount = n;
+          data.boardRuntime = res.runtime;
           render(state, storage, data, liveNote, diagnostics, schedulerUi);
         });
         boardGroup.appendChild(b);
       }
       strip.appendChild(boardGroup);
+      if (data.boardNotice) {
+        const notice = el('span', 'hint');
+        notice.style.color = 'var(--delayed)';
+        notice.textContent = data.boardNotice;
+        strip.appendChild(notice);
+      }
+      // Compact, non-destructive conflict surfacing: an assignment whose
+      // game now involves a NOT HERE player is preserved and flagged here
+      // (its fixture row is hidden by the factual NOT HERE filter).
+      detectManagedBoardConflicts(rtv, { fixtures: data.fixtures, absentIds: state.absentIds }).forEach((c) => {
+        const cf = el('span', 'hint');
+        cf.style.color = 'var(--delayed)';
+        cf.textContent = 'BOARD ' + c.boardNumber + ': assigned game has a NOT HERE player';
+        strip.appendChild(cf);
+      });
     }
     strip.appendChild(el('span', 'hint', 'Scheduler advice only — factual state is unchanged'));
     overlay.appendChild(strip);
@@ -2751,6 +3160,30 @@
           row.appendChild(el('span', 'pa', g.playerA.name));
           row.appendChild(el('span', 'vs', 'vs'));
           row.appendChild(el('span', 'pb', g.playerB.name));
+          if (schedulerUi.managedBoardsEnabled) {
+            const assignedBoard = findBoardOwningGame(rtv, g);
+            if (assignedBoard) {
+              const chip = el('span', 'note');
+              chip.appendChild(el('span', 'chip', 'BOARD ' + assignedBoard.boardNumber));
+              row.appendChild(chip);
+              const rel = el('button', 'sssl-brel', 'RELEASE');
+              rel.type = 'button';
+              rel.title = 'Unassign this game from Board ' + assignedBoard.boardNumber + ' (the game itself is unchanged)';
+              rel.addEventListener('click', () => {
+                releaseBoard(rtv, assignedBoard.boardNumber);
+                render(state, storage, data, liveNote, diagnostics, schedulerUi);
+              });
+              row.appendChild(rel);
+            } else {
+              const ctrl = el('span', 'ctrl');
+              ctrl.appendChild(boardSelectEl(rtv, (n) => {
+                const res = assignGameToBoard(rtv, g, n, { absentIds: Array.from(absent) });
+                if (res.ok) data.boardRuntime = res.runtime;
+                render(state, storage, data, liveNote, diagnostics, schedulerUi);
+              }));
+              row.appendChild(ctrl);
+            }
+          }
           listPane.appendChild(row);
         });
       }
@@ -2790,6 +3223,36 @@
       row.appendChild(el('span', 'sssl-pa', f.playerA.name));
       row.appendChild(el('span', 'sssl-vs', 'vs'));
       row.appendChild(el('span', 'sssl-pb', f.playerB.name));
+      if (schedulerUi.managedBoardsEnabled) {
+        const assignedBoard = findBoardOwningGame(rtv, f);
+        if (assignedBoard) {
+          // Factual operator ownership marker on the fixture row itself:
+          // it means ONLY "assigned to physical Board N". It is never
+          // PLAYING, completion, a DartConnect start or a result, and ×
+          // performs the same factual release as every other release path.
+          const own = el('span', 'bown');
+          own.appendChild(el('span', 'chip', 'BOARD ' + assignedBoard.boardNumber));
+          const x = el('button', 'sssl-brel', '×');
+          x.type = 'button';
+          x.title = 'Release Board ' + assignedBoard.boardNumber + ' (assignment only; the fixture itself is unchanged)';
+          x.setAttribute('aria-label', 'Release Board ' + assignedBoard.boardNumber);
+          x.addEventListener('click', () => {
+            releaseBoard(rtv, assignedBoard.boardNumber);
+            render(state, storage, data, liveNote, diagnostics, schedulerUi);
+          });
+          own.appendChild(x);
+          row.appendChild(own);
+        } else if (f.status === 'playing') {
+          // Reliable DartConnect live rows may be associated with a board.
+          const ctrl = el('span', 'bassign-slot');
+          ctrl.appendChild(boardSelectEl(rtv, (n) => {
+            const res = assignGameToBoard(rtv, f, n, { absentIds: Array.from(absent) });
+            if (res.ok) data.boardRuntime = res.runtime;
+            render(state, storage, data, liveNote, diagnostics, schedulerUi);
+          }));
+          row.appendChild(ctrl);
+        }
+      }
       if (f.status === 'playing') row.appendChild(el('span', 'sssl-playing', '● PLAYING'));
       row.title = [f.dateLabel, f.roundLabel, f.sessionLabel].filter(Boolean).join(' · ');
       listPane.appendChild(row);
@@ -2893,6 +3356,8 @@
   function boot(windowObj, doc, storage, transport) {
     // Slice 3A scheduler control state: memory only, defaults every load.
     const schedulerUi = defaultSchedulerUiState();
+    // Slice 3B UI scale: presentation preference, persisted independently.
+    schedulerUi.zoom = loadUiScale(storage);
     // League identity comes from the schedule page URL (V1.1 LeagueContext).
     // boot only runs on schedule pages, so this is non-null in practice.
     const league = parseLeagueContext(windowObj && windowObj.location && windowObj.location.href);
@@ -3053,6 +3518,7 @@
   const api = {
     VERSION,
     THEME_KEY,
+    SCALE_KEY,
     storageKeyForLeague,
     migrateLegacyState,
     discoverDivisions,
@@ -3131,6 +3597,25 @@
     defaultSchedulerUiState,
     buildNightSession,
     buildSchedulerAdvice,
+    MANAGED_BOARD_UNASSIGNED,
+    MAX_MANAGED_BOARDS,
+    boardKeyForGame,
+    createManagedBoardRuntime,
+    findBoardOwningGame,
+    getAvailableManagedBoards,
+    assignGameToBoard,
+    releaseBoard,
+    resizeManagedBoards,
+    detectManagedBoardConflicts,
+    UI_SCALE_VALUES,
+    UI_SCALE_DEFAULT,
+    normalizeUiScale,
+    previousUiScale,
+    nextUiScale,
+    parseStoredUiScale,
+    fitUiScale,
+    loadUiScale,
+    saveUiScale,
   };
 
   api.getDiagnostics = function () {

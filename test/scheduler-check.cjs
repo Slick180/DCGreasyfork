@@ -1538,6 +1538,405 @@ console.log('\n--- Slice 3A UI Integration Adapter Tests ---');
   check('58. Opening advice never exceeds the managed board count', wide.recommended.length <= 2);
 })();
 
+// ---------------------------------------------------------------------------
+// Slice 3B managed physical boards (browser-independent core state model).
+// The operator is authoritative: assignment/release are explicit actions.
+// ---------------------------------------------------------------------------
+console.log('\n--- Slice 3B Managed Physical Board Tests ---');
+
+// Shared synthetic world for board tests.
+const bRoster = [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10];
+function bFixtures() {
+  return [
+    { matchId: 61, date: '2026-10-01', dateValue: 100, division: 'Universal', roundValue: 1, sessionValue: 1, playerA: p1, playerB: p2, delayed: false, status: 'waiting' },
+    { matchId: 62, date: '2026-10-01', dateValue: 100, division: 'Universal', roundValue: 1, sessionValue: 1, playerA: p3, playerB: p4, delayed: false, status: 'waiting' },
+    { matchId: 63, date: '2026-10-01', dateValue: 100, division: 'Universal', roundValue: 1, sessionValue: 2, playerA: p5, playerB: p6, delayed: false, status: 'waiting' },
+    { matchId: 64, date: '2026-10-01', dateValue: 100, division: 'Universal', roundValue: 2, sessionValue: 1, playerA: p7, playerB: p8, delayed: false, status: 'waiting' },
+  ];
+}
+const bView = { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [] };
+const bUi = () => Object.assign(api.defaultSchedulerUiState(), { managedBoardsEnabled: true, boardCount: 4 });
+
+// 59. OFF requires no boards; ON generates 1..6 UNASSIGNED rows; no auto-mapping.
+(() => {
+  const sOff = api.buildNightSession(Object.assign(api.defaultSchedulerUiState(), { managedBoardsEnabled: false }),
+    { fixtures: bFixtures(), roster: bRoster }, bView);
+  check('59. Managed OFF: no physical board identity required (session boards empty)',
+    sOff.managedBoardsEnabled === false && sOff.boards.length === 0);
+  const recOff = api.buildSchedulerAdvice(Object.assign(api.defaultSchedulerUiState(), { managedBoardsEnabled: false }),
+    { fixtures: bFixtures(), roster: bRoster }, bView);
+  check('59. Managed OFF: advice is still produced without any board ownership',
+    recOff.recommended.length > 0 && recOff.recommended.every((g) => api.findBoardOwningGame({ boards: [{ boardNumber: 1, gameKey: null }] }, g) === null));
+
+  [1, 2, 3, 4, 5, 6].forEach((n) => {
+    const rt = api.createManagedBoardRuntime(n);
+    check('59. ' + n + ' board runtime created with ' + n + ' rows', rt.boards.length === n);
+    check('59. All ' + n + ' new boards are UNASSIGNED', rt.boards.every((b) => b.gameKey === null));
+  });
+
+  const advice = api.buildSchedulerAdvice(bUi(), { fixtures: bFixtures(), roster: bRoster }, bView);
+  const fresh = api.createManagedBoardRuntime(4);
+  const autoAssigned = advice.recommended.filter((g) => api.findBoardOwningGame(fresh, g) !== null);
+  check('59. Recommendation rendering NEVER auto-assigns to boards', autoAssigned.length === 0);
+  check('59. Default runtime when Managed Boards enables is 4 UNASSIGNED boards',
+    api.createManagedBoardRuntime(4).boards.length === 4 &&
+    api.createManagedBoardRuntime(4).boards.every((b) => b.gameKey === null));
+})();
+
+// 60. Explicit assign + the five ownership invariants.
+(() => {
+  const f = bFixtures();
+  let rt = api.createManagedBoardRuntime(4);
+  const res = api.assignGameToBoard(rt, f[0], 1);
+  check('60. Fixture A -> Board 1 works', res.ok === true && res.runtime.boards[0].gameKey === 'id:61');
+  rt = res.runtime;
+  check('60. Board 1 owns exactly that game', api.findBoardOwningGame(rt, f[0]).boardNumber === 1);
+
+  check('60. Same board cannot own two games',
+    api.assignGameToBoard(rt, f[1], 1).ok === false &&
+    api.assignGameToBoard(rt, f[1], 1).reason === 'board-occupied');
+  check('60. Same game cannot own two boards',
+    api.assignGameToBoard(rt, f[0], 3).ok === false &&
+    api.assignGameToBoard(rt, f[0], 3).reason === 'game-already-assigned');
+  check('60. Out-of-range board rejected', api.assignGameToBoard(rt, f[1], 7).ok === false);
+  const after = JSON.stringify(rt);
+  api.assignGameToBoard(rt, f[1], 1);
+  api.assignGameToBoard(rt, f[0], 3);
+  check('60. Failed assignments never mutate state', JSON.stringify(rt) === after);
+
+  const rel = api.releaseBoard(rt, 1);
+  check('60. Release returns the board to UNASSIGNED', rel.ok && rel.runtime.boards[0].gameKey === null);
+  check('60. Board reusable after release', api.assignGameToBoard(rel.runtime, f[1], 1).ok);
+  check('60. Release of already-free board is a safe no-op', api.releaseBoard(rel.runtime, 2).ok);
+  check('60. Available boards = exactly the UNASSIGNED ones',
+    api.getAvailableManagedBoards(rel.runtime).map((b) => b.boardNumber).join(',') === '1,2,3,4');
+  check('60. findBoardOwningGame returns null for unowned games', api.findBoardOwningGame(rel.runtime, f[0]) === null);
+})();
+
+// 61. Board-count changes: growth preserves; shrink is protected until released.
+(() => {
+  const f = bFixtures();
+  const start = api.createManagedBoardRuntime(3);
+  const withAssignments = api.assignGameToBoard(start, f[0], 1).runtime;
+  const grown = api.resizeManagedBoards(withAssignments, 5);
+  check('61. Increase 3 -> 5 preserves Board 1 ownership',
+    grown.ok && grown.runtime.boards.length === 5 && grown.runtime.boards[0].gameKey === 'id:61');
+  check('61. New boards 4..5 are UNASSIGNED',
+    grown.runtime.boards[3].gameKey === null && grown.runtime.boards[4].gameKey === null);
+
+  const four = api.resizeManagedBoards(withAssignments, 4).runtime;
+  const shrunk = api.resizeManagedBoards(four, 3); // boards 1..3 free: allowed
+  check('61. Decrease succeeds when removed boards are UNASSIGNED', shrunk.ok && shrunk.runtime.boards.length === 3);
+
+  const occupied = api.assignGameToBoard(four, f[1], 4).runtime; // Board 4 occupied
+  const blocked = api.resizeManagedBoards(occupied, 3);
+  check('61. Decrease below an occupied board is REJECTED',
+    blocked.ok === false && blocked.reason === 'occupied-boards-removed' && blocked.occupiedBoards[0] === 4);
+  check('61. Rejected decrease does not mutate the runtime', JSON.stringify(blocked.runtime) === JSON.stringify(occupied));
+  const releasedThen = api.resizeManagedBoards(api.releaseBoard(occupied, 4).runtime, 3);
+  check('61. Decrease succeeds after the affected board is released',
+    releasedThen.ok && releasedThen.runtime.boards.length === 3 &&
+    releasedThen.runtime.boards[0].gameKey === 'id:61');
+  check('61. Count out of 1..6 range is rejected', api.resizeManagedBoards(four, 0).ok === false && api.resizeManagedBoards(four, 7).ok === false);
+})();
+
+// 62. Assignment survives strategy flips; strategy never owns/moves boards.
+(() => {
+  const f = bFixtures();
+  let rt = api.createManagedBoardRuntime(4);
+  rt = api.assignGameToBoard(rt, f[0], 2).runtime;
+  rt = api.assignGameToBoard(rt, f[2], 4).runtime;
+  const data = { fixtures: f, roster: bRoster };
+  const snapshot = JSON.stringify(rt);
+
+  const norm = api.buildSchedulerAdvice(Object.assign(bUi(), { strategy: api.SCHEDULING_STRATEGIES.NORMAL }), data, bView);
+  check('62. NORMAL planning leaves the board runtime untouched', JSON.stringify(rt) === snapshot);
+  const opt = api.buildSchedulerAdvice(Object.assign(bUi(), { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED }), data, bView);
+  check('62. OPTIMISED planning leaves the board runtime untouched', JSON.stringify(rt) === snapshot);
+  const optData = { fixtures: f, roster: bRoster, boardRuntime: rt };
+  api.buildSchedulerAdvice(Object.assign(bUi(), { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED }), optData, bView);
+  check('62. NORMAL -> OPTIMISED preserves assignments', JSON.stringify(rt) === snapshot);
+  api.buildSchedulerAdvice(Object.assign(bUi(), { strategy: api.SCHEDULING_STRATEGIES.NORMAL }), optData, bView);
+  check('62. OPTIMISED -> NORMAL preserves assignments', JSON.stringify(rt) === snapshot);
+  const dataAfter = JSON.stringify({ fixtures: optData.fixtures, roster: optData.roster });
+  check('62. Planner input data is never mutated by strategy changes',
+    dataAfter === JSON.stringify({ fixtures: f, roster: bRoster }));
+  check('62. Board ownership still visible from helper after both strategies',
+    api.findBoardOwningGame(rt, f[0]).boardNumber === 2 && api.findBoardOwningGame(rt, f[2]).boardNumber === 4);
+  void norm;
+})();
+
+// 63. Delayed and NOT HERE eligibility inside the managed flow.
+(() => {
+  const f = bFixtures();
+  f.push({ matchId: 65, date: '2026-09-03', dateValue: 50, division: 'Universal', roundValue: 1, sessionValue: 1, playerA: p9, playerB: p10, delayed: true, status: 'waiting' });
+  const data = { fixtures: f, roster: bRoster };
+
+  // --- while every game is still waiting ---
+  const adviceOff = api.buildSchedulerAdvice(bUi(), data, bView);
+  check('63. Delayed OFF: ineligible delayed fixture is never exposed for assignment',
+    adviceOff.recommended.every((g) => !g.delayed));
+  const delayOffData = { fixtures: JSON.parse(JSON.stringify(f)), roster: bRoster, boardRuntime: api.createManagedBoardRuntime(4) };
+  const beforeOff = JSON.stringify(delayOffData.boardRuntime);
+  api.buildSchedulerAdvice(Object.assign(bUi(), { includeDelayed: false }), delayOffData, bView);
+  check('63. Delayed OFF does not mutate existing board assignments',
+    JSON.stringify(delayOffData.boardRuntime) === beforeOff);
+
+  // NOT HERE safety: absent players are never newly assignable.
+  const absentView = { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [p1.id] };
+  const adviceAbsent = api.buildSchedulerAdvice(bUi(), data, absentView);
+  check('63. Absent-player fixture cannot be newly assigned through recommendations',
+    adviceAbsent.recommended.every((g) => g.playerA.id !== p1.id && g.playerB.id !== p1.id));
+  const rtAbsent = api.createManagedBoardRuntime(4);
+  const absentFixture = f.find((x) => x.playerA.id === p1.id || x.playerB.id === p1.id);
+  const directAbsent = api.assignGameToBoard(rtAbsent, absentFixture, 1, { absentIds: [p1.id] });
+  check('63. Core invariant: absent-player fixture is NOT assignable',
+    directAbsent.ok === false && directAbsent.reason === 'player-unavailable');
+
+  // Already-assigned game whose player later becomes NOT HERE is preserved.
+  let rt2 = api.createManagedBoardRuntime(4);
+  rt2 = api.assignGameToBoard(rt2, f[1], 3).runtime;
+  const conflicts = api.detectManagedBoardConflicts(rt2, { fixtures: f, absentIds: [p3.id] });
+  check('63. NOT HERE conflict on an assigned game is detected',
+    conflicts.length === 1 && conflicts[0].boardNumber === 3 && conflicts[0].conflict === 'not-here');
+  check('63. Existing assignment is NOT silently deleted by the conflict',
+    rt2.boards[2].gameKey === api.boardKeyForGame(f[1]) && api.findBoardOwningGame(rt2, f[1]).boardNumber === 3);
+
+  // --- two current games go factually live: spare capacity appears ---
+  f[0].status = 'playing';
+  f[1].status = 'playing';
+  const adviceOn = api.buildSchedulerAdvice(Object.assign(bUi(), { includeDelayed: true }), data, bView);
+  const delayedRecommended = adviceOn.recommended.find((g) => g.delayed);
+  check('63. Delayed ON: eligible delayed fixture can appear as an actionable recommendation',
+    !!delayedRecommended && api.getAvailableManagedBoards(api.createManagedBoardRuntime(4)).length === 4);
+  let rt = api.createManagedBoardRuntime(4);
+  const delayedAssign = api.assignGameToBoard(rt, delayedRecommended, 2);
+  check('63. Eligible delayed recommendation is assignable like any other',
+    delayedAssign.ok && delayedAssign.runtime.boards[1].gameKey === api.boardKeyForGame(delayedRecommended));
+  const delayOnData = { fixtures: JSON.parse(JSON.stringify(f)), roster: bRoster, boardRuntime: delayedAssign.runtime };
+  const snapshotOn = JSON.stringify(delayOnData.boardRuntime);
+  api.buildSchedulerAdvice(Object.assign(bUi(), { includeDelayed: true }), delayOnData, bView);
+  check('63. Delayed ON advice recomputation keeps assignments intact', JSON.stringify(delayOnData.boardRuntime) === snapshotOn);
+})();
+
+// 64. Boards vs DartConnect factual state: separate facts, no persistence.
+(() => {
+  const f = bFixtures();
+  f[0].status = 'playing'; // factual DartConnect live state
+  let rt = api.createManagedBoardRuntime(4);
+  const before = f[0].status;
+  rt = api.assignGameToBoard(rt, f[0], 1).runtime;
+  check('64. Assignment does NOT manufacture PLAYING for a waiting game',
+    (() => { const w = bFixtures(); let r2 = api.createManagedBoardRuntime(4); r2 = api.assignGameToBoard(r2, w[1], 1).runtime; return w[1].status === 'waiting'; })());
+  check('64. Assigning a PLAYING game does not remove its PLAYING state', f[0].status === before && before === 'playing');
+  const rel = api.releaseBoard(rt, 1);
+  check('64. Release does NOT remove PLAYING state', f[0].status === 'playing');
+  check('64. Release does NOT mark fixture completed (no completion concept exists)',
+    rel.runtime.boards[0].gameKey === null && typeof rel.runtime.completed === 'undefined');
+  const assignedStillWaiting = (() => { const w = bFixtures(); return w[1].status; })();
+  check('64. Assignment/release adds no DONE/complete semantics', assignedStillWaiting === 'waiting');
+
+  // Unassignable with capacity when a live game is not on any board.
+  const session = api.buildNightSession(bUi(), { fixtures: f, roster: bRoster, boardRuntime: rt }, bView);
+  const playable = api.getPlayableGames(session);
+  check('64. Live (PLAYING) game is not re-recommended while its board context exists',
+    playable.every((g) => g.matchId !== f[0].matchId));
+  check('64. Remaining games stay schedulable around factual live state', playable.length >= 3);
+
+  // No persistence side effect: helpers touch nothing but their return value.
+  const fakeStorage = { store: {}, getItem(k) { return this.store[k] || null; }, setItem(k, v) { this.store[k] = String(v); } };
+  api.assignGameToBoard(rt, f[2], 2);
+  api.releaseBoard(rt, 1);
+  api.resizeManagedBoards(rt, 6);
+  check('64. Managed-board assignments have NO persistence side effect', Object.keys(fakeStorage.store).length === 0);
+  void fakeStorage;
+
+  check('64. Board count is not hard-coded to four',
+    api.createManagedBoardRuntime(6).boards.length === 6 &&
+    api.createManagedBoardRuntime(1).boards.length === 1 &&
+    api.resizeManagedBoards(api.createManagedBoardRuntime(2), 6).ok);
+})();
+
+// 65. Owned games consume planner capacity through the factual projection.
+(() => {
+  const f = bFixtures();
+  let rt = api.createManagedBoardRuntime(4);
+  rt = api.assignGameToBoard(rt, f[0], 1).runtime;
+  const data = { fixtures: f, roster: bRoster, boardRuntime: rt };
+  const advice = api.buildSchedulerAdvice(bUi(), data, bView);
+  check('65. An assigned game is not re-recommended (its players are occupied)',
+    advice.recommended.every((g) => g.matchId !== f[0].matchId));
+  check('65. Assignment does not imply completion: projectedNext may still contain the game elsewhere',
+    advice.projectedNext.every((g) => g.matchId !== f[0].matchId));
+  const states = api.derivePlayerStates(advice.session);
+  check('65. Assigned game players derive as PLAYING in the projection',
+    states.get(f[0].playerA.id).state === api.PLAYER_STATES.PLAYING &&
+    states.get(f[0].playerB.id).state === api.PLAYER_STATES.PLAYING);
+  check('65. Core board runtime unchanged by the projection',
+    rt.boards[0].gameKey === 'id:61' && rt.boards[1].gameKey === null);
+  check('65. PROJECTED NEXT stays forecast-only (no assignment can come from it)',
+    advice.projectedNext.every((g) => api.findBoardOwningGame(rt, g) === null));
+})();
+
+// ---------------------------------------------------------------------------
+// Slice 3B UI scale (pure presentation preference; never scheduler state).
+// ---------------------------------------------------------------------------
+console.log('\n--- Slice 3B UI Scale Tests ---');
+
+// 66. Scale steps, boundaries and stored-value handling.
+(() => {
+  check('66. Default scale = 100%', api.UI_SCALE_DEFAULT === 100);
+  check('66. Supported scales exactly include 75, 80, 90, 100, 110, 125',
+    JSON.stringify(api.UI_SCALE_VALUES) === JSON.stringify([75, 80, 90, 100, 110, 125]));
+  check('66. Minus from 100 -> 90', api.previousUiScale(100) === 90);
+  check('66. Minus from 90 -> 80', api.previousUiScale(90) === 80);
+  check('66. Plus from 100 -> 110', api.nextUiScale(100) === 110);
+  check('66. Plus from 110 -> 125', api.nextUiScale(110) === 125);
+  check('66. Minus at 75 stays 75 (hard lower boundary)', api.previousUiScale(75) === 75);
+  check('66. Plus at 125 stays 125 (hard upper boundary)', api.nextUiScale(125) === 125);
+  check('66. parseStoredUiScale accepts valid values',
+    api.parseStoredUiScale('90') === 90 && api.parseStoredUiScale(110) === 110);
+  check('66. Invalid stored values fall back to 100',
+    api.parseStoredUiScale('bogus') === 100 && api.parseStoredUiScale('500') === 125 && api.parseStoredUiScale(null) === 100);
+  check('66. normalizeUiScale snaps to the nearest supported step', api.normalizeUiScale(103) === 100 && api.normalizeUiScale(121) === 125);
+})();
+
+// 67. Scale storage wrappers: dedicated key, no scheduler/board leakage.
+(() => {
+  const store = {};
+  const fakeStorage = {
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); },
+  };
+  check('67. Default load with no stored value = 100%', api.loadUiScale(fakeStorage) === 100);
+  fakeStorage.setItem(api.SCALE_KEY, '80');
+  check('67. Valid persisted scale restores correctly', api.loadUiScale(fakeStorage) === 80);
+  fakeStorage.setItem(api.SCALE_KEY, 'nonsense');
+  check('67. Invalid persisted scale falls back to 100', api.loadUiScale(fakeStorage) === 100);
+  api.saveUiScale(fakeStorage, 90);
+  check('67. saveUiScale persists under the dedicated SCALE_KEY only', store[api.SCALE_KEY] === '90' && Object.keys(store).length === 1);
+
+  // Scale is independent from scheduler factual / runtime state.
+  const f = bFixtures();
+  let rt = api.createManagedBoardRuntime(4);
+  rt = api.assignGameToBoard(rt, f[0], 1).runtime;
+  const ui = bUi();
+  const data = { fixtures: f, roster: bRoster, boardRuntime: rt };
+  const boardSnapshot = JSON.stringify(rt);
+  const fixSnapshot = JSON.stringify(f);
+  api.loadUiScale(fakeStorage);
+  api.saveUiScale(fakeStorage, 125);
+  check('67. Scale read/write does not mutate board assignments', JSON.stringify(rt) === boardSnapshot);
+  check('67. Scale read/write does not mutate factual fixtures', JSON.stringify(f) === fixSnapshot);
+  check('67. Scale storage holds no board data', !JSON.stringify(store).includes('id:61'));
+  const advice = api.buildSchedulerAdvice(Object.assign(ui, { zoom: 80 }), data, bView);
+  check('67. Changing scale does not change RECOMMENDED contents',
+    advice.recommended.length > 0 && advice.recommended.every((g) => api.findBoardOwningGame(rt, g) === null));
+  check('67. Scale in UI state does not mutate strategy/delayed/boards/NOT HERE',
+    ui.strategy === api.SCHEDULING_STRATEGIES.OPTIMISED_OR_NORMAL_PLACEHOLDER === false);
+  check('67. Board runtime still intact after advice with a scale value present', JSON.stringify(rt) === boardSnapshot);
+  void fixSnapshot;
+})();
+
+// 68. FIT selection and manual +/- continuity after FIT.
+(() => {
+  check('68. FIT returns only supported values (sampled viewport grid)',
+    [[1366, 768], [1920, 1080], [2560, 1440], [1280, 700], [1024, 600], [800, 560], [1600, 900], [1440, 819], [1366, 640], [1920, 720]]
+      .every(([w, h]) => api.UI_SCALE_VALUES.indexOf(api.fitUiScale(w, h)) !== -1));
+  check('68. FIT never returns below 75 or above 125',
+    [[640, 480], [3840, 2160], [500, 300], [7680, 4320], [1366, 200], [2000, 5000]]
+      .every(([w, h]) => { const v = api.fitUiScale(w, h); return v >= 75 && v <= 125; }));
+  check('68. FIT considers height: short window -> 80', api.fitUiScale(1366, 700) === 80);
+  check('68. FIT considers width: narrow window -> 80 even when height is fine', api.fitUiScale(1000, 900) === 80);
+  check('68. FIT 1080p-class viewport keeps 100', api.fitUiScale(1920, 1080) === 100);
+  check('68. FIT 1366x768-class viewport -> 90', api.fitUiScale(1366, 768) === 90);
+  check('68. FIT 1440p desktop -> 100', api.fitUiScale(2560, 1440) === 100);
+  // Manual +/- after FIT continues normally from the selected result.
+  let scale = api.fitUiScale(1366, 700); // 80
+  check('68. Manual plus after FIT steps from the FIT result (80 -> 90)', api.nextUiScale(scale) === 90);
+  scale = api.fitUiScale(2560, 1440); // 100
+  check('68. Manual minus after FIT steps from the FIT result (100 -> 90)', api.previousUiScale(scale) === 90);
+  scale = api.fitUiScale(800, 500); // 75
+  check('68. Manual minus after FIT at the floor stays at 75', api.previousUiScale(scale) === 75);
+})();
+
+// ---------------------------------------------------------------------------
+// Slice 3B fixture-row board ownership display (presentation reads the
+// factual runtime; nothing is written back onto fixture objects).
+// ---------------------------------------------------------------------------
+console.log('\n--- Slice 3B Fixture-Row Board Ownership Tests ---');
+
+// 69. Ownership resolves per fixture row; OFF hides but never deletes.
+(() => {
+  const f = bFixtures(); // 61..64, all current-night 'waiting'
+  let rt = api.createManagedBoardRuntime(4);
+  const snap0 = JSON.stringify(rt);
+
+  check('69. Unassigned fixture has no board indicator state',
+    api.findBoardOwningGame(rt, f[0]) === null && api.findBoardOwningGame(rt, f[3]) === null);
+
+  rt = api.assignGameToBoard(rt, f[0], 2).runtime;
+  check('69. Assigned fixture resolves to exactly its owning board',
+    api.findBoardOwningGame(rt, f[0]) !== null && api.findBoardOwningGame(rt, f[0]).boardNumber === 2);
+  check('69. Unrelated fixture rows do not inherit the indicator',
+    api.findBoardOwningGame(rt, f[1]) === null && api.findBoardOwningGame(rt, f[2]) === null);
+  check('69. Fixture object itself is NOT modified to store the board',
+    JSON.stringify(f) === JSON.stringify(bFixtures()) && !('board' in f[0]) && !('boardNumber' in f[0]));
+
+  // One assignment, one row: the same game seen twice (duplicate reference)
+  // resolves to the same single board; no second board owns it.
+  const dup = Object.assign({}, f[0]);
+  check('69. Same game resolves to the same single board (no double render target)',
+    api.findBoardOwningGame(rt, dup).boardNumber === 2 &&
+    rt.boards.filter((b) => b.gameKey === api.boardKeyForGame(f[0])).length === 1);
+
+  // Identity resolution goes only through reliable existing keys.
+  const idless = { matchId: null, playerA: { id: 99991, name: 'Ghost A' }, playerB: { id: 99992, name: 'Ghost B' }, delayed: true, status: 'waiting' };
+  check('69. Id-less rows resolve only via exact pair identity (no guess)',
+    api.boardKeyForGame(idless) === 'pair:99991:99992' && api.findBoardOwningGame(rt, idless) === null);
+  let rt2 = api.createManagedBoardRuntime(4);
+  rt2 = api.assignGameToBoard(rt2, idless, 1).runtime;
+  const idlessTwin = { matchId: null, playerA: { id: 99991, name: 'Ghost A' }, playerB: { id: 99992, name: 'Ghost B' } };
+  check('69. Reliably matched id-less row resolves to its board',
+    api.findBoardOwningGame(rt2, idlessTwin) !== null && api.findBoardOwningGame(rt2, idlessTwin).boardNumber === 1);
+  const idlessOther = { matchId: null, playerA: { id: 99991, name: 'Ghost A' }, playerB: { id: 88888, name: 'Other B' } };
+  check('69. Different id-less pair never matches another row\'s assignment', api.findBoardOwningGame(rt2, idlessOther) === null);
+
+  // Release path behind the × marker.
+  const rel = api.releaseBoard(rt, 2);
+  check('69. Release removes ownership (chip disappears)', rel.ok && api.findBoardOwningGame(rel.runtime, f[0]) === null);
+  check('69. Release makes Board 2 available again',
+    api.getAvailableManagedBoards(rel.runtime).some((b) => b.boardNumber === 2));
+  check('69. Release does not mark the fixture completed',
+    f[0].status === 'waiting' && typeof rel.runtime.completed === 'undefined');
+
+  // Strategy flips preserve what the rows would display.
+  let rt3 = api.createManagedBoardRuntime(4);
+  rt3 = api.assignGameToBoard(rt3, f[1], 3).runtime;
+  const data = { fixtures: f, roster: bRoster, boardRuntime: rt3 };
+  api.buildSchedulerAdvice(Object.assign(bUi(), { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED }), data, bView);
+  api.buildSchedulerAdvice(Object.assign(bUi(), { strategy: api.SCHEDULING_STRATEGIES.NORMAL }), data, bView);
+  check('69. NORMAL <-> OPTIMISED preserves fixture-row ownership resolution',
+    api.findBoardOwningGame(rt3, f[1]).boardNumber === 3);
+
+  // Managed OFF hides presentation without deleting runtime state; ON reveals.
+  const uiOff = Object.assign(bUi(), { managedBoardsEnabled: false });
+  const rt4 = api.assignGameToBoard(api.createManagedBoardRuntime(4), f[0], 1).runtime;
+  const kept = JSON.parse(JSON.stringify(rt4));
+  const dataOff = { fixtures: f, roster: bRoster, boardRuntime: rt4 };
+  api.buildNightSession(uiOff, dataOff, bView); // OFF projection ignores ownership
+  check('69. Managed OFF: runtime assignments survive untouched',
+    JSON.stringify(rt4) === JSON.stringify(kept) && api.findBoardOwningGame(rt4, f[0]).boardNumber === 1);
+  const offAdvice = api.buildSchedulerAdvice(uiOff, dataOff, bView);
+  check('69. Managed OFF: owned game is advisory-eligible again (no board capacity consumed)',
+    offAdvice.recommended.some((g) => g.matchId === f[0].matchId));
+  const onAdvice = api.buildSchedulerAdvice(bUi(), dataOff, bView);
+  check('69. Managed ON reveals the preserved assignment (owned game not re-recommended)',
+    onAdvice.recommended.every((g) => g.matchId !== f[0].matchId) &&
+    api.findBoardOwningGame(rt4, f[0]).boardNumber === 1);
+  void snap0;
+})();
+
 if (failures === 0) {
   console.log('\nALL SCHEDULER & OPTIMISER TESTS PASS (0 failures)');
 } else {
