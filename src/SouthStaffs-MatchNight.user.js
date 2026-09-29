@@ -2413,6 +2413,96 @@
     };
   }
 
+  /* ============================== 6f. Slice 3A UI planning adapter (browser-dependent; NOT scheduler core) ============================== */
+
+  // Memory-only Slice 3A control state. Deliberately NOT persisted: every
+  // page load starts fresh. Existing division/date/absent/theme persistence
+  // is untouched.
+  function defaultSchedulerUiState() {
+    return {
+      strategy: SCHEDULING_STRATEGIES.NORMAL,
+      includeDelayed: false,
+      managedBoardsEnabled: false,
+      boardCount: 4, // UI default only; never hard-coded into scheduler logic.
+    };
+  }
+
+  /**
+   * UI adapter: project the factual night (parsed fixtures + live PLAYING
+   * flags + Not Here) into a planner NightSession.
+   *
+   * READ-ONLY on `fixtures`: the session gets shallow copies, and statuses
+   * pass through exactly as the factual pipeline wrote them ('playing' is
+   * what the scheduler core already understands). Each live fixture is
+   * additionally projected as a session activeGame so its players occupy
+   * capacity (PLAYING in derivePlayerStates) and the game itself can never
+   * be recommended — including live rows whose DartConnect match id is
+   * unknown (projection-local key, never shown, never written back).
+   *
+   * No board identity is invented: unmanaged capacity is capacity only.
+   */
+  function buildNightSession(schedulerUiState, data, state) {
+    const ui = schedulerUiState || defaultSchedulerUiState();
+    const boardCount = Math.min(6, Math.max(1, Math.floor(ui.boardCount) || 4));
+    const factual = Array.isArray(data.fixtures) ? data.fixtures : [];
+    const sessionFixtures = factual.map((f) => Object.assign({}, f));
+    const activeGames = sessionFixtures
+      .filter((f) => f.status === 'playing')
+      .map((f) => ({
+        matchId: f.matchId != null ? f.matchId : 'live-' + (f.playerA && f.playerA.id) + '-' + (f.playerB && f.playerB.id),
+        playerA: f.playerA,
+        playerB: f.playerB,
+        boardNumber: null,
+        markerId: null,
+        isExtra: false,
+      }));
+    return createNightSession({
+      players: Array.isArray(data.roster) ? data.roster : [],
+      fixtures: sessionFixtures,
+      selectedDivision: state.division,
+      selectedMatchDate: state.selectedMatchDate,
+      managedBoardsEnabled: !!ui.managedBoardsEnabled,
+      boardCount,
+      includeDelayed: !!ui.includeDelayed,
+      absentIds: Array.isArray(state.absentIds) ? state.absentIds.slice() : [],
+      activeGames,
+      completedMatchIds: [],
+    });
+  }
+
+  /**
+   * UI adapter around getProjectedRunningOrder: what the operator should do
+   * now (advice), the planner's projected next wave, and how many further
+   * games are planned. Slice 3A deliberately does NOT render the complete
+   * projected-later plan, planner scores, internal reason codes or
+   * robustness calculations. Recommendable fixtures keep the 'waiting'
+   * status needed for the advice row rendering below.
+   */
+  function buildSchedulerAdvice(schedulerUiState, data, state) {
+    const ui = schedulerUiState || defaultSchedulerUiState();
+    const session = buildNightSession(ui, data, state);
+    const plan = getProjectedRunningOrder(session, { strategy: ui.strategy });
+    const advice = {
+      playableCount: plan.unschedulableFixtures.length === 0 && plan.projectedWaves.length > 0
+        ? (plan.projectedWaves[0] && plan.projectedWaves[0].games.length) || 0
+        : 0,
+      recommended: [],
+      projectedNext: [],
+      laterCount: 0,
+      session,
+    };
+    // Only genuinely waiting games are shown as advice: anything the core
+    // let through with a non-waiting status (never expected at this
+    // boundary) would be factual state, not recommendation material.
+    plan.openingRecommendations.forEach((r) => {
+      if (r.game && r.game.status === 'waiting') advice.recommended.push(r.game);
+    });
+    advice.projectedNext = plan.projectedNextPriorities.filter((g) => g.status === 'waiting');
+    advice.laterCount = Math.max(0, plan.metrics.totalScheduledGames
+      - advice.recommended.length - advice.projectedNext.length);
+    return advice;
+  }
+
   /* ============================== 7. Compact UI ============================== */
 
   const CSS = [
@@ -2449,6 +2539,26 @@
     '.sssl-note{font-size:11px;color:var(--faint);margin-top:8px}',
     '.sssl-error{margin:16px;padding:12px;border:1px solid var(--err-border);border-radius:6px;background:var(--err-bg);color:var(--err-text);font-size:13px;white-space:pre-wrap}',
     '.sssl-empty{padding:24px;color:var(--faint);font-size:13px}',
+    // Slice 3A scheduler strip + advice rows.
+    '.sssl-ctrlstrip{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:5px 16px;background:var(--panel);border-bottom:1px solid var(--border);font-size:12px;color:var(--muted);flex:none}',
+    '.sssl-ctrlstrip .grp{display:flex;align-items:center;gap:6px;white-space:nowrap}',
+    '.sssl-ctrlstrip .lbl{font-size:11px;color:var(--muted)}',
+    '.sssl-ctrlstrip button{background:var(--control);color:var(--text);border:1px solid var(--control-border);border-radius:4px;padding:2px 10px;font-size:12px;cursor:pointer}',
+    '.sssl-ctrlstrip button:hover{border-color:var(--accent)}',
+    '.sssl-ctrlstrip button.on{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:700}',
+    '.sssl-ctrlstrip .hint{font-size:11px;color:var(--faint);margin-left:auto;white-space:nowrap}',
+    '.sssl-advicehead{font-size:11px;font-weight:700;letter-spacing:0.08em;color:var(--muted);margin:12px 0 4px}',
+    '.sssl-advicehead .badge{display:inline-block;padding:0 6px;border-radius:8px;margin-right:6px;font-size:10px;color:var(--accent-ink);background:var(--accent)}',
+    '.sssl-advicehead.projected .badge{background:var(--border);color:var(--text)}',
+    '.sssl-advice{display:flex;align-items:center;padding:3px 10px;border-radius:3px;border:1px dashed var(--accent);margin-bottom:2px}',
+    '.sssl-advice .mark{flex:0 0 26px;font-weight:700;font-size:11px;color:var(--accent);text-align:center}',
+    '.sssl-advice.projected{border-style:dotted;border-color:var(--faint);opacity:0.9}',
+    '.sssl-advice.projected .mark{color:var(--muted)}',
+    '.sssl-advice .pa{flex:1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.sssl-advice .vs{flex:0 0 44px;text-align:center;font-weight:700;font-size:12px;color:var(--faint)}',
+    '.sssl-advice .pb{flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.sssl-advice .note{font-size:11px;color:var(--muted);white-space:nowrap;margin-left:8px}',
+    '.sssl-advice .proj{font-size:10px;color:var(--faint);margin-left:10px;white-space:nowrap}',
   ].join('\n');
 
   function el(tag, cls, text) {
@@ -2458,7 +2568,10 @@
     return node;
   }
 
-  function render(state, storage, data, liveNote, diagnostics) {
+  let activeSchedulerUi = null;
+
+  function render(state, storage, data, liveNote, diagnostics, schedulerUi) {
+    if (!schedulerUi) schedulerUi = activeSchedulerUi || defaultSchedulerUiState();
     closeOverlay();
     const style = document.createElement('style');
     style.textContent = CSS;
@@ -2477,7 +2590,7 @@
       b.addEventListener('click', () => {
         state.division = div;
         saveState(storage, state, data.storeKey);
-        render(state, storage, data, liveNote, diagnostics);
+        render(state, storage, data, liveNote, diagnostics, activeSchedulerUi);
         if (activeLiveCtx) refreshLive(activeLiveCtx);
       });
       divsel.appendChild(b);
@@ -2498,7 +2611,7 @@
       select.addEventListener('change', () => {
         state.selectedMatchDate = select.value || null;
         saveState(storage, state, data.storeKey);
-        render(state, storage, data, liveNote, diagnostics);
+        render(state, storage, data, liveNote, diagnostics, activeSchedulerUi);
         if (activeLiveCtx) refreshLive(activeLiveCtx);
       });
       topbar.appendChild(select);
@@ -2511,7 +2624,7 @@
     themeBtn.addEventListener('click', () => {
       state.theme = state.theme === 'light' ? 'dark' : 'light';
       saveState(storage, state);
-      render(state, storage, data, liveNote, diagnostics);
+      render(state, storage, data, liveNote, diagnostics, activeSchedulerUi);
     });
     topbar.appendChild(themeBtn);
     const refresh = el('button', 'sssl-btn', '↻ Refresh');
@@ -2525,6 +2638,78 @@
     topbar.appendChild(exit);
     overlay.appendChild(topbar);
 
+    /* Slice 3A scheduler control strip (memory-only state). Toggling never
+     * mutates factual state; it only changes the advisory plan computed
+     * from the existing scheduler/planner core. */
+    const strip = el('div', 'sssl-ctrlstrip');
+    strip.setAttribute('role', 'toolbar');
+    strip.setAttribute('aria-label', 'Scheduler options');
+    strip.appendChild(el('span', 'lbl', 'Scheduling'));
+    const stratGroup = el('span', 'grp');
+    [SCHEDULING_STRATEGIES.NORMAL, SCHEDULING_STRATEGIES.OPTIMISED].forEach((mode) => {
+      const b = el('button', schedulerUi.strategy === mode ? 'on' : '',
+        mode === SCHEDULING_STRATEGIES.NORMAL ? 'NORMAL' : 'OPTIMISED');
+      b.type = 'button';
+      b.title = mode === SCHEDULING_STRATEGIES.NORMAL
+        ? 'Plan in fixture order (advice only; factual state is unchanged)'
+        : 'Plan globally for fewer waves (advice only; factual state is unchanged)';
+      b.setAttribute('aria-pressed', schedulerUi.strategy === mode ? 'true' : 'false');
+      b.addEventListener('click', () => {
+        schedulerUi.strategy = mode;
+        render(state, storage, data, liveNote, diagnostics, schedulerUi);
+      });
+      stratGroup.appendChild(b);
+    });
+    strip.appendChild(stratGroup);
+    strip.appendChild(el('span', 'lbl', 'Delayed'));
+    const delayGroup = el('span', 'grp');
+    [[false, 'OFF', 'Delayed (postponed) games stay out of the scheduling advice'],
+     [true, 'ON', 'Eligible delayed games may enter the scheduling advice']].forEach(([on, label, tip]) => {
+      const b = el('button', schedulerUi.includeDelayed === on ? 'on' : '', label);
+      b.type = 'button';
+      b.title = tip;
+      b.setAttribute('aria-pressed', schedulerUi.includeDelayed === on ? 'true' : 'false');
+      b.addEventListener('click', () => {
+        schedulerUi.includeDelayed = on;
+        render(state, storage, data, liveNote, diagnostics, schedulerUi);
+      });
+      delayGroup.appendChild(b);
+    });
+    strip.appendChild(delayGroup);
+    strip.appendChild(el('span', 'lbl', 'Managed Boards'));
+    const mbGroup = el('span', 'grp');
+    [[false, 'OFF', 'Advisory scheduling without physical board identity (effective capacity only)'],
+     [true, 'ON', 'Plan against a fixed number of boards (no board assignment in this slice)']].forEach(([on, label, tip]) => {
+      const b = el('button', schedulerUi.managedBoardsEnabled === on ? 'on' : '', label);
+      b.type = 'button';
+      b.title = tip;
+      b.setAttribute('aria-pressed', schedulerUi.managedBoardsEnabled === on ? 'true' : 'false');
+      b.addEventListener('click', () => {
+        schedulerUi.managedBoardsEnabled = on;
+        render(state, storage, data, liveNote, diagnostics, schedulerUi);
+      });
+      mbGroup.appendChild(b);
+    });
+    strip.appendChild(mbGroup);
+    if (schedulerUi.managedBoardsEnabled) {
+      const boardGroup = el('span', 'grp');
+      boardGroup.appendChild(el('span', 'lbl', 'Boards'));
+      for (let n = 1; n <= 6; n++) {
+        const b = el('button', schedulerUi.boardCount === n ? 'on' : '', String(n));
+        b.type = 'button';
+        b.title = n + ' board' + (n === 1 ? '' : 's') + ' available for the plan';
+        b.setAttribute('aria-pressed', schedulerUi.boardCount === n ? 'true' : 'false');
+        b.addEventListener('click', () => {
+          schedulerUi.boardCount = n;
+          render(state, storage, data, liveNote, diagnostics, schedulerUi);
+        });
+        boardGroup.appendChild(b);
+      }
+      strip.appendChild(boardGroup);
+    }
+    strip.appendChild(el('span', 'hint', 'Scheduler advice only — factual state is unchanged'));
+    overlay.appendChild(strip);
+
     const main = el('div', 'sssl-main');
     const listPane = el('div', 'sssl-fixtures');
     const rosterPane = el('div', 'sssl-roster');
@@ -2536,6 +2721,58 @@
       listPane.appendChild(el('div', 'sssl-error', 'Could not parse the DartConnect schedule.\n' + (diagnostics || '')));
     } else if (shown.length === 0) {
       listPane.appendChild(el('div', 'sssl-empty', 'No outstanding fixtures for ' + state.division + '.'));
+    }
+
+    /* Slice 3A: scheduler ADVICE above the factual rows. RECOMMENDED is
+     * what is actionable now; PROJECTED NEXT is the planner's next
+     * projected possibility. Neither is factual match state, neither can
+     * start games or mutate anything, and no marker identity is shown:
+     * projected marker confidence is a structural rating, not an
+     * assignment. */
+    let advice = null;
+    if (!data.parseFailed && shown.length > 0) {
+      try {
+        advice = buildSchedulerAdvice(schedulerUi, data, state);
+      } catch (e) {
+        warn('scheduler advice failed (factual display unaffected):', e);
+      }
+    }
+    if (advice) {
+      if (advice.recommended.length > 0) {
+        const head = el('div', 'sssl-advicehead');
+        head.appendChild(el('span', 'badge', 'RECOMMENDED'));
+        head.appendChild(document.createTextNode(
+          'start now' + (advice.recommended.length > 1 ? ' · up to ' + advice.recommended.length + ' games' : '') +
+          (advice.laterCount > 0 ? ' · ' + advice.laterCount + ' planned later' : '')));
+        listPane.appendChild(head);
+        advice.recommended.forEach((g) => {
+          const row = el('div', 'sssl-advice');
+          row.appendChild(el('span', 'mark', '▶'));
+          row.appendChild(el('span', 'pa', g.playerA.name));
+          row.appendChild(el('span', 'vs', 'vs'));
+          row.appendChild(el('span', 'pb', g.playerB.name));
+          listPane.appendChild(row);
+        });
+      }
+      if (advice.projectedNext.length > 0) {
+        const pHead = el('div', 'sssl-advicehead projected');
+        pHead.appendChild(el('span', 'badge', 'PROJECTED NEXT'));
+        pHead.appendChild(document.createTextNode('next projected possibility'));
+        listPane.appendChild(pHead);
+        const pRow = el('div', 'sssl-advice projected');
+        pRow.appendChild(el('span', 'mark', '→'));
+        pRow.appendChild(el('span', 'pa', advice.projectedNext[0].playerA.name));
+        pRow.appendChild(el('span', 'vs', 'vs'));
+        pRow.appendChild(el('span', 'pb', advice.projectedNext[0].playerB.name));
+        if (advice.projectedNext.length > 1) {
+          pRow.appendChild(el('span', 'proj', '+' + (advice.projectedNext.length - 1) + ' more'));
+        }
+        listPane.appendChild(pRow);
+      }
+      const listHead = el('div', 'sssl-advicehead projected');
+      listHead.appendChild(el('span', 'badge', 'FIXTURES'));
+      listHead.appendChild(document.createTextNode('factual schedule (PLAYING = live)'));
+      listPane.appendChild(listHead);
     }
 
     let lastDate = null;
@@ -2571,7 +2808,7 @@
         else next.add(p.id);
         state.absentIds = Array.from(next);
         saveState(storage, state, data.storeKey);
-        render(state, storage, data, liveNote, diagnostics);
+        render(state, storage, data, liveNote, diagnostics, activeSchedulerUi);
       });
       rosterPane.appendChild(b);
     });
@@ -2581,7 +2818,7 @@
     clear.addEventListener('click', () => {
       state.absentIds = [];
       saveState(storage, state);
-      render(state, storage, data, liveNote, diagnostics);
+      render(state, storage, data, liveNote, diagnostics, activeSchedulerUi);
     });
     rosterPane.appendChild(clear);
     if (liveNote) {
@@ -2654,6 +2891,8 @@
   }
 
   function boot(windowObj, doc, storage, transport) {
+    // Slice 3A scheduler control state: memory only, defaults every load.
+    const schedulerUi = defaultSchedulerUiState();
     // League identity comes from the schedule page URL (V1.1 LeagueContext).
     // boot only runs on schedule pages, so this is non-null in practice.
     const league = parseLeagueContext(windowObj && windowObj.location && windowObj.location.href);
@@ -2734,7 +2973,8 @@
       err('parse exception:', e);
     }
 
-    render(state, storage, data, 'Live detection: checking Match Center…', diagnosticsText(info));
+    render(state, storage, data, 'Live detection: checking Match Center…', diagnosticsText(info), schedulerUi);
+    activeSchedulerUi = schedulerUi;
 
     // Live engine: initial check now, then conservative polling. The core
     // UI is already rendered; live updates only flip fixture status.
@@ -2788,7 +3028,7 @@
         lastInfo.liveOk = live.liveOk;
         lastInfo.selectedDivision = state.division;
         lastInfo.selectedMatchDate = state.selectedMatchDate;
-        render(state, storage, data, note, diagnosticsText(info));
+        render(state, storage, data, note, diagnosticsText(info), activeSchedulerUi);
       },
     };
     // Division/date changes re-check live state against the new candidate set.
@@ -2888,6 +3128,9 @@
     evaluateProjectedMarkerConfidence,
     evaluateDelayedGameImpact,
     getProjectedRunningOrder,
+    defaultSchedulerUiState,
+    buildNightSession,
+    buildSchedulerAdvice,
   };
 
   api.getDiagnostics = function () {

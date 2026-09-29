@@ -1426,6 +1426,118 @@ console.log('\n--- Slice 2B Global Running Order Planner Tests ---');
     realRob.completionOutcomes.length === 4 && realRob.minPlayableCount > 0);
 })();
 
+// ---------------------------------------------------------------------------
+// Slice 3A UI integration adapter (pure UI-boundary functions only; the
+// browser-independent scheduler core is unchanged and still carries no DOM,
+// window, document, GM, network or storage dependencies).
+// ---------------------------------------------------------------------------
+console.log('\n--- Slice 3A UI Integration Adapter Tests ---');
+
+// 56. UI defaults are memory-only and exactly as specified.
+(() => {
+  const ui = api.defaultSchedulerUiState();
+  check('56. Default strategy is NORMAL', ui.strategy === api.SCHEDULING_STRATEGIES.NORMAL);
+  check('56. Default includeDelayed is OFF', ui.includeDelayed === false);
+  check('56. Default managedBoardsEnabled is OFF', ui.managedBoardsEnabled === false);
+  check('56. Default boardCount is 4 (UI default only)', ui.boardCount === 4);
+  // The default is a fresh object: mutating one instance cannot leak into another.
+  ui.boardCount = 6;
+  check('56. Defaults are per-call (no shared mutable state)', api.defaultSchedulerUiState().boardCount === 4);
+})();
+
+// 57. buildNightSession is read-only on factual state; live flags project
+// into session active games (capacity), statuses pass through factually.
+(() => {
+  const rosterCopy = parsedRoster.players.filter((p) => p.division === 'Universal');
+  const fixturesCopy = parsedFixtures.map((f) => JSON.parse(JSON.stringify(f)));
+  const current = fixturesCopy.filter((f) => !f.delayed && f.date === '2026-10-01');
+  const liveId = current[0].matchId;
+  current[0].status = 'playing'; // factual live flag from the live matcher
+  const delayedId = fixturesCopy.find((f) => f.delayed).matchId;
+  const data = { fixtures: fixturesCopy, roster: rosterCopy };
+  const view = { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [] };
+
+  const before = JSON.stringify(fixturesCopy);
+  const session = api.buildNightSession(api.defaultSchedulerUiState(), data, view);
+  check('57. Factual fixtures are NOT mutated by session build', JSON.stringify(fixturesCopy) === before);
+  check('57. Live fixture projected as a session active game (capacity consumed)',
+    session.activeGames.length === 1 && session.activeGames[0].matchId === liveId);
+  check('57. Session carries no completion data (only reliable live flags used)',
+    session.completedMatchIds.size === 0);
+  check('57. Factual statuses pass through unchanged (lowercase factual state)',
+    session.fixtures.find((f) => f.matchId === liveId).status === 'playing' &&
+    session.fixtures.filter((f) => f.matchId !== liveId).every((f) => f.status === 'waiting'));
+  const pStates = api.derivePlayerStates(session);
+  check('57. Live players are PLAYING in derived state',
+    pStates.get(current[0].playerA.id).state === api.PLAYER_STATES.PLAYING &&
+    pStates.get(current[0].playerB.id).state === api.PLAYER_STATES.PLAYING);
+  check('57. Fixture identity preserved (same order/players flow through)',
+    session.fixtures.every((f, i) => f.playerA.id === fixturesCopy[i].playerA.id));
+  check('57. Delayed OFF keeps every delayed game out of the playable programme',
+    api.getPlayableGames(session).every((g) => !g.delayed));
+
+  const sessionDelayed = api.buildNightSession(
+    Object.assign(api.defaultSchedulerUiState(), { includeDelayed: true }), data, view);
+  check('57. Delayed ON admits eligible delayed games via the existing rules',
+    api.getPlayableGames(sessionDelayed).some((g) => g.matchId === delayedId));
+
+  // Managed Boards ON honours the chosen count without hard-coding 4.
+  [1, 3, 6].forEach((n) => {
+    const s = api.buildNightSession(
+      Object.assign(api.defaultSchedulerUiState(), { managedBoardsEnabled: true, boardCount: n }), data, view);
+    check('57. Board count ' + n + ' creates exactly ' + n + ' managed boards',
+      s.managedBoardsEnabled && s.boards.length === n && s.boards[n - 1].boardNumber === n);
+  });
+  const sOff = api.buildNightSession(api.defaultSchedulerUiState(), data, view);
+  check('57. Managed Boards OFF creates no board identity at all',
+    !sOff.managedBoardsEnabled && sOff.boards.length === 0);
+})();
+
+// 58. Active games can never be recommended; advice excludes them in every shape.
+(() => {
+  const rosterCopy = parsedRoster.players.filter((p) => p.division === 'Universal');
+  const fixturesCopy = parsedFixtures.map((f) => JSON.parse(JSON.stringify(f)));
+  const current = fixturesCopy.filter((f) => !f.delayed && f.date === '2026-10-01');
+  const liveA = current[0].playerA.id;
+  const liveB = current[0].playerB.id;
+  const liveId = current[0].matchId;
+  current[0].status = 'playing';           // shape 1: DartConnect match id known
+  current[1].status = 'playing';           // shape 2: id-less broadcast/live row
+  current[1].matchId = null;
+  const data = { fixtures: fixturesCopy, roster: rosterCopy };
+  const view = { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [] };
+
+  const advice = api.buildSchedulerAdvice(api.defaultSchedulerUiState(), data, view);
+  const recIds = advice.recommended.map((g) => g.matchId);
+  const liveIds = new Set([liveId, null]);
+  const recPlayers = new Set();
+  advice.recommended.forEach((g) => { recPlayers.add(g.playerA.id); recPlayers.add(g.playerB.id); });
+  check('58. Match-id live game is not recommended', recIds.indexOf(liveId) === -1);
+  check('58. Id-less active game is not recommended (null never matches)', recIds.indexOf(null) === -1);
+  check('58. Players of active games are protected (their other games are not recommended)',
+    advice.recommended.every((g) => !liveIds.has(g.playerA.id) && !liveIds.has(g.playerB.id)) &&
+    !recPlayers.has(liveA) && !recPlayers.has(liveB));
+  check('58. Advice carries no scores, reasons or marker names (UI boundary)',
+    advice.recommended.every((g) => typeof g === 'object' && !('score' in g) && !('reasonCode' in g) && !('bestMarker' in g)));
+  check('58. Projected next excludes active games and stays disjoint from advice',
+    advice.projectedNext.every((g) => g.status === 'waiting') &&
+    advice.projectedNext.every((g) => !liveIds.has(g.matchId)) &&
+    advice.projectedNext.every((g) => recIds.indexOf(g.matchId) === -1));
+  check('58. Plan still schedules the remaining programme', advice.laterCount >= 0 &&
+    (advice.recommended.length + advice.projectedNext.length + advice.laterCount) > 0);
+
+  // Strategy change is pure advice: factual fixture objects are untouched.
+  const snapshot = JSON.stringify(fixturesCopy);
+  api.buildSchedulerAdvice(Object.assign(api.defaultSchedulerUiState(),
+    { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED }), data, view);
+  check('58. NORMAL <-> OPTIMISED does not mutate factual state', JSON.stringify(fixturesCopy) === snapshot);
+
+  // Capacity: managed-board count changes the size of the opening set.
+  const wide = api.buildSchedulerAdvice(
+    Object.assign(api.defaultSchedulerUiState(), { managedBoardsEnabled: true, boardCount: 2 }), data, view);
+  check('58. Opening advice never exceeds the managed board count', wide.recommended.length <= 2);
+})();
+
 if (failures === 0) {
   console.log('\nALL SCHEDULER & OPTIMISER TESTS PASS (0 failures)');
 } else {
