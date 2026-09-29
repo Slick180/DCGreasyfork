@@ -806,6 +806,19 @@ check('edge reserve defined for every scale step',
   (srcText.match(/--edge-reserve:/g) || []).length === 6 && (srcText.match(/--edge-reserve:96px/) || []).length === 1);
 check('no in-flow board controls on fixture rows (old layout hacks removed)',
   srcText.indexOf('margin-right:64px') === -1 && srcText.indexOf('.sssl-bassign{margin-right') === -1);
+// ---- collapsible delayed date groups (presentation only) ----
+check('delayed datebar is clickable with fold indicator',
+  srcText.indexOf('.sssl-datebar.collapsible{cursor:pointer;user-select:none}') !== -1 &&
+  srcText.indexOf("el('span', 'fold', collapsed ? '\u25b8' : '\u25be')") !== -1);
+check('fold uses scaled compact styling', srcText.indexOf("'.sssl-datebar .fold{margin-right:6px;font-size:var(--fs-xs)}'") !== -1);
+check('collapse hides rows only for delayed groups',
+  srcText.indexOf('if (f.delayed && delayedCollapsed[groupKey]) return;') !== -1);
+check('current-night bars never become collapsible',
+  srcText.indexOf("bar.classList.add('collapsible')") !== -1 &&
+  srcText.indexOf("if (f.delayed) {") !== -1);
+check('collapse state is runtime-only (no persistence write)',
+  (srcText.match(/delayedCollapsed/g) || []).length >= 3 &&
+  srcText.indexOf("setItem(.*delayedCollapsed") === -1);
 const counts = {
   rosterUniversal: roster.players.filter((p) => p.division === 'Universal').length,
   rosterWhiteEagle: roster.players.filter((p) => p.division === 'White Eagle').length,

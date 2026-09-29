@@ -1937,6 +1937,71 @@ console.log('\n--- Slice 3B Fixture-Row Board Ownership Tests ---');
   void snap0;
 })();
 
+// ---------------------------------------------------------------------------
+// Slice 3B collapsible delayed date groups (presentation-only).
+// ---------------------------------------------------------------------------
+console.log('\n--- Slice 3B Collapsible Delayed Groups Tests ---');
+
+// 70. Collapse state is presentation-only; factual/scheduler state untouched.
+(() => {
+  const f = bFixtures(); // 61..64 current-night
+  f.push({ matchId: 71, date: '2026-09-03', dateValue: 50, division: 'Universal', roundValue: 1, sessionValue: 1, playerA: p9, playerB: p10, delayed: true, status: 'waiting' });
+  const data = { fixtures: f, roster: bRoster };
+
+  // Defaults: no state object exists until a render creates it, and every
+  // absent entry means EXPANDED.
+  check('70. Delayed groups default EXPANDED (no state = expanded)',
+    !data.delayedCollapsed &&
+    (!data.delayedCollapsed || !data.delayedCollapsed['2026-09-03']));
+  data.delayedCollapsed = {};
+  data.delayedCollapsed['2026-09-03'] = true;
+  check('70. Toggling a delayed group collapses ONLY that date',
+    data.delayedCollapsed['2026-09-03'] === true && data.delayedCollapsed['2026-09-10'] !== true);
+  const delayedFixture = f.find((x) => x.delayed);
+  check('70. Collapsed delayed fixture REMAINS in the scheduler input',
+    api.getPlayableGames(api.buildNightSession(
+      Object.assign(bUi(), { includeDelayed: true }), data, bView)).some((g) => g.matchId === delayedFixture.matchId));
+  const advice = api.buildSchedulerAdvice(Object.assign(bUi(), { includeDelayed: true }), data, bView);
+  check('70. Collapsed delayed fixture remains fully present in advice state',
+    advice.session.fixtures.some((g) => g.matchId === delayedFixture.matchId));
+
+  // Collapse must not mutate board ownership / NOT HERE / PLAYING.
+  const rtv = api.assignGameToBoard(api.createManagedBoardRuntime(4), delayedFixture, 2).runtime;
+  const rtSnapshot = JSON.stringify(rtv);
+  const withBoard = { fixtures: f, roster: bRoster, boardRuntime: rtv, delayedCollapsed: data.delayedCollapsed };
+  const adviceBoarded = api.buildSchedulerAdvice(bUi(), withBoard, { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [p3.id] });
+  check('70. Collapse carries no board-ownership mutation (runtime byte-identical)',
+    JSON.stringify(rtv) === rtSnapshot && api.findBoardOwningGame(rtv, delayedFixture).boardNumber === 2);
+  check('70. NOT HERE state untouched by collapse (advice still honours absence)',
+    adviceBoarded.recommended.every((g) => g.playerA.id !== p3.id && g.playerB.id !== p3.id) &&
+    api.findBoardOwningGame(rtv, delayedFixture).boardNumber === 2);
+  const fLive = JSON.parse(JSON.stringify(f));
+  fLive[0].status = 'playing';
+  const liveData = { fixtures: fLive, roster: bRoster, delayedCollapsed: { '2026-09-03': true } };
+  const liveAdvice = api.buildSchedulerAdvice(bUi(), liveData, bView);
+  check('70. Collapsed delayed group never touches factual PLAYING/completion state',
+    fLive[0].status === 'playing' && fLive.find((x) => x.delayed).status === 'waiting' &&
+    liveAdvice.session.completedMatchIds.size === 0);
+
+  // Current-night group is never a collapsible delayed group.
+  check('70. Current-night group is not a collapsible delayed group',
+    f.filter((x) => !x.delayed).every((x) => !x.delayed) &&
+    !data.delayedCollapsed['2026-10-01']);
+
+  // Expanding restores presentation of the same factual fixture rows.
+  data.delayedCollapsed['2026-09-03'] = false;
+  check('70. Expanding restores the same factual fixture row (identity kept)',
+    api.boardKeyForGame(f.find((x) => x.delayed)) === 'id:71' &&
+    api.findBoardOwningGame(rtv, f.find((x) => x.delayed)).boardNumber === 2);
+
+  // Collapse state is invisible to the scheduler adapters (no coupling).
+  const adviceNoState = api.buildSchedulerAdvice(bUi(), { fixtures: f, roster: bRoster }, bView);
+  const adviceWithState = api.buildSchedulerAdvice(bUi(), { fixtures: f, roster: bRoster, delayedCollapsed: { '2026-09-03': true, '2026-09-10': true } }, bView);
+  check('70. Scheduler advice is identical with or without collapse state',
+    JSON.stringify(adviceNoState.recommended.map((g) => g.matchId)) ===
+    JSON.stringify(adviceWithState.recommended.map((g) => g.matchId)));
+})();
+
 if (failures === 0) {
   console.log('\nALL SCHEDULER & OPTIMISER TESTS PASS (0 failures)');
 } else {

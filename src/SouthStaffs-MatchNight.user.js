@@ -2794,6 +2794,9 @@
     '.sssl-fixtures{flex:1 1 77%;overflow-y:auto;padding:var(--pad-pane);min-width:0}',
     '.sssl-roster{flex:0 0 23%;min-width:220px;max-width:250px;border-left:1px solid var(--border);overflow-y:auto;padding:var(--pad-pane-side);background:var(--roster)}',
     '.sssl-datebar{background:var(--datebar);color:var(--datebar-text);font-size:var(--fs-xs);font-weight:700;padding:3px var(--gap-strip);border-radius:4px;margin:10px 0 4px;position:sticky;top:0}',
+    '.sssl-datebar.collapsible{cursor:pointer;user-select:none}',
+    '.sssl-datebar.collapsible:hover{opacity:0.85}',
+    '.sssl-datebar .fold{margin-right:6px;font-size:var(--fs-xs)}',
     '.sssl-datebar .delayed{color:var(--delayed);font-weight:700;margin-left:8px;font-size:var(--fs-2xs)}',
     '.sssl-row{display:flex;align-items:center;padding:var(--pad-row);border-radius:3px;line-height:1.35;position:relative}',
     // Matchup centre invariance: right-side status/action controls are
@@ -3210,14 +3213,38 @@
 
     let lastDate = null;
     let alt = false;
+    // Presentation-only collapse state for delayed date groups. Runtime
+    // only (per boot, never persisted, never read by the scheduler
+    // adapters): toggling hides fixture ROWS visually and nothing else.
+    const delayedCollapsed = data.delayedCollapsed || (data.delayedCollapsed = {});
     shown.forEach((f) => {
+      const groupKey = f.date || f.dateLabel;
       if (f.dateLabel !== lastDate) {
         lastDate = f.dateLabel;
         alt = false;
-        const bar = el('div', 'sssl-datebar', f.dateLabel || 'Unscheduled');
-        if (f.delayed) bar.appendChild(el('span', 'delayed', 'DELAYED'));
+        const bar = el('div', 'sssl-datebar');
+        if (f.delayed) {
+          // Historical/delayed groups are individually collapsible and
+          // default to EXPANDED. The current-night group is not collapsible.
+          const collapsed = !!delayedCollapsed[groupKey];
+          bar.classList.add('collapsible');
+          bar.appendChild(el('span', 'fold', collapsed ? '▸' : '▾'));
+          bar.appendChild(document.createTextNode(f.dateLabel || 'Unscheduled'));
+          bar.appendChild(el('span', 'delayed', 'DELAYED'));
+          bar.setAttribute('role', 'button');
+          bar.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+          bar.title = collapsed ? 'Expand delayed fixtures for this date' : 'Collapse delayed fixtures for this date';
+          bar.addEventListener('click', () => {
+            delayedCollapsed[groupKey] = !delayedCollapsed[groupKey];
+            render(state, storage, data, liveNote, diagnostics, schedulerUi);
+          });
+        } else {
+          bar.appendChild(document.createTextNode(f.dateLabel || 'Unscheduled'));
+        }
         listPane.appendChild(bar);
       }
+      // Collapsed delayed group: hide these rows visually only.
+      if (f.delayed && delayedCollapsed[groupKey]) return;
       const row = el('div', 'sssl-row' + (alt ? ' alt' : '') + (f.status === 'playing' ? ' playing' : ''));
       alt = !alt;
       row.appendChild(el('span', 'sssl-pa', f.playerA.name));
