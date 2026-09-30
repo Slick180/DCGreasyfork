@@ -819,6 +819,91 @@ check('current-night bars never become collapsible',
 check('collapse state is runtime-only (no persistence write)',
   (srcText.match(/delayedCollapsed/g) || []).length >= 3 &&
   srcText.indexOf("setItem(.*delayedCollapsed") === -1);
+// ---- Slice 3C marker management UI contracts ----
+check('compact MARKER control exists on RECOMMENDED rows',
+  srcText.indexOf("function markerSelectEl(opts)") !== -1 &&
+  srcText.indexOf("sel.className = 'sssl-mksel'") !== -1 &&
+  srcText.indexOf("'MARKER: ' + o.nameFor(o.proposedMarkerId)") !== -1 &&
+  srcText.indexOf("markerSelectEl({") !== -1);
+check('shared marker selector used by recommended AND factual rows (no duplicated eligibility)',
+  (srcText.match(/markerSelectEl\(\{/g) || []).length >= 2 &&
+  (srcText.match(/getEligibleMarkerCandidates/g) || []).length >= 2);
+check('factual marker display + release affordance exists',
+  srcText.indexOf("'MARKER ' + markerNameForId(data, fMarkerId)") !== -1 &&
+  srcText.indexOf('releaseMarkerFromGame(mkr, f)') !== -1);
+check('PROJECTED NEXT has no marker assignment control',
+  srcText.indexOf("sssl-mksel") !== -1 &&
+  (srcText.match(/projectedNext\[0\]/g) || []).length >= 1 &&
+  srcText.indexOf('projectedNext[0].proposedMarkerId') === -1);
+check('marker UI uses no transform scaling',
+  srcText.indexOf("'.sssl-mksel{background:var(--control);color:var(--text);border:1px dashed var(--accent)") !== -1 &&
+  srcText.indexOf("'.sssl-mkchip{display:inline-block;font-size:var(--fs-3xs)") !== -1);
+check('no marker localStorage key exists',
+  srcText.indexOf("match-night-singles:marker") === -1 &&
+  (srcText.match(/MARKER_KEY/g) || []).length === 0);
+// ---- Slice 3C delayed catch-up allowance contracts ----
+check('(N/R) delayed indicator renders compactly in NOT HERE rows',
+  srcText.indexOf("document.createTextNode('(' + n + '/')") !== -1 &&
+  srcText.indexOf("'.sssl-playerrow .dallow{flex:none;font-size:var(--fs-2xs)") !== -1);
+check('no (0/R) rendering: indicator hidden entirely at N=0',
+  srcText.indexOf('if (n > 0) {') !== -1 &&
+  srcText.indexOf("'(' + 0 + '/'") === -1);
+check('compact per-player allowance override control exists',
+  srcText.indexOf("rSel.className = 'sssl-rsel'") !== -1 &&
+  srcText.indexOf("'Delayed: outstanding / remaining tonight'") !== -1);
+check('allowance range bounded by factual N via domain clamp',
+  srcText.indexOf('for (let v = 0; v <= n; v++)') !== -1 &&
+  srcText.indexOf('Math.max(0, Math.min(n, Math.floor(value)))') !== -1);
+check('no delayed-allowance persistence key',
+  srcText.indexOf('match-night-singles:delayed') === -1 &&
+  srcText.indexOf('match-night-singles:allowance') === -1 &&
+  srcText.indexOf('DELAYED_ALLOWANCE_KEY') === -1);
+check('consumption wired to factual PLAYING only, at most once',
+  srcText.indexOf('if (f.delayed && f.status === \'playing\') {') !== -1 &&
+  srcText.indexOf('consumeDelayedAllowance(ctx.data.delayedAllowanceRuntime, f)') !== -1);
+check('allowance applies only to delayed classification in eligibility',
+  srcText.indexOf('canScheduleDelayedFixture(session.delayedAllowanceRuntime, f)') !== -1 &&
+  srcText.indexOf('if (!fixture || !fixture.delayed) return true;') !== -1);
+// ---- Slice 3C presentation polish contracts ----
+check('recommendation sequence uses the reserved left-edge slot (no centre shift)',
+  srcText.indexOf("row.appendChild(el('span', 'mark', String(seq + 1))") !== -1);
+check('sequence number is advice metadata, never a board number',
+  srcText.indexOf('NOT a physical board number') !== -1);
+check('factual-row marker visibility rules (clean ordinary rows)',
+  srcText.indexOf('const showMarkerControl = fMarkerId != null || f.status === \'playing\' ||') !== -1 &&
+  srcText.indexOf('board-assigned (board-first') !== -1);
+check('confirmed marker always visible regardless of recommendation state',
+  srcText.indexOf('if (fMarkerId != null) {') !== -1);
+check('sidebar width is content-aware with per-scale safety bounds (never unbounded)',
+  srcText.indexOf("'.sssl-roster{flex:0 1 max-content;min-width:var(--roster-min);max-width:var(--roster-max)") !== -1 &&
+  (srcText.match(/--roster-min:/g) || []).length === 6);
+check('NOT HERE player text is venue-readable (larger, bolder)',
+  srcText.indexOf("color:var(--text);font-size:var(--fs);font-weight:600;padding:var(--pad-player)") !== -1);
+check('(N/R): R is a real bordered control with a permanent overlaid caret affordance',
+  srcText.indexOf("'.sssl-rsel{background:var(--control);color:var(--accent);border:1px solid var(--control-border);") !== -1 &&
+  srcText.indexOf("width:calc(var(--fs-2xs) * 3 + 4px)") !== -1 &&
+  srcText.indexOf("el('span', 'dcaret', '\\u25be')") !== -1 &&
+  srcText.indexOf("'.sssl-rwrap .dcaret{position:absolute;right:3px;top:50%;transform:translateY(-50%);pointer-events:none;") !== -1 &&
+  srcText.indexOf("const rWrap = el('span', 'rwrap');") !== -1);
+check('(N/R) affordance is presentation-only (semantics untouched)',
+  srcText.indexOf('for (let v = 0; v <= n; v++)') !== -1 &&
+  srcText.indexOf("e.stopPropagation()") !== -1 &&
+  srcText.indexOf('setRemainingDelayedAllowance(delayRt, p.id') !== -1);
+check('selected-division roster boundary enforced at session, candidate and confirmation boundaries',
+  srcText.indexOf('function filterRosterForDivision(') !== -1 &&
+  srcText.indexOf('filterRosterForDivision(cfg.players, cfg.selectedDivision)') !== -1 &&
+  srcText.indexOf("reason: 'player-division-mismatch'") !== -1 &&
+  (srcText.match(/rosterDivisionIds/g) || []).length >= 5);
+check('marker selector and factual marker control remain present (3C corrections preserved)',
+  srcText.indexOf('function markerSelectEl(opts)') !== -1 &&
+  srcText.indexOf('releaseMarkerFromGame(mkr, f)') !== -1);
+check('global opening-set selection intact (bounded, not greedy)',
+  srcText.indexOf('CANDIDATE_BREADTH = 4') !== -1 &&
+  srcText.indexOf('GLOBAL, not greedy') !== -1);
+check('marker overlay follows the edge-reserve overlay pattern',
+  srcText.indexOf("'.sssl-row .mkown{position:absolute;right:var(--edge-reserve);top:50%;transform:translateY(-50%)") !== -1 &&
+  srcText.indexOf("'.sssl-row .mkslot{position:absolute;right:var(--edge-reserve);top:50%;transform:translateY(-50%)}'") !== -1 &&
+  srcText.indexOf("'.sssl-row.playing .mkown{right:calc(var(--edge-reserve) + 96px)}'") !== -1);
 const counts = {
   rosterUniversal: roster.players.filter((p) => p.division === 'Universal').length,
   rosterWhiteEagle: roster.players.filter((p) => p.division === 'White Eagle').length,

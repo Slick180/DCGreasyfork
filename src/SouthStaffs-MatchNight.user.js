@@ -158,6 +158,26 @@
     return Number.isSafeInteger(id) ? id : null;
   }
 
+  /**
+   * Selected-division roster boundary (Slice 3C marker isolation).
+   * Returns only roster members whose OWN division field equals the
+   * selected division. This is a player-IDENTITY boundary: division lives
+   * on the DartConnect Inertia roster record next to the stable player ID,
+   * so isolation never matches display names or venue text. Used both by
+   * the session adapter (see createNightSession) and by the marker
+   * candidate contexts, so a foreign-division player effectively does not
+   * exist to the selected division's marker planning.
+   */
+  function filterRosterForDivision(roster, division) {
+    const players = Array.isArray(roster) ? roster : [];
+    if (typeof division !== 'string' || !division) return players.slice();
+    // Players WITHOUT a division field are unclassified (legacy/direct-API
+    // callers, never produced by the real Inertia roster parse) and are
+    // never treated as foreign. Only an explicit DIFFERENT division
+    // excludes — that is exactly the cross-division contamination case.
+    return players.filter((p) => p && (!p.division || p.division === division));
+  }
+
   /** DartConnect live abbreviation: "James Harrison" -> "James H". Null when unusable. */
   function abbreviateName(fullName) {
     if (typeof fullName !== 'string') return null;
@@ -1074,6 +1094,17 @@
         warn('live endpoints unreachable; preserving last-known PLAYING state.');
       }
       info.playing = ctx.data.fixtures.filter((f) => f.status === 'playing').length;
+      // Slice 3C: the strongest reliable factual signal that a delayed
+      // fixture has been taken into the programme is factual PLAYING.
+      // Consumption happens at most once per fixture (identity recorded
+      // runtime-only), decrements BOTH participants, then the rerender
+      // below re-plans globally from the updated constraint.
+      ctx.data.fixtures.forEach((f) => {
+        if (f.delayed && f.status === 'playing') {
+          const res = consumeDelayedAllowance(ctx.data.delayedAllowanceRuntime, f);
+          if (res.consumed) ctx.data.delayedAllowanceRuntime = res.runtime;
+        }
+      });
       ctx.rerender(liveNoteText(info));
     }).catch((e) => {
       liveInFlight = false;
@@ -1310,8 +1341,20 @@
       return new Set();
     };
 
+    // Selected-division roster boundary: the session's player pool is the
+    // selected division's roster ONLY. Fixtures are already division-filtered
+    // upstream (getPlayableGames et al.), but without this filter foreign-
+    // division players entered derivePlayerStates -> the marker candidate
+    // pool -> the global opening marker optimiser. Club markers belong to
+    // the selected division; a player from another division/venue must not
+    // be proposed, scored or consumed as candidate breadth. Note: an
+    // EXPLICITLY supplied cfg.eligibleMarkerPool / externalPlayers at the
+    // planner boundary remains honoured (deliberate external-guest option).
+    const divisionMembers = filterRosterForDivision(cfg.players, cfg.selectedDivision);
+    const divisionAbsent = (Array.isArray(cfg.absentIds) ? cfg.absentIds : [])
+      .filter((id) => divisionMembers.some((p) => p.id === id));
     return {
-      players: Array.isArray(cfg.players) ? cfg.players.slice() : [],
+      players: divisionMembers,
       fixtures: Array.isArray(cfg.fixtures) ? cfg.fixtures.slice() : [],
       selectedDivision: typeof cfg.selectedDivision === 'string' ? cfg.selectedDivision : '',
       selectedMatchDate: typeof cfg.selectedMatchDate === 'string' ? cfg.selectedMatchDate : null,
@@ -1320,9 +1363,14 @@
       boards,
       includeDelayed: !!cfg.includeDelayed,
       rejectedDelayedMatchIds: toSet(cfg.rejectedDelayedMatchIds),
-      absentIds: toSet(cfg.absentIds),
+      absentIds: toSet(divisionAbsent),
       activeGames: Array.isArray(cfg.activeGames) ? cfg.activeGames.slice() : [],
       completedMatchIds: toSet(cfg.completedMatchIds),
+      markingPlayerIds: toSet(cfg.markingPlayerIds),
+      // Slice 3C: runtime delayed catch-up allowance (R per player). A NEW
+      // delayed fixture is eligible only when BOTH participants hold R > 0.
+      // Factual PLAYING delayed games are never constrained by R.
+      delayedAllowanceRuntime: cfg.delayedAllowanceRuntime || null,
       lastCompleted: cfg.lastCompleted || null,
     };
   }
@@ -1378,6 +1426,17 @@
         }
         map.set(ag.markerId, m);
       }
+    });
+
+    // Factual MARKING players (Slice 3C): first-class local state. They
+    // cannot be recommended to play or to mark anything else while their
+    // duty is factually held. This runs BEFORE the board-occupied loop so
+    // board-slot markers cannot downgrade an explicit MARKING to MARKING
+    // (identical here) or, later, PLAYING to anything else.
+    session.markingPlayerIds.forEach((id) => {
+      const p = map.get(id) || { id, name: '', division: '', state: PLAYER_STATES.MARKING };
+      p.state = PLAYER_STATES.MARKING;
+      map.set(id, p);
     });
 
     if (session.managedBoardsEnabled && Array.isArray(session.boards)) {
@@ -1437,6 +1496,11 @@
       if (gType === GAME_TYPES.DELAYED) {
         if (!session.includeDelayed) return;
         if (session.rejectedDelayedMatchIds.has(f.matchId)) return;
+        // Opportunistic catch-up only: both participants need remaining
+        // delayed allowance (R > 0). Never applies to current-night games.
+        if (session.delayedAllowanceRuntime && !canScheduleDelayedFixture(session.delayedAllowanceRuntime, f)) {
+          return;
+        }
       } else if (gType === GAME_TYPES.EXTRA) {
         return;
       } else {
@@ -2568,6 +2632,306 @@
     return out;
   }
 
+  /* ============================== 6f-bis. Slice 3C marker ownership (browser-independent core) ============================== */
+
+  /**
+   * Factual marker runtime: which game is factually MARKED by which player.
+   * Owns one source of truth for the invariants "one factual marker per
+   * game" and "one factual marking duty per player". Runtime match-night
+   * state only — NEVER persisted.
+   */
+  function createMarkerRuntime() {
+    return { byGame: {}, byMarker: {} };
+  }
+
+  /** Stable game identity (same key scheme as board ownership). Pure. */
+  function markerGameKey(game) {
+    return boardKeyForGame(game);
+  }
+
+  /** Find the factual marker (player id) owning a game. Pure. */
+  function findMarkerForGame(runtime, game) {
+    if (!runtime || !runtime.byGame) return null;
+    const key = markerGameKey(game);
+    return key != null && Object.prototype.hasOwnProperty.call(runtime.byGame, key)
+      ? runtime.byGame[key]
+      : null;
+  }
+
+  /** Find the factual game (key) a player is MARKING. Pure. */
+  function findGameMarkedByPlayer(runtime, playerId) {
+    if (!runtime || !runtime.byMarker) return null;
+    return Object.prototype.hasOwnProperty.call(runtime.byMarker, playerId)
+      ? runtime.byMarker[playerId]
+      : null;
+  }
+
+  /**
+   * Eligible marker candidates from factual state: AVAILABLE players only —
+   * never absent, factual PLAYING, already factually MARKING, already
+   * assigned to this game, or (with excludeParticipants) anyone in the game
+   * to be marked. Deterministic ascending id order. Pure.
+   */
+  function getEligibleMarkerCandidates(context) {
+    const ctx = context || {};
+    const players = Array.isArray(ctx.players) ? ctx.players : [];
+    const absent = ctx.absentIds || [];
+    const playing = ctx.playingPlayerIds || [];
+    const marking = ctx.markingPlayerIds || [];
+    const gameKey = ctx.gameKey || null;
+    const markedGames = ctx.markedGameKeys || [];
+    const excludeParticipants = !!ctx.excludeParticipants;
+    const participants = ctx.participantIds || [];
+    // Selected-division roster boundary: when the caller supplies the
+    // selected division's roster IDs, only those players can ever become
+    // marker candidates (player-ID membership, never display names).
+    const rosterDivisionIds = Array.isArray(ctx.rosterDivisionIds)
+      ? ctx.rosterDivisionIds.slice().sort((a, b) => a - b) : null;
+    const out = [];
+    players.forEach((p) => {
+      if (!p || !Number.isSafeInteger(p.id)) return;
+      if (absent.indexOf(p.id) !== -1) return;
+      if (playing.indexOf(p.id) !== -1) return;
+      if (marking.indexOf(p.id) !== -1) return;
+      if (rosterDivisionIds && rosterDivisionIds.indexOf(p.id) === -1) return;
+      if (excludeParticipants && participants.indexOf(p.id) !== -1) return;
+      if (gameKey != null && markedGames[gameKey] === p.id) return;
+      out.push({ id: p.id, name: p.name || ('#' + p.id) });
+    });
+    out.sort((a, b) => a.id - b.id);
+    return out;
+  }
+
+  /**
+   * Assign a factual marker. Enforces both ownership invariants: one
+   * factual marker per game, one factual marking duty per player. Uses the
+   * same factual eligibility rules as recommendations — an absent, PLAYING,
+   * or already-MARKING player is never assignable. Returns
+   * { ok, runtime, reason }; never throws, never mutates the input.
+   */
+  function assignMarkerToGame(runtime, game, playerId, context) {
+    if (!runtime || !runtime.byGame || !runtime.byMarker) return { ok: false, runtime, reason: 'no-runtime' };
+    const key = markerGameKey(game);
+    if (key == null) return { ok: false, runtime, reason: 'invalid-game' };
+    const ctx = context || {};
+    if (!Number.isSafeInteger(playerId)) return { ok: false, runtime, reason: 'invalid-player' };
+    // Confirmation defence (Slice 3C marker isolation): a marker outside
+    // the selected division's roster is rejected at the domain boundary —
+    // never only hidden in the dropdown.
+    if (Array.isArray(ctx.rosterDivisionIds) && ctx.rosterDivisionIds.indexOf(playerId) === -1) {
+      return { ok: false, runtime, reason: 'player-division-mismatch' };
+    }
+    // One factual marker per game: an already-marked game is never
+    // re-assigned through this path (use changeMarkerForGame for the
+    // atomic operator transition).
+    if (findMarkerForGame(runtime, game) != null) return { ok: false, runtime, reason: 'game-already-marked' };
+    if ((ctx.absentIds || []).indexOf(playerId) !== -1) return { ok: false, runtime, reason: 'player-unavailable' };
+    if ((ctx.playingPlayerIds || []).indexOf(playerId) !== -1) return { ok: false, runtime, reason: 'player-unavailable' };
+    const currentDuty = findGameMarkedByPlayer(runtime, playerId);
+    if (currentDuty != null) return { ok: false, runtime, reason: 'player-already-marking' };
+    const participants = ctx.participantIds || [];
+    if (participants.indexOf(playerId) !== -1) return { ok: false, runtime, reason: 'participant' };
+    const byGame = Object.assign({}, runtime.byGame);
+    const byMarker = Object.assign({}, runtime.byMarker);
+    byGame[key] = playerId;
+    byMarker[playerId] = key;
+    return { ok: true, runtime: { byGame, byMarker }, reason: null };
+  }
+
+  /**
+   * Change the factual marker of a marked game ATOMICALLY: the previous
+   * marker is released and the new one assigned in one transition, or the
+   * transition is rejected and the existing valid assignment survives
+   * untouched. Never leaves two players marking the same game.
+   */
+  function changeMarkerForGame(runtime, game, newPlayerId, context) {
+    if (!runtime || !runtime.byGame || !runtime.byMarker) return { ok: false, runtime, reason: 'no-runtime' };
+    const key = markerGameKey(game);
+    if (key == null) return { ok: false, runtime, reason: 'invalid-game' };
+    const current = Object.prototype.hasOwnProperty.call(runtime.byGame, key) ? runtime.byGame[key] : null;
+    if (current == null) return { ok: false, runtime, reason: 'not-marked' };
+    if (newPlayerId === current) return { ok: true, runtime, reason: 'unchanged' };
+    // Confirmation defence (Slice 3C marker isolation): changing to a
+    // player outside the selected division's roster is rejected.
+    if (Array.isArray((context || {}).rosterDivisionIds) && context.rosterDivisionIds.indexOf(newPlayerId) === -1) {
+      return { ok: false, runtime, reason: 'player-division-mismatch' };
+    }
+    const ctx = context || {};
+    const participants = (ctx.participantIds || []).slice();
+    const rel = releaseMarkerFromGame(runtime, game);
+    if (!rel.ok) return { ok: false, runtime, reason: rel.reason || 'release-failed' };
+    const asg = assignMarkerToGame(rel.runtime, game, newPlayerId,
+      Object.assign({}, ctx, { participantIds: participants.filter((id) => id !== current) })
+    );
+    if (!asg.ok) {
+      // Rejected: restore the previous valid assignment exactly.
+      const restored = assignMarkerToGame(rel.runtime, game, current,
+        { participantIds: participants.filter((id) => id !== current), skipEligibility: true });
+      if (restored.ok) return { ok: false, runtime: restored.runtime, reason: asg.reason || 'invalid-new-marker' };
+      return { ok: false, runtime: rel.runtime, reason: asg.reason || 'invalid-new-marker' };
+    }
+    return asg;
+  }
+
+  /**
+   * Release a factual marker. Means ONLY "this player is no longer
+   * factually assigned to mark this game" — never completion, board
+   * release, availability beyond this duty, or any DartConnect change.
+   * Releasing an unmarked game (or an unknown game) is a deterministic
+   * no-op success. Pure.
+   */
+  function releaseMarkerFromGame(runtime, game) {
+    if (!runtime || !runtime.byGame || !runtime.byMarker) return { ok: false, runtime, reason: 'no-runtime' };
+    const key = markerGameKey(game);
+    if (key == null) return { ok: false, runtime, reason: 'invalid-game' };
+    const current = Object.prototype.hasOwnProperty.call(runtime.byGame, key) ? runtime.byGame[key] : null;
+    if (current == null) return { ok: true, runtime, reason: 'not-marked' };
+    const byGame = Object.assign({}, runtime.byGame);
+    const byMarker = Object.assign({}, runtime.byMarker);
+    delete byGame[key];
+    if (byMarker[current] === key) delete byMarker[current];
+    return { ok: true, runtime: { byGame, byMarker }, reason: null };
+  }
+
+  /**
+   * Factual conflicts for compact presentation. An assignment is preserved
+   * when the operator later marks its marker NOT HERE; it is surfaced here
+   * and resolved only by explicit operator action — never silently.
+   */
+  function detectMarkerConflicts(runtime, view) {
+    const out = [];
+    if (!runtime || !runtime.byGame) return out;
+    const absent = (view && view.absentIds) || [];
+    Object.keys(runtime.byGame).forEach((key) => {
+      if (absent.indexOf(runtime.byGame[key]) !== -1) {
+        out.push({ gameKey: key, markerId: runtime.byGame[key], conflict: 'not-here' });
+      }
+    });
+    return out;
+  }
+
+  /* ============================== 6f-ter. Slice 3C delayed catch-up allowance (browser-independent core) ============================== */
+
+  /**
+   * Delayed fixtures are OPPORTUNISTIC CATCH-UP games, never targets. The
+   * per-player allowance bounds how many delayed catch-up fixtures each
+   * player may be drawn into per runtime session. Runtime state only —
+   * never persisted.
+   */
+  const DEFAULT_DELAYED_CATCHUP_ALLOWANCE = 1;
+
+  /**
+   * Factual outstanding-delayed backlog for every player id: N per player.
+   * Derived from the existing fixture data by reliable player ID only;
+   * counts a delayed fixture when the player is either participant.
+   * Informational factual backlog: Delayed ON/OFF, collapsed groups, NOT
+   * HERE, strategy, and board/marker ownership never change N. Pure.
+   */
+  function getDelayedBacklogByPlayer(fixtures) {
+    const backlog = {};
+    (Array.isArray(fixtures) ? fixtures : []).forEach((f) => {
+      if (!f || !f.delayed) return;
+      const a = f.playerA && f.playerA.id;
+      const b = f.playerB && f.playerB.id;
+      if (Number.isSafeInteger(a)) backlog[a] = (backlog[a] || 0) + 1;
+      if (Number.isSafeInteger(b) && b !== a) backlog[b] = (backlog[b] || 0) + 1;
+    });
+    return backlog;
+  }
+
+  /**
+   * Delayed-allowance runtime: R per player (REMAINING allowance, not a
+   * configured maximum), defaulted from factual backlog, plus runtime-only
+   * consumed-game identities so a delayed fixture can consume at most once.
+   * Pure initialiser: never mutates fixtures.
+   */
+  function createDelayedAllowanceRuntime(fixtures) {
+    const backlog = getDelayedBacklogByPlayer(fixtures);
+    const allowance = {};
+    const consumedDelayedGameKeys = {};
+    Object.keys(backlog).forEach((idStr) => {
+      const n = backlog[idStr];
+      if (n > 0) allowance[idStr] = Math.min(DEFAULT_DELAYED_CATCHUP_ALLOWANCE, n);
+    });
+    return { allowance, consumedDelayedGameKeys };
+  }
+
+  /** N: factual outstanding delayed fixtures for a player. Pure. */
+  function getDelayedOutstandingCount(backlog, playerId) {
+    return (backlog && backlog[playerId]) || 0;
+  }
+
+  /** R: remaining delayed catch-up allowance for a player. Pure. */
+  function getRemainingDelayedAllowance(allowanceRuntime, playerId) {
+    if (!allowanceRuntime || !allowanceRuntime.allowance) return 0;
+    return allowanceRuntime.allowance[playerId] || 0;
+  }
+
+  /**
+   * Operator override of R, clamped to the factual range 0..N (values
+   * above N clamp to N; negative/invalid clamp to 0). Changing R is a
+   * runtime constraint update only — it starts nothing and consumes
+   * nothing. Returns { ok, runtime, reason }; never mutates the input.
+   */
+  function setRemainingDelayedAllowance(allowanceRuntime, playerId, value, backlog) {
+    if (!allowanceRuntime || !allowanceRuntime.allowance) return { ok: false, runtime: allowanceRuntime, reason: 'no-runtime' };
+    if (!Number.isSafeInteger(playerId)) return { ok: false, runtime: allowanceRuntime, reason: 'invalid-player' };
+    const n = getDelayedOutstandingCount(backlog, playerId);
+    if (!Number.isFinite(value)) return { ok: false, runtime: allowanceRuntime, reason: 'invalid-value' };
+    const clamped = Math.max(0, Math.min(n, Math.floor(value)));
+    const allowance = Object.assign({}, allowanceRuntime.allowance);
+    if (clamped > 0) allowance[playerId] = clamped;
+    else delete allowance[playerId];
+    return { ok: true, runtime: { allowance, consumedDelayedGameKeys: allowanceRuntime.consumedDelayedGameKeys }, reason: null };
+  }
+
+  /**
+   * NEW delayed-fixture eligibility: BOTH participants must hold remaining
+   * allowance > 0. Current-night fixtures are never constrained by R.
+   * Pure.
+   */
+  function canScheduleDelayedFixture(allowanceRuntime, fixture) {
+    if (!fixture || !fixture.delayed) return true;
+    const rt = allowanceRuntime || { allowance: {}, consumedDelayedGameKeys: {} };
+    const a = fixture.playerA && fixture.playerA.id;
+    const b = fixture.playerB && fixture.playerB.id;
+    if (a != null && getRemainingDelayedAllowance(rt, a) <= 0) return false;
+    if (b != null && b !== a && getRemainingDelayedAllowance(rt, b) <= 0) return false;
+    return true;
+  }
+
+  /**
+   * Factual consumption: a delayed fixture taken into the programme on a
+   * strong factual signal consumes 1 allowance from BOTH participants
+   * (bounded at zero) and records the game key so repeated observation of
+   * the same fixture never double-consumes. Returns
+   * { ok, runtime, consumed, reason }; never mutates the input.
+   */
+  function consumeDelayedAllowance(allowanceRuntime, fixture) {
+    if (!fixture || !fixture.delayed) return { ok: false, runtime: allowanceRuntime, consumed: false, reason: 'not-delayed' };
+    const rt = allowanceRuntime || { allowance: {}, consumedDelayedGameKeys: {} };
+    const key = boardKeyForGame(fixture);
+    if (rt.consumedDelayedGameKeys[key]) return { ok: true, runtime: rt, consumed: false, reason: 'already-consumed' };
+    const allowance = Object.assign({}, rt.allowance);
+    const dec = (id) => {
+      const cur = getRemainingDelayedAllowance(rt, id);
+      if (cur > 0) allowance[id] = cur - 1;
+      else delete allowance[id];
+    };
+    const a = fixture.playerA && fixture.playerA.id;
+    const b = fixture.playerB && fixture.playerB.id;
+    if (Number.isSafeInteger(a)) dec(a);
+    if (Number.isSafeInteger(b) && b !== a) dec(b);
+    const consumedDelayedGameKeys = Object.assign({}, rt.consumedDelayedGameKeys);
+    consumedDelayedGameKeys[key] = true;
+    return { ok: true, runtime: { allowance, consumedDelayedGameKeys }, consumed: true, reason: null };
+  }
+
+  /** Runtime-only consumed identities for delayed fixtures. Pure. */
+  function getConsumedDelayedGameKeys(allowanceRuntime) {
+    return (allowanceRuntime && allowanceRuntime.consumedDelayedGameKeys) || {};
+  }
+
   /* ============================== 6g. UI scale (pure steps + FIT) ============================== */
 
   const UI_SCALE_VALUES = [75, 80, 90, 100, 110, 125];
@@ -2699,7 +3063,7 @@
         playerA: f.playerA,
         playerB: f.playerB,
         boardNumber: null,
-        markerId: null,
+        markerId: (data.markerRuntime && findMarkerForGame(data.markerRuntime, f)) || null,
         isExtra: false,
       }));
     if (ui.managedBoardsEnabled && data.boardRuntime && Array.isArray(data.boardRuntime.boards)) {
@@ -2714,7 +3078,7 @@
           playerA: game.playerA,
           playerB: game.playerB,
           boardNumber: b.boardNumber,
-          markerId: null,
+          markerId: findMarkerForGame(data.markerRuntime, game),
           isExtra: false,
         });
       });
@@ -2730,6 +3094,13 @@
       absentIds: Array.isArray(state.absentIds) ? state.absentIds.slice() : [],
       activeGames,
       completedMatchIds: [],
+      // Confirmed markers are FACT: each owning player is projected as
+      // factually MARKING (planner eligibility), independent of Managed
+      // Boards and independent of any PLAYING state.
+      markingPlayerIds: data.markerRuntime
+        ? Object.keys(data.markerRuntime.byMarker || {}).map(Number).filter(Number.isSafeInteger)
+        : [],
+      delayedAllowanceRuntime: data.delayedAllowanceRuntime || null,
     });
   }
 
@@ -2753,6 +3124,7 @@
       projectedNext: [],
       laterCount: 0,
       session,
+      markerRuntime: data.markerRuntime || null,
     };
     // Only genuinely waiting games are shown as advice: anything the core
     // let through with a non-waiting status (never expected at this
@@ -2763,19 +3135,92 @@
     advice.projectedNext = plan.projectedNextPriorities.filter((g) => g.status === 'waiting');
     advice.laterCount = Math.max(0, plan.metrics.totalScheduledGames
       - advice.recommended.length - advice.projectedNext.length);
+
+    /* Slice 3C opening-wave marker advice — GLOBAL, not greedy.
+     * PROPOSED only, never factual. The opening wave is treated as a SET:
+     * for the unmarked opening games we evaluate bounded combinations of
+     * distinct eligible volunteers and keep the combination that best
+     * preserves the remaining programme (planner's evaluateMarkerImpact:
+     * a player needed soon scores low, a player with nothing outstanding
+     * scores high), with deterministic ascending-id tie-breaks.
+     *
+     * Bounds: per game only the top CANDIDATE_BREADTH=4 ranked candidates
+     * are considered, so the search is at most 4^n with n = opening games
+     * (n <= capacity <= 6) -> <= 4096 leaves, each scored O(n) from cached
+     * impacts. FACT beats ADVICE: games with confirmed markers are skipped
+     * and their markers are unavailable via the factual MARKING
+     * projection — they are never overwritten by a better combination. */
+    const playerStates = derivePlayerStates(session);
+    const availableIds = [];
+    playerStates.forEach((p) => {
+      if (p.state === PLAYER_STATES.AVAILABLE) availableIds.push(p.id);
+    });
+    availableIds.sort((a, b) => a - b);
+    // Slice 3C marker isolation: restrict to the selected division's roster
+    // so the global optimiser never scores or selects foreign players.
+    const divRoster = filterRosterForDivision(data.roster, state && state.division);
+    const divRosterIds = divRoster.map((p) => p.id);
+    const availableIdsDiv = availableIds.filter((id) => divRosterIds.indexOf(id) !== -1);
+    const openPool = divRosterIds.length > 0 ? availableIdsDiv : availableIds;
+    const markedGameKeys = Object.assign({}, (data.markerRuntime && data.markerRuntime.byGame) || {});
+    const CANDIDATE_BREADTH = 4;
+    const openGames = [];
+    advice.recommended.forEach((game) => {
+      const gKey = markerGameKey(game);
+      game.confirmedMarkerId = markedGameKeys[gKey] != null ? markedGameKeys[gKey] : null;
+      if (game.confirmedMarkerId == null) openGames.push(game);
+    });
+    const impactCache = {};
+    const fitness = (id) => {
+      if (impactCache[id] === undefined) impactCache[id] = evaluateMarkerImpact(session, id).score;
+      return impactCache[id];
+    };
+    const perGameCandidates = openGames.map((game) =>
+      openPool
+        .filter((id) => id !== game.playerA.id && id !== game.playerB.id)
+        .sort((a, b) => (fitness(b) - fitness(a)) || (a - b))
+        .slice(0, CANDIDATE_BREADTH)
+    );
+    const chosen = new Array(openGames.length).fill(null);
+    let bestScore = -Infinity;
+    let bestSeq = null;
+    const used = new Set();
+    (function select(idx, score, seq) {
+      if (idx === openGames.length) {
+        const better = score > bestScore ||
+          (score === bestScore && (bestSeq === null || seq.join(',') < bestSeq.join(',')));
+        if (better) { bestScore = score; bestSeq = seq.slice(); }
+        return;
+      }
+      const cands = perGameCandidates[idx];
+      if (!cands.length) { select(idx + 1, score, seq); return; }
+      for (let i = 0; i < cands.length; i++) {
+        const id = cands[i];
+        if (used.has(id)) continue;
+        used.add(id);
+        seq.push(id);
+        select(idx + 1, score + fitness(id), seq);
+        seq.pop();
+        used.delete(id);
+      }
+    })(0, 0, []);
+    openGames.forEach((game, i) => { game.proposedMarkerId = bestSeq ? bestSeq[i] : null; });
+    advice.recommended.forEach((game) => {
+      if (game.proposedMarkerId === undefined) game.proposedMarkerId = null;
+    });
     return advice;
   }
 
   /* ============================== 7. Compact UI ============================== */
 
   const CSS = [
-    '.sssl-overlay{--bg:#0f172a;--panel:#1e293b;--roster:#111c30;--text:#e2e8f0;--muted:#b5c0cd;--faint:#94a3b8;--border:#334155;--control:#243244;--control-border:#475569;--accent:#14b8a6;--accent-ink:#06281c;--row-alt:rgba(148,163,184,0.08);--datebar:#243244;--datebar-text:#b5c0cd;--absent-bg:#3b2f14;--absent-border:#f59e0b;--absent-text:#fcd34d;--playing:#22c55e;--playing-bg:#166534;--playing-ink:#f0fdf4;--delayed:#f59e0b;--err-border:#ef4444;--err-bg:#3b2228;--err-text:#fecaca;--fs:14px;--fs-sm:13px;--fs-xs:12px;--fs-2xs:11px;--fs-3xs:10px;--pad-strip:5px 16px;--pad-row:3px 10px;--pad-btn:4px 12px;--pad-btn-sm:2px 10px;--pad-pane:8px 16px;--pad-pane-side:8px 12px;--pad-player:3px 8px;--pad-sel:4px 8px;--gap-bar:12px;--gap-ctrl:6px;--gap-strip:10px;--edge-reserve:96px;position:fixed;inset:0;z-index:2147483647;background:var(--bg);color:var(--text);font-family:"Segoe UI",Arial,sans-serif;font-size:var(--fs);display:flex;flex-direction:column}',
+    '.sssl-overlay{--bg:#0f172a;--panel:#1e293b;--roster:#111c30;--text:#e2e8f0;--muted:#b5c0cd;--faint:#94a3b8;--border:#334155;--control:#243244;--control-border:#475569;--accent:#14b8a6;--accent-ink:#06281c;--row-alt:rgba(148,163,184,0.08);--datebar:#243244;--datebar-text:#b5c0cd;--absent-bg:#3b2f14;--absent-border:#f59e0b;--absent-text:#fcd34d;--playing:#22c55e;--playing-bg:#166534;--playing-ink:#f0fdf4;--delayed:#f59e0b;--err-border:#ef4444;--err-bg:#3b2228;--err-text:#fecaca;--fs:14px;--fs-sm:13px;--fs-xs:12px;--fs-2xs:11px;--fs-3xs:10px;--pad-strip:5px 16px;--pad-row:3px 10px;--pad-btn:4px 12px;--pad-btn-sm:2px 10px;--pad-pane:8px 16px;--pad-pane-side:8px 12px;--pad-player:3px 8px;--pad-sel:4px 8px;--gap-bar:12px;--gap-ctrl:6px;--gap-strip:10px;--edge-reserve:96px;--roster-min:252px;--roster-max:282px;position:fixed;inset:0;z-index:2147483647;background:var(--bg);color:var(--text);font-family:"Segoe UI",Arial,sans-serif;font-size:var(--fs);display:flex;flex-direction:column}',
     '.sssl-overlay[data-theme="light"]{--bg:#f1f5f9;--panel:#ffffff;--roster:#f8fafc;--text:#0f172a;--muted:#475569;--faint:#64748b;--border:#cbd5e1;--control:#ffffff;--control-border:#94a3b8;--accent:#0d9488;--accent-ink:#ffffff;--row-alt:rgba(15,23,42,0.045);--datebar:#334155;--datebar-text:#f8fafc;--absent-bg:#fef3c7;--absent-border:#b45309;--absent-text:#92400e;--playing:#15803d;--playing-bg:#15803d;--playing-ink:#ffffff;--delayed:#b45309;--err-border:#dc2626;--err-bg:#fef2f2;--err-text:#991b1b;color-scheme:light}',
-    '.sssl-overlay[data-zoom="75"]{--fs:10.5px;--fs-sm:9.75px;--fs-xs:9px;--fs-2xs:8.25px;--fs-3xs:7.5px;--pad-strip:3.75px 12px;--pad-row:2.25px 7.5px;--pad-btn:3px 9px;--pad-btn-sm:1.5px 7.5px;--pad-pane:6px 12px;--pad-pane-side:6px 9px;--pad-player:2.25px 6px;--pad-sel:3px 6px;--gap-bar:9px;--gap-ctrl:4.5px;--gap-strip:7.5px;--edge-reserve:72px}',
-    '.sssl-overlay[data-zoom="80"]{--fs:11.2px;--fs-sm:10.4px;--fs-xs:9.6px;--fs-2xs:8.8px;--fs-3xs:8px;--pad-strip:4px 12.8px;--pad-row:2.4px 8px;--pad-btn:3.2px 9.6px;--pad-btn-sm:1.6px 8px;--pad-pane:6.4px 12.8px;--pad-pane-side:6.4px 9.6px;--pad-player:2.4px 6.4px;--pad-sel:3.2px 6.4px;--gap-bar:9.6px;--gap-ctrl:4.8px;--gap-strip:8px;--edge-reserve:76.8px}',
-    '.sssl-overlay[data-zoom="90"]{--fs:12.6px;--fs-sm:11.7px;--fs-xs:10.8px;--fs-2xs:9.9px;--fs-3xs:9px;--pad-strip:4.5px 14.4px;--pad-row:2.7px 9px;--pad-btn:3.6px 10.8px;--pad-btn-sm:1.8px 9px;--pad-pane:7.2px 14.4px;--pad-pane-side:7.2px 10.8px;--pad-player:2.7px 7.2px;--pad-sel:3.6px 7.2px;--gap-bar:10.8px;--gap-ctrl:5.4px;--gap-strip:9px;--edge-reserve:86.4px}',
-    '.sssl-overlay[data-zoom="110"]{--fs:15.4px;--fs-sm:14.3px;--fs-xs:13.2px;--fs-2xs:12.1px;--fs-3xs:11px;--pad-strip:5.5px 17.6px;--pad-row:3.3px 11px;--pad-btn:4.4px 13.2px;--pad-btn-sm:2.2px 11px;--pad-pane:8.8px 17.6px;--pad-pane-side:8.8px 13.2px;--pad-player:3.3px 8.8px;--pad-sel:4.4px 8.8px;--gap-bar:13.2px;--gap-ctrl:6.6px;--gap-strip:11px;--edge-reserve:105.6px}',
-    '.sssl-overlay[data-zoom="125"]{--fs:17.5px;--fs-sm:16.25px;--fs-xs:15px;--fs-2xs:13.75px;--fs-3xs:12.5px;--pad-strip:6.25px 20px;--pad-row:3.75px 12.5px;--pad-btn:5px 15px;--pad-btn-sm:2.5px 12.5px;--pad-pane:10px 20px;--pad-pane-side:10px 15px;--pad-player:3.75px 10px;--pad-sel:5px 10px;--gap-bar:15px;--gap-ctrl:7.5px;--gap-strip:12.5px;--edge-reserve:120px}',
+    '.sssl-overlay[data-zoom="75"]{--fs:10.5px;--fs-sm:9.75px;--fs-xs:9px;--fs-2xs:8.25px;--fs-3xs:7.5px;--pad-strip:3.75px 12px;--pad-row:2.25px 7.5px;--pad-btn:3px 9px;--pad-btn-sm:1.5px 7.5px;--pad-pane:6px 12px;--pad-pane-side:6px 9px;--pad-player:2.25px 6px;--pad-sel:3px 6px;--gap-bar:9px;--gap-ctrl:4.5px;--gap-strip:7.5px;--edge-reserve:72px;--roster-min:190px;--roster-max:212px}',
+    '.sssl-overlay[data-zoom="80"]{--fs:11.2px;--fs-sm:10.4px;--fs-xs:9.6px;--fs-2xs:8.8px;--fs-3xs:8px;--pad-strip:4px 12.8px;--pad-row:2.4px 8px;--pad-btn:3.2px 9.6px;--pad-btn-sm:1.6px 8px;--pad-pane:6.4px 12.8px;--pad-pane-side:6.4px 9.6px;--pad-player:2.4px 6.4px;--pad-sel:3.2px 6.4px;--gap-bar:9.6px;--gap-ctrl:4.8px;--gap-strip:8px;--edge-reserve:76.8px;--roster-min:202px;--roster-max:226px}',
+    '.sssl-overlay[data-zoom="90"]{--fs:12.6px;--fs-sm:11.7px;--fs-xs:10.8px;--fs-2xs:9.9px;--fs-3xs:9px;--pad-strip:4.5px 14.4px;--pad-row:2.7px 9px;--pad-btn:3.6px 10.8px;--pad-btn-sm:1.8px 9px;--pad-pane:7.2px 14.4px;--pad-pane-side:7.2px 10.8px;--pad-player:2.7px 7.2px;--pad-sel:3.6px 7.2px;--gap-bar:10.8px;--gap-ctrl:5.4px;--gap-strip:9px;--edge-reserve:86.4px;--roster-min:227px;--roster-max:254px}',
+    '.sssl-overlay[data-zoom="110"]{--fs:15.4px;--fs-sm:14.3px;--fs-xs:13.2px;--fs-2xs:12.1px;--fs-3xs:11px;--pad-strip:5.5px 17.6px;--pad-row:3.3px 11px;--pad-btn:4.4px 13.2px;--pad-btn-sm:2.2px 11px;--pad-pane:8.8px 17.6px;--pad-pane-side:8.8px 13.2px;--pad-player:3.3px 8.8px;--pad-sel:4.4px 8.8px;--gap-bar:13.2px;--gap-ctrl:6.6px;--gap-strip:11px;--edge-reserve:105.6px;--roster-min:277px;--roster-max:310px}',
+    '.sssl-overlay[data-zoom="125"]{--fs:17.5px;--fs-sm:16.25px;--fs-xs:15px;--fs-2xs:13.75px;--fs-3xs:12.5px;--pad-strip:6.25px 20px;--pad-row:3.75px 12.5px;--pad-btn:5px 15px;--pad-btn-sm:2.5px 12.5px;--pad-pane:10px 20px;--pad-pane-side:10px 15px;--pad-player:3.75px 10px;--pad-sel:5px 10px;--gap-bar:15px;--gap-ctrl:7.5px;--gap-strip:12.5px;--edge-reserve:120px;--roster-min:315px;--roster-max:353px}',
     '.sssl-topbar{display:flex;align-items:center;gap:var(--gap-bar);padding:var(--pad-strip);background:var(--panel);border-bottom:1px solid var(--border);flex:none}',
     '.sssl-title{font-size:calc(var(--fs) + 2px);font-weight:700;white-space:nowrap}',
     '.sssl-divsel{display:flex;gap:var(--gap-ctrl);flex-wrap:wrap}',
@@ -2792,7 +3237,12 @@
     '.sssl-zoom .val{font-size:var(--fs-sm);color:var(--muted);min-width:42px;text-align:center;white-space:nowrap}',
     '.sssl-main{flex:1;display:flex;min-height:0}',
     '.sssl-fixtures{flex:1 1 77%;overflow-y:auto;padding:var(--pad-pane);min-width:0}',
-    '.sssl-roster{flex:0 0 23%;min-width:220px;max-width:250px;border-left:1px solid var(--border);overflow-y:auto;padding:var(--pad-pane-side);background:var(--roster)}',
+    // Slice 3C: content-aware sidebar. The roster hugs its rendered content
+    // (max-content: larger names + the delayed allowance control) and grows
+    // ONLY up to the per-scale --roster-max safety bound, never without
+    // limit; below the content width it falls back to --roster-min. The
+    // fixture area always stays dominant (flex-shrink on the sidebar only).
+    '.sssl-roster{flex:0 1 max-content;min-width:var(--roster-min);max-width:var(--roster-max);border-left:1px solid var(--border);overflow-y:auto;overflow-x:hidden;padding:var(--pad-pane-side);background:var(--roster)}',
     '.sssl-datebar{background:var(--datebar);color:var(--datebar-text);font-size:var(--fs-xs);font-weight:700;padding:3px var(--gap-strip);border-radius:4px;margin:10px 0 4px;position:sticky;top:0}',
     '.sssl-datebar.collapsible{cursor:pointer;user-select:none}',
     '.sssl-datebar.collapsible:hover{opacity:0.85}',
@@ -2828,9 +3278,23 @@
     '.sssl-row .bassign-slot{position:absolute;right:var(--edge-reserve);top:50%;transform:translateY(-50%)}',
     '.sssl-row .bown .sssl-brel{padding:1px 6px;min-width:18px;text-align:center;line-height:1.2}',
     '.sssl-rhead{font-size:var(--fs-xs);font-weight:700;color:var(--muted);margin:2px 0 6px}',
-    '.sssl-player{display:block;width:100%;text-align:left;background:transparent;border:1px solid transparent;border-radius:4px;color:var(--text);font-size:var(--fs-sm);padding:var(--pad-player);cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.sssl-player{display:block;width:100%;text-align:left;background:transparent;border:1px solid transparent;border-radius:4px;color:var(--text);font-size:var(--fs);font-weight:600;padding:var(--pad-player);cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.sssl-player:hover{border-color:var(--control-border)}',
     '.sssl-player.absent{background:var(--absent-bg);border-color:var(--absent-border);color:var(--absent-text);font-weight:600}',
+    '.sssl-playerrow{display:flex;align-items:center;gap:4px;min-width:0}',
+    '.sssl-playerrow .sssl-player{flex:1;min-width:0}',
+    '.sssl-playerrow .dallow{flex:none;font-size:var(--fs-2xs);color:var(--muted);white-space:nowrap;display:inline-flex;align-items:center;gap:3px}',
+    // (N/R): N stays plain informational text; R is a REAL compact control —
+    // bordered box, accent tint, native select with a permanent caret glyph
+    // absolutely positioned on its right edge (pointer-events:none, so the
+    // whole box INCLUDING the caret is the clickable target). Width derives
+    // from the scale variables (~37 CSS px at 100%). Reads as (6 / [1 ▼]).
+    // Options stay 0..N (the caret is not an option); picking a value never
+    // toggles NOT HERE.
+    '.sssl-rwrap{position:relative;display:inline-flex;align-items:center}',
+    '.sssl-rsel{background:var(--control);color:var(--accent);border:1px solid var(--control-border);border-radius:3px;padding:1px 14px 1px 5px;font-size:var(--fs-2xs);width:calc(var(--fs-2xs) * 3 + 4px);cursor:pointer;font-weight:700;text-align:left;-webkit-appearance:none;appearance:none}',
+    '.sssl-rsel:hover,.sssl-rsel:focus{border-color:var(--accent);color:var(--text);outline:none}',
+    '.sssl-rwrap .dcaret{position:absolute;right:3px;top:50%;transform:translateY(-50%);pointer-events:none;color:var(--accent);font-size:var(--fs-3xs);font-weight:700}',
     '.sssl-note{font-size:var(--fs-2xs);color:var(--faint);margin-top:8px}',
     '.sssl-error{margin:16px;padding:12px;border:1px solid var(--err-border);border-radius:6px;background:var(--err-bg);color:var(--err-text);font-size:var(--fs-sm);white-space:pre-wrap}',
     '.sssl-empty{padding:24px;color:var(--faint);font-size:var(--fs-sm)}',
@@ -2846,7 +3310,11 @@
     '.sssl-advicehead .badge{display:inline-block;padding:0 6px;border-radius:8px;margin-right:6px;font-size:var(--fs-3xs);color:var(--accent-ink);background:var(--accent)}',
     '.sssl-advicehead.projected .badge{background:var(--border);color:var(--text)}',
     '.sssl-advice{display:flex;align-items:center;padding:var(--pad-row);border-radius:3px;border:1px dashed var(--accent);margin-bottom:2px}',
-    '.sssl-advice .mark{flex:0 0 26px;font-weight:700;font-size:var(--fs-2xs);color:var(--accent);text-align:center}',
+    '.sssl-advice .mark{flex:0 0 26px;font-weight:700;font-size:var(--fs-2xs);color:var(--faint);text-align:center}',
+    // Recommendation SEQUENCE number: reserved left-edge slot (existing
+    // mark column), symmetric with the right control reserve. Metadata
+    // only — never a board number, never flow content that could shift
+    // the matchup centre.
     '.sssl-advice.projected{border-style:dotted;border-color:var(--faint);opacity:0.9}',
     '.sssl-advice.projected .mark{color:var(--muted)}',
     '.sssl-advice .pa{flex:1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
@@ -2870,6 +3338,13 @@
     '.sssl-bassign:disabled{opacity:0.5;cursor:default}',
     '.sssl-brel{background:var(--control);color:var(--text);border:1px solid var(--control-border);border-radius:4px;padding:1px 8px;font-size:var(--fs-2xs);cursor:pointer;white-space:nowrap}',
     '.sssl-brel:hover{border-color:var(--delayed)}',
+    '.sssl-row .mkown{position:absolute;right:var(--edge-reserve);top:50%;transform:translateY(-50%);display:inline-flex;align-items:center;gap:4px}',
+    '.sssl-row.playing .mkown{right:calc(var(--edge-reserve) + 96px)}',
+    '.sssl-row .mkslot{position:absolute;right:var(--edge-reserve);top:50%;transform:translateY(-50%)}',
+    '.sssl-row.playing .mkslot{right:calc(var(--edge-reserve) + 96px)}',
+    '.sssl-mksel{background:var(--control);color:var(--text);border:1px dashed var(--accent);border-radius:4px;padding:1px 6px;font-size:var(--fs-xs);max-width:160px;height:calc(var(--fs-xs) + 8px);line-height:1.2;vertical-align:middle;text-overflow:ellipsis}',
+    '.sssl-mksel:hover{border-color:var(--accent)}',
+    '.sssl-mkchip{display:inline-block;font-size:var(--fs-3xs);font-weight:700;letter-spacing:0.06em;padding:0 6px;border-radius:8px;color:var(--accent-ink);background:var(--border);vertical-align:1px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.sssl-chip{display:inline-block;font-size:var(--fs-3xs);font-weight:700;letter-spacing:0.06em;padding:0 6px;border-radius:8px;margin-right:6px;color:var(--accent-ink);background:var(--accent);vertical-align:1px}',
     '.sssl-chip.warn{background:var(--absent-border);color:#fff}',
   ].join('\n');
@@ -2879,6 +3354,82 @@
     if (cls) node.className = cls;
     if (text != null) node.textContent = text;
     return node;
+  }
+
+  /** Roster name for a factual marker id ('#id' fallback; never invented). */
+  function markerNameForId(data, playerId) {
+    const p = (data.roster || []).find((r) => r.id === playerId);
+    return (p && p.name) || ('#' + playerId);
+  }
+
+  /**
+   * Compact shared marker selector used by BOTH the RECOMMENDED rows and
+   * the factual FIXTURES rows, so marker eligibility is built once from the
+   * domain helper (getEligibleMarkerCandidates) and never duplicated in the
+   * DOM layer. The scheduler's proposed marker, when supplied, is only
+   * PRESELECTED advice — nothing becomes factual until the operator picks
+   * an entry. Selecting the placeholder leaves the marker unassigned.
+   *
+   * Selection priority: confirmed fact > proposed advice > '—'. The
+   * proposal binds display-only: the selector's default value is set to
+   * the proposal WITHOUT calling assignMarkerToGame or touching the
+   * marker runtime. A proposal that is absent or no longer eligible at
+   * render time (stale advice) falls back safely to the placeholder and
+   * the ineligible option is not offered; the next global re-plan
+   * produces fresh advice. A confirmed marker (o.confirmedMarkerId),
+   * when supplied, is always displayed and always wins over the proposal
+   * (CONFIRMED FACT > PROPOSED ADVICE > '—').
+   */
+  function markerSelectEl(opts) {
+    const o = opts || {};
+    const sel = document.createElement('select');
+    sel.className = 'sssl-mksel';
+    sel.setAttribute('aria-label', 'Marker for this game');
+    const ph = document.createElement('option');
+    ph.value = '';
+    ph.textContent = 'MARKER: —';
+    sel.appendChild(ph);
+    const confirmedId = o.confirmedMarkerId != null ? o.confirmedMarkerId : null;
+    const eligible = getEligibleMarkerCandidates(o.context);
+    const proposedEligible = confirmedId == null && o.proposedMarkerId != null &&
+      eligible.some((c) => c.id === o.proposedMarkerId);
+    if (confirmedId != null) {
+      // CONFIRMED FACT: always displayed, even if the player has since
+      // become ineligible — a fact is never overwritten by advice.
+      const confirmed = document.createElement('option');
+      confirmed.value = String(confirmedId);
+      confirmed.textContent = 'MARKER: ' + o.nameFor(confirmedId);
+      sel.appendChild(confirmed);
+    } else if (proposedEligible) {
+      const proposed = document.createElement('option');
+      proposed.value = String(o.proposedMarkerId);
+      proposed.textContent = 'MARKER: ' + o.nameFor(o.proposedMarkerId);
+      sel.appendChild(proposed);
+    }
+    eligible.forEach((c) => {
+      if (confirmedId != null && c.id === confirmedId) return;
+      if (proposedEligible && c.id === o.proposedMarkerId) return;
+      const opt = document.createElement('option');
+      opt.value = String(c.id);
+      opt.textContent = c.name;
+      sel.appendChild(opt);
+    });
+    // Display-only default (see doc comment above): CONFIRMED FACT first,
+    // then the proposal, so the CLOSED control reads 'MARKER: <name>'.
+    // ADVICE only — factual assignment happens exclusively via onConfirm,
+    // and a proposal that is no longer eligible at render time falls back
+    // to the placeholder; no other candidate is ever substituted by the UI.
+    if (confirmedId != null) {
+      sel.value = String(confirmedId);
+    } else if (proposedEligible) {
+      sel.value = String(o.proposedMarkerId);
+    }
+    sel.addEventListener('change', () => {
+      const chosen = parseInt(sel.value, 10);
+      sel.value = '';
+      if (Number.isSafeInteger(chosen) && chosen >= 1 && o.onConfirm) o.onConfirm(chosen);
+    });
+    return sel;
   }
 
   /** Compact board <select> offering only currently free boards ('B1'…). */
@@ -2915,7 +3466,16 @@
   function render(state, storage, data, liveNote, diagnostics, schedulerUi) {
     if (!schedulerUi) schedulerUi = activeSchedulerUi || defaultSchedulerUiState();
     if (!data.boardRuntime) data.boardRuntime = createManagedBoardRuntime(schedulerUi.boardCount);
+    if (!data.markerRuntime) data.markerRuntime = createMarkerRuntime();
+    // Slice 3C runtime: delayed catch-up allowance, defaulted from factual
+    // backlog (N). Created once per boot; consumption and overrides update
+    // it in place. Never persisted.
+    if (!data.delayedAllowanceRuntime) data.delayedAllowanceRuntime = createDelayedAllowanceRuntime(data.fixtures);
     const rtv = data.boardRuntime;
+    const mkr = data.markerRuntime;
+    // Slice 3C marker isolation: the selected division's roster ids gate
+    // every marker candidate context and every confirmation in this view.
+    const divRosterIds = filterRosterForDivision(data.roster, state.division).map((p) => p.id);
     activeBoardRuntime = rtv;
     closeOverlay();
     const style = document.createElement('style');
@@ -3118,6 +3678,13 @@
         cf.textContent = 'BOARD ' + c.boardNumber + ': assigned game has a NOT HERE player';
         strip.appendChild(cf);
       });
+      // Slice 3C: same philosophy for factual marker ownership.
+      detectMarkerConflicts(mkr, { absentIds: state.absentIds }).forEach((c) => {
+        const cf = el('span', 'hint');
+        cf.style.color = 'var(--delayed)';
+        cf.textContent = 'MARKER: assigned marker is NOT HERE (game ' + c.gameKey + ')';
+        strip.appendChild(cf);
+      });
     }
     strip.appendChild(el('span', 'hint', 'Scheduler advice only — factual state is unchanged'));
     overlay.appendChild(strip);
@@ -3157,9 +3724,13 @@
           'start now' + (advice.recommended.length > 1 ? ' · up to ' + advice.recommended.length + ' games' : '') +
           (advice.laterCount > 0 ? ' · ' + advice.laterCount + ' planned later' : '')));
         listPane.appendChild(head);
-        advice.recommended.forEach((g) => {
+        advice.recommended.forEach((g, seq) => {
+          // RECOMMENDATION SEQUENCE (1..n, follow the actual advice order):
+          // presentation metadata in the reserved left-edge slot. It is
+          // NOT a physical board number and implies no board mapping —
+          // boards remain explicit operator assignment only.
           const row = el('div', 'sssl-advice');
-          row.appendChild(el('span', 'mark', '▶'));
+          row.appendChild(el('span', 'mark', String(seq + 1)));
           row.appendChild(el('span', 'pa', g.playerA.name));
           row.appendChild(el('span', 'vs', 'vs'));
           row.appendChild(el('span', 'pb', g.playerB.name));
@@ -3186,6 +3757,54 @@
               }));
               row.appendChild(ctrl);
             }
+          }
+          // Slice 3C marker control: proposed = ADVICE (preselected only);
+          // choosing/confirming is the operator's explicit act. Confirmed
+          // games show the factual chip + × (duty-only release).
+          if (g.confirmedMarkerId != null) {
+            const mk = el('span', 'note');
+            mk.appendChild(el('span', 'mkchip', 'MARKER ' + markerNameForId(data, g.confirmedMarkerId)));
+            mk.title = 'Confirmed factual marker. Use × to release, or the marker dropdown to change.';
+            row.appendChild(mk);
+            const relMk = el('button', 'sssl-brel', '×');
+            relMk.type = 'button';
+            relMk.title = 'Release marker duty only (board ownership, factual state and DartConnect are unchanged)';
+            relMk.addEventListener('click', () => {
+              const res = releaseMarkerFromGame(mkr, g);
+              if (res.ok) data.markerRuntime = res.runtime;
+              render(state, storage, data, liveNote, diagnostics, schedulerUi);
+            });
+            row.appendChild(relMk);
+          } else {
+            const mkCtx = {
+              players: data.roster,
+              absentIds: Array.from(absent),
+              playingPlayerIds: data.fixtures.filter((x) => x.status === 'playing').flatMap((x) => [x.playerA.id, x.playerB.id]).filter((id) => id != null),
+              markingPlayerIds: Object.keys(mkr.byMarker).map(Number).filter(Number.isSafeInteger),
+              markedGameKeys: mkr.byGame,
+              rosterDivisionIds: divRosterIds,
+              excludeParticipants: true,
+              participantIds: [g.playerA.id, g.playerB.id],
+            };
+            const sel = markerSelectEl({
+              proposedMarkerId: g.proposedMarkerId,
+              nameFor: (id) => markerNameForId(data, id),
+              context: mkCtx,
+              onConfirm: (chosen) => {
+                const res = assignMarkerToGame(mkr, g, chosen, {
+                  absentIds: mkCtx.absentIds,
+                  playingPlayerIds: mkCtx.playingPlayerIds,
+                  rosterDivisionIds: divRosterIds,
+                  participantIds: [g.playerA.id, g.playerB.id],
+                });
+                if (res.ok) data.markerRuntime = res.runtime;
+                else warn('marker assignment rejected:', res.reason);
+                render(state, storage, data, liveNote, diagnostics, schedulerUi);
+              },
+            });
+            const mkWrap = el('span', 'ctrl');
+            mkWrap.appendChild(sel);
+            row.appendChild(mkWrap);
           }
           listPane.appendChild(row);
         });
@@ -3253,6 +3872,7 @@
       if (schedulerUi.managedBoardsEnabled) {
         const assignedBoard = findBoardOwningGame(rtv, f);
         if (assignedBoard) {
+          // (Slice 3B board ownership indicator)
           // Factual operator ownership marker on the fixture row itself:
           // it means ONLY "assigned to physical Board N". It is never
           // PLAYING, completion, a DartConnect start or a result, and ×
@@ -3281,6 +3901,66 @@
         }
       }
       if (f.status === 'playing') row.appendChild(el('span', 'sssl-playing', '● PLAYING'));
+      // Slice 3C: factual marker overlay (right edge). Presence of a
+      // confirmed marker never means PLAYING/completion — duty only. It is
+      // shown on the row regardless of Managed Boards and regardless of the
+      // game's live state; × releases the duty only.
+      // Factual marker visibility rules (visual-noise reduction):
+      //  - confirmed marker: ALWAYS shown (FACT beats ADVICE), any state;
+      //  - unmarked PLAYING rows: assignment slot offered (reliably
+      //    identified live games are operator-actionable);
+      //  - unmarked waiting rows: only when board-assigned (board-first
+      //    workflow) or currently actionable advice (proposal preselect).
+      //  - ordinary waiting rows: NO marker control — clean list.
+      const fMarkerId = findMarkerForGame(mkr, f);
+      const adviceFor = (advice && advice.recommended.find((g) => markerGameKey(g) === markerGameKey(f))) || null;
+      const showMarkerControl = fMarkerId != null || f.status === 'playing' ||
+        findBoardOwningGame(rtv, f) != null || adviceFor != null;
+      if (fMarkerId != null) {
+        const mkOwn = el('span', 'mkown');
+        mkOwn.appendChild(el('span', 'mkchip', 'MARKER ' + markerNameForId(data, fMarkerId)));
+        const mkX = el('button', 'sssl-brel', '×');
+        mkX.type = 'button';
+        mkX.title = 'Release marker duty only (board ownership, PLAYING and factual state are unchanged)';
+        mkX.setAttribute('aria-label', 'Release marker ' + markerNameForId(data, fMarkerId));
+        mkX.addEventListener('click', () => {
+          const res = releaseMarkerFromGame(mkr, f);
+          if (res.ok) data.markerRuntime = res.runtime;
+          render(state, storage, data, liveNote, diagnostics, schedulerUi);
+        });
+        mkOwn.appendChild(mkX);
+        row.appendChild(mkOwn);
+      } else if (showMarkerControl) {
+        const mkCtx = {
+          players: data.roster,
+          absentIds: Array.from(absent),
+          playingPlayerIds: data.fixtures.filter((x) => x.status === 'playing').flatMap((x) => [x.playerA.id, x.playerB.id]).filter((id) => id != null),
+          markingPlayerIds: Object.keys(mkr.byMarker).map(Number).filter(Number.isSafeInteger),
+          markedGameKeys: mkr.byGame,
+          rosterDivisionIds: divRosterIds,
+          excludeParticipants: true,
+          participantIds: [f.playerA.id, f.playerB.id],
+        };
+        const sel = markerSelectEl({
+          proposedMarkerId: adviceFor ? adviceFor.proposedMarkerId : null,
+          nameFor: (id) => markerNameForId(data, id),
+          context: mkCtx,
+          onConfirm: (chosen) => {
+            const res = assignMarkerToGame(mkr, f, chosen, {
+              absentIds: mkCtx.absentIds,
+              playingPlayerIds: mkCtx.playingPlayerIds,
+              rosterDivisionIds: divRosterIds,
+              participantIds: [f.playerA.id, f.playerB.id],
+            });
+            if (res.ok) data.markerRuntime = res.runtime;
+            else warn('marker assignment rejected:', res.reason);
+            render(state, storage, data, liveNote, diagnostics, schedulerUi);
+          },
+        });
+        const slot = el('span', 'mkslot');
+        slot.appendChild(sel);
+        row.appendChild(slot);
+      }
       row.title = [f.dateLabel, f.roundLabel, f.sessionLabel].filter(Boolean).join(' · ');
       listPane.appendChild(row);
     });
@@ -3288,7 +3968,16 @@
     rosterPane.appendChild(el('div', 'sssl-rhead', 'NOT HERE'));
     const roster = data.roster.filter((p) => p.division === state.division);
     roster.sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0));
+    // Slice 3C: informational factual delayed backlog (N) + remaining
+    // catch-up allowance (R) per player. N is derived purely from fixture
+    // data; R is runtime state the operator may override per player.
+    const backlog = getDelayedBacklogByPlayer(data.fixtures);
+    const delayRt = data.delayedAllowanceRuntime;
+    const rowWrap = el('div', 'sssl-playerwrap');
     roster.forEach((p) => {
+      const rowWrapItem = el('div', 'sssl-playerrow');
+      const n = getDelayedOutstandingCount(backlog, p.id);
+      const r = getRemainingDelayedAllowance(delayRt, p.id);
       const b = el('button', 'sssl-player' + (absent.has(p.id) ? ' absent' : ''), p.name);
       b.type = 'button';
       b.title = absent.has(p.id) ? 'Click to mark present' : 'Click to mark Not Here';
@@ -3300,8 +3989,55 @@
         saveState(storage, state, data.storeKey);
         render(state, storage, data, liveNote, diagnostics, activeSchedulerUi);
       });
-      rosterPane.appendChild(b);
+      rowWrapItem.appendChild(b);
+      if (n > 0) {
+        // (N/R): hidden entirely when N = 0. The allowance number is an
+        // interactive override, clamped by the domain core to 0..N.
+        const dWrap = el('span', 'dallow');
+        dWrap.appendChild(document.createTextNode('(' + n + '/'));
+        const rSel = document.createElement('select');
+        rSel.className = 'sssl-rsel';
+        rSel.setAttribute('aria-label', 'Delayed catch-up allowance for ' + p.name);
+        // Discoverability (presentation only): a permanent caret glyph is
+        // overlaid on the select's right edge. It is NOT an <option> (it
+        // would be invisible on a closed select and could never be picked);
+        // it is a pointer-events:none span, so clicks land on the select.
+        // Discoverability: options stay 0..N (spec: retain 0..N). The
+        // native select keeps its native dropdown arrow in the open list;
+        // the overlaid .dcaret glyph marks it interactive when closed.
+        for (let v = 0; v <= n; v++) {
+          const opt = document.createElement('option');
+          opt.value = String(v);
+          opt.textContent = String(v);
+          if (v === r) opt.selected = true;
+          rSel.appendChild(opt);
+        }
+        rSel.title = 'Delayed: outstanding / remaining tonight';
+        rSel.addEventListener('click', (e) => e.stopPropagation());
+        rSel.addEventListener('change', () => {
+          const chosen = parseInt(rSel.value, 10);
+          if (!Number.isSafeInteger(chosen)) return; // never feed NaN to the domain
+          const res = setRemainingDelayedAllowance(delayRt, p.id, chosen, backlog);
+          if (res.ok) {
+            data.delayedAllowanceRuntime = res.runtime;
+            render(state, storage, data, liveNote, diagnostics, schedulerUi); // global re-plan
+          }
+        });
+        dWrap.appendChild(rSel);
+        // Permanent visible affordance on the select's right edge. NOT an
+        // <option> (that would be invisible when closed and could be picked);
+        // a pointer-events:none span inside a relative wrapper, so clicks on
+        // the glyph land on the select and the caret tracks every scale.
+        const rWrap = el('span', 'rwrap');
+        rWrap.appendChild(rSel);
+        rWrap.appendChild(el('span', 'dcaret', '\u25be'));
+        dWrap.appendChild(rWrap);
+        dWrap.appendChild(document.createTextNode(')'));
+        rowWrapItem.appendChild(dWrap);
+      }
+      rowWrap.appendChild(rowWrapItem);
     });
+    while (rowWrap.firstChild) rosterPane.appendChild(rowWrap.firstChild);
     const clear = el('button', 'sssl-btn', 'Clear Not Here');
     clear.type = 'button';
     clear.style.marginTop = '8px';
@@ -3550,6 +4286,7 @@
     migrateLegacyState,
     discoverDivisions,
     parsePlayerIdFromHref,
+    filterRosterForDivision,
     abbreviateName,
     pairKey,
     sortFixtures,
@@ -3634,6 +4371,25 @@
     releaseBoard,
     resizeManagedBoards,
     detectManagedBoardConflicts,
+    createMarkerRuntime,
+    markerGameKey,
+    findMarkerForGame,
+    findGameMarkedByPlayer,
+    getEligibleMarkerCandidates,
+    assignMarkerToGame,
+    changeMarkerForGame,
+    releaseMarkerFromGame,
+    detectMarkerConflicts,
+    markerSelectEl,
+    DEFAULT_DELAYED_CATCHUP_ALLOWANCE,
+    getDelayedBacklogByPlayer,
+    createDelayedAllowanceRuntime,
+    getDelayedOutstandingCount,
+    getRemainingDelayedAllowance,
+    setRemainingDelayedAllowance,
+    canScheduleDelayedFixture,
+    consumeDelayedAllowance,
+    getConsumedDelayedGameKeys,
     UI_SCALE_VALUES,
     UI_SCALE_DEFAULT,
     normalizeUiScale,
