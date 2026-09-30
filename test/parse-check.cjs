@@ -865,10 +865,24 @@ check('allowance applies only to delayed classification in eligibility',
   srcText.indexOf('canScheduleDelayedFixture(session.delayedAllowanceRuntime, f)') !== -1 &&
   srcText.indexOf('if (!fixture || !fixture.delayed) return true;') !== -1);
 // ---- Slice 3C presentation polish contracts ----
-check('recommendation sequence uses the reserved left-edge slot (no centre shift)',
-  srcText.indexOf("row.appendChild(el('span', 'mark', String(seq + 1))") !== -1);
-check('sequence number is advice metadata, never a board number',
+check('RECOMMENDED rows share the FIXTURES centring contract (same spans + symmetric reserves, overlay controls)',
+  srcText.indexOf("row.appendChild(el('span', 'sssl-pa', g.playerA.name))") !== -1 &&
+  srcText.indexOf("row.appendChild(el('span', 'sssl-vs', 'vs'))") !== -1 &&
+  srcText.indexOf("row.appendChild(el('span', 'sssl-pb', g.playerB.name))") !== -1 &&
+  srcText.indexOf("'.sssl-advice .sssl-pa{margin-left:var(--edge-reserve)}'") !== -1 &&
+  srcText.indexOf("'.sssl-advice .sssl-pb{margin-right:var(--edge-reserve)}'") !== -1 &&
+  srcText.indexOf("const ctrl = el('span', 'bassign-slot')") !== -1 &&
+  srcText.indexOf("el('span', 'mkslot')") !== -1);
+check('recommendation sequence is an absolute left-edge glyph (never shifts the matchup centre)',
+  srcText.indexOf("row.appendChild(el('span', 'amark', String(seq + 1))") !== -1 &&
+  srcText.indexOf("'.sssl-advice .amark{position:absolute;left:calc(var(--edge-reserve) - 18px)") !== -1 &&
   srcText.indexOf('NOT a physical board number') !== -1);
+check('advice rows keep no in-flow layout classes (old centre-shifting layout removed)',
+  srcText.indexOf("'.sssl-advice .mark{") === -1 &&
+  srcText.indexOf("'.sssl-advice .pa{") === -1 &&
+  srcText.indexOf("'.sssl-advice .ctrl{") === -1 &&
+  srcText.indexOf("'.sssl-advice .note{") === -1 &&
+  srcText.indexOf("'.sssl-advice .proj{") === -1);
 check('factual-row marker visibility rules (clean ordinary rows)',
   srcText.indexOf('const showMarkerControl = fMarkerId != null || f.status === \'playing\' ||') !== -1 &&
   srcText.indexOf('board-assigned (board-first') !== -1);

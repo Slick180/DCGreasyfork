@@ -3309,20 +3309,24 @@
     '.sssl-advicehead{font-size:var(--fs-2xs);font-weight:700;letter-spacing:0.08em;color:var(--muted);margin:12px 0 4px}',
     '.sssl-advicehead .badge{display:inline-block;padding:0 6px;border-radius:8px;margin-right:6px;font-size:var(--fs-3xs);color:var(--accent-ink);background:var(--accent)}',
     '.sssl-advicehead.projected .badge{background:var(--border);color:var(--text)}',
-    '.sssl-advice{display:flex;align-items:center;padding:var(--pad-row);border-radius:3px;border:1px dashed var(--accent);margin-bottom:2px}',
-    '.sssl-advice .mark{flex:0 0 26px;font-weight:700;font-size:var(--fs-2xs);color:var(--faint);text-align:center}',
-    // Recommendation SEQUENCE number: reserved left-edge slot (existing
-    // mark column), symmetric with the right control reserve. Metadata
-    // only — never a board number, never flow content that could shift
-    // the matchup centre.
+    '.sssl-advice{position:relative;display:flex;align-items:center;padding:var(--pad-row);border-radius:3px;border:1px dashed var(--accent);margin-bottom:2px}',
+    // RECOMMENDED centring = the FIXTURES centring contract, SHARED (no
+    // third scheme): same global .sssl-pa/.sssl-vs/.sssl-pb flex rules,
+    // SYMMETRIC --edge-reserve margins, and every control (sequence,
+    // BOARD, MARKER) in an absolute overlay slot so no control can shift
+    // the matchup centre. Sequence is left-edge metadata, never a board
+    // number; BOARD sits at the reserve edge; MARKER sits one slot further
+    // out (+96px, the fixture spacing) so a board-assigned row can carry
+    // both without overlap.
+    '.sssl-advice .sssl-pa{margin-left:var(--edge-reserve)}',
+    '.sssl-advice .sssl-pb{margin-right:var(--edge-reserve)}',
+    '.sssl-advice .amark{position:absolute;left:calc(var(--edge-reserve) - 18px);top:50%;transform:translateY(-50%);min-width:14px;text-align:center;font-weight:700;font-size:var(--fs-2xs);color:var(--faint)}',
     '.sssl-advice.projected{border-style:dotted;border-color:var(--faint);opacity:0.9}',
-    '.sssl-advice.projected .mark{color:var(--muted)}',
-    '.sssl-advice .pa{flex:1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-    '.sssl-advice .vs{flex:0 0 44px;text-align:center;font-weight:700;font-size:var(--fs-xs);color:var(--faint)}',
-    '.sssl-advice .pb{flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-    '.sssl-advice .note{font-size:var(--fs-2xs);color:var(--muted);white-space:nowrap;margin-left:8px}',
-    '.sssl-advice .proj{font-size:var(--fs-3xs);color:var(--faint);margin-left:10px;white-space:nowrap}',
-    '.sssl-advice .ctrl{margin-left:8px;flex:none}',
+    '.sssl-advice.projected .amark{color:var(--muted)}',
+    '.sssl-advice .bown{position:absolute;right:var(--edge-reserve);top:50%;transform:translateY(-50%);display:inline-flex;align-items:center;gap:4px}',
+    '.sssl-advice .bassign-slot{position:absolute;right:var(--edge-reserve);top:50%;transform:translateY(-50%)}',
+    '.sssl-advice .mkslot{position:absolute;right:calc(var(--edge-reserve) + 96px);top:50%;transform:translateY(-50%)}',
+    '.sssl-advice .mkown{position:absolute;right:calc(var(--edge-reserve) + 96px);top:50%;transform:translateY(-50%);display:inline-flex;align-items:center;gap:4px}',
     // Slice 3B managed physical boards.
     '.sssl-boards{margin-top:2px}',
     '.sssl-boards .brow{display:flex;align-items:center;padding:var(--pad-row);border-radius:3px;border:1px solid var(--border);margin-bottom:2px;min-height:calc(var(--fs) + 8px)}',
@@ -3726,30 +3730,36 @@
         listPane.appendChild(head);
         advice.recommended.forEach((g, seq) => {
           // RECOMMENDATION SEQUENCE (1..n, follow the actual advice order):
-          // presentation metadata in the reserved left-edge slot. It is
-          // NOT a physical board number and implies no board mapping —
-          // boards remain explicit operator assignment only.
+          // presentation metadata in an absolute left-edge slot, symmetric
+          // with the right control overlays. It is NOT a physical board number
+          // and implies no board mapping — boards remain explicit operator
+          // assignment only.
           const row = el('div', 'sssl-advice');
-          row.appendChild(el('span', 'mark', String(seq + 1)));
-          row.appendChild(el('span', 'pa', g.playerA.name));
-          row.appendChild(el('span', 'vs', 'vs'));
-          row.appendChild(el('span', 'pb', g.playerB.name));
+          // SEQUENCE: absolute left-edge metadata glyph (not a board
+          // number) — outside the flex flow so it cannot shift the centre.
+          row.appendChild(el('span', 'amark', String(seq + 1)));
+          // Matchup uses the SHARED fixture spans (.sssl-pa/.sssl-vs/
+          // .sssl-pb) so RECOMMENDED rows centre exactly like FIXTURES rows.
+          row.appendChild(el('span', 'sssl-pa', g.playerA.name));
+          row.appendChild(el('span', 'sssl-vs', 'vs'));
+          row.appendChild(el('span', 'sssl-pb', g.playerB.name));
           if (schedulerUi.managedBoardsEnabled) {
             const assignedBoard = findBoardOwningGame(rtv, g);
             if (assignedBoard) {
-              const chip = el('span', 'note');
+              const chip = el('span', 'bown');
               chip.appendChild(el('span', 'chip', 'BOARD ' + assignedBoard.boardNumber));
-              row.appendChild(chip);
-              const rel = el('button', 'sssl-brel', 'RELEASE');
+              const rel = el('button', 'sssl-brel', '×');
               rel.type = 'button';
               rel.title = 'Unassign this game from Board ' + assignedBoard.boardNumber + ' (the game itself is unchanged)';
+              rel.setAttribute('aria-label', 'Release Board ' + assignedBoard.boardNumber);
               rel.addEventListener('click', () => {
                 releaseBoard(rtv, assignedBoard.boardNumber);
                 render(state, storage, data, liveNote, diagnostics, schedulerUi);
               });
-              row.appendChild(rel);
+              chip.appendChild(rel);
+              row.appendChild(chip);
             } else {
-              const ctrl = el('span', 'ctrl');
+              const ctrl = el('span', 'bassign-slot');
               ctrl.appendChild(boardSelectEl(rtv, (n) => {
                 const res = assignGameToBoard(rtv, g, n, { absentIds: Array.from(absent) });
                 if (res.ok) data.boardRuntime = res.runtime;
@@ -3758,14 +3768,14 @@
               row.appendChild(ctrl);
             }
           }
+          // Slice 3C marker control (overlay slots, fixture-identical):
           // Slice 3C marker control: proposed = ADVICE (preselected only);
           // choosing/confirming is the operator's explicit act. Confirmed
           // games show the factual chip + × (duty-only release).
           if (g.confirmedMarkerId != null) {
-            const mk = el('span', 'note');
+            const mk = el('span', 'mkown');
             mk.appendChild(el('span', 'mkchip', 'MARKER ' + markerNameForId(data, g.confirmedMarkerId)));
             mk.title = 'Confirmed factual marker. Use × to release, or the marker dropdown to change.';
-            row.appendChild(mk);
             const relMk = el('button', 'sssl-brel', '×');
             relMk.type = 'button';
             relMk.title = 'Release marker duty only (board ownership, factual state and DartConnect are unchanged)';
@@ -3774,7 +3784,8 @@
               if (res.ok) data.markerRuntime = res.runtime;
               render(state, storage, data, liveNote, diagnostics, schedulerUi);
             });
-            row.appendChild(relMk);
+            mk.appendChild(relMk);
+            row.appendChild(mk);
           } else {
             const mkCtx = {
               players: data.roster,
@@ -3802,7 +3813,7 @@
                 render(state, storage, data, liveNote, diagnostics, schedulerUi);
               },
             });
-            const mkWrap = el('span', 'ctrl');
+            const mkWrap = el('span', 'mkslot');
             mkWrap.appendChild(sel);
             row.appendChild(mkWrap);
           }
@@ -3812,16 +3823,14 @@
       if (advice.projectedNext.length > 0) {
         const pHead = el('div', 'sssl-advicehead projected');
         pHead.appendChild(el('span', 'badge', 'PROJECTED NEXT'));
-        pHead.appendChild(document.createTextNode('next projected possibility'));
+        pHead.appendChild(document.createTextNode('next projected possibility' +
+          (advice.projectedNext.length > 1 ? ' · +' + (advice.projectedNext.length - 1) + ' more' : '')));
         listPane.appendChild(pHead);
         const pRow = el('div', 'sssl-advice projected');
-        pRow.appendChild(el('span', 'mark', '→'));
-        pRow.appendChild(el('span', 'pa', advice.projectedNext[0].playerA.name));
-        pRow.appendChild(el('span', 'vs', 'vs'));
-        pRow.appendChild(el('span', 'pb', advice.projectedNext[0].playerB.name));
-        if (advice.projectedNext.length > 1) {
-          pRow.appendChild(el('span', 'proj', '+' + (advice.projectedNext.length - 1) + ' more'));
-        }
+        pRow.appendChild(el('span', 'amark', '→'));
+        pRow.appendChild(el('span', 'sssl-pa', advice.projectedNext[0].playerA.name));
+        pRow.appendChild(el('span', 'sssl-vs', 'vs'));
+        pRow.appendChild(el('span', 'sssl-pb', advice.projectedNext[0].playerB.name));
         listPane.appendChild(pRow);
       }
       const listHead = el('div', 'sssl-advicehead projected');
