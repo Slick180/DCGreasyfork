@@ -15,7 +15,7 @@
                       "model":  "GPT-5",
                       "role":  "verification",
                       "started":  null,
-                      "note":  "Repository-protection pass completed; no development work is running."
+                      "note":  "Feature branch protected on GitHub and redundant pre-migration backup removed; no development work is running."
                   },
     "current_work_package":  "Match Night corrective passes protected in local commit 0c2381d: accepted scheduling, marker-mode, recommendation-layout, Tonight/Delayed, delayed-live and adjustable Not Here corrections",
     "accepted_branch":  "feature/scheduler-slice1-domain-model",
@@ -23,7 +23,7 @@
                                 "commit":  "0c2381dca481b3a345bf35d23a314f268f40d7a3",
                                 "short":  "0c2381d",
                                 "date":  "2026-10-16",
-                                "note":  "Accepted Match Night implementation and README documentation protected locally; not pushed or published."
+                                "note":  "Accepted Match Night implementation and README documentation protected on origin/feature/scheduler-slice1-domain-model; not merged or published to GreasyFork."
                             },
     "updated":  "2026-10-16",
     "provenance":  {
@@ -175,6 +175,19 @@
                         "resolves":  [
                                          "Corrective pass 2 is uncommitted and awaiting manager review on the 1366x768 screen"
                                      ]
+                    },
+                    {
+                        "date":  "2026-10-16",
+                        "work_package":  "Remote feature-branch protection and redundant migration-backup cleanup",
+                        "phase":  "V1.1.0 release candidate plus scheduler slice 1",
+                        "agent":  "Codex",
+                        "model":  "GPT-5",
+                        "role":  "verification",
+                        "from_checkpoint":  "0c2381dca481b3a345bf35d23a314f268f40d7a3",
+                        "to_checkpoint":  "8f2aba8eac81c3bede2616bb17a14c5227a651a5",
+                        "outcome":  "COMPLETE",
+                        "verification":  "Pushed feature/scheduler-slice1-domain-model to GitHub origin without force; fetched and verified remote tip 8f2aba8eac81c3bede2616bb17a14c5227a651a5, ten commits ahead of origin/main, containing 0c2381d and 8f2aba8. Reconfirmed archived refs were reachable and prior comparison found no unique project asset, then removed only the exact archived backup and updated archive/portfolio records.",
+                        "source":  "repository-evidence"
                     }
                 ]
 }
