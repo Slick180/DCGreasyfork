@@ -1,0 +1,180 @@
+﻿{
+    "schema_version":  "2.0.0",
+    "project":  "DCGreasyfork",
+    "repository":  {
+                       "root":  "E:\\Developments\\Software",
+                       "path":  "E:\\Developments\\Software\\DCGreasyfork"
+                   },
+    "project_type":  "userscript",
+    "phase":  "V1.1.0 release candidate plus scheduler slice 1",
+    "lifecycle":  "IMPLEMENTED",
+    "execution":  {
+                      "state":  "IDLE",
+                      "work_package":  null,
+                      "agent":  "Codex",
+                      "model":  "GPT-5",
+                      "role":  "verification",
+                      "started":  null,
+                      "note":  "Repository-protection pass completed; no development work is running."
+                  },
+    "current_work_package":  "Match Night corrective passes protected in local commit 0c2381d: accepted scheduling, marker-mode, recommendation-layout, Tonight/Delayed, delayed-live and adjustable Not Here corrections",
+    "accepted_branch":  "feature/scheduler-slice1-domain-model",
+    "accepted_checkpoint":  {
+                                "commit":  "0c2381dca481b3a345bf35d23a314f268f40d7a3",
+                                "short":  "0c2381d",
+                                "date":  "2026-10-16",
+                                "note":  "Accepted Match Night implementation and README documentation protected locally; not pushed or published."
+                            },
+    "updated":  "2026-10-16",
+    "provenance":  {
+                       "agent":  "Codex",
+                       "model":  "GPT-5",
+                       "role":  "verification"
+                   },
+    "verification":  {
+                         "authority":  "none",
+                         "mode":  "tests",
+                         "commit":  "0c2381dca481b3a345bf35d23a314f268f40d7a3",
+                         "result":  "SELF-TESTED",
+                         "timestamp":  "2026-10-16T13:52:26+01:00",
+                         "evidence":  "Codex re-ran node test/parse-check.cjs and node test/scheduler-check.cjs before commit; both exited 0 and the scheduler suite reported ALL SCHEDULER & OPTIMISER TESTS PASS (0 failures). Previously recorded real-browser verification in Chromium at 1366x768 remains implementer-run evidence. No independent verification.",
+                         "independent":  false
+                     },
+    "outstanding":  [
+                        "Complete scheduler slice 1 domain model",
+                        "Confirm the intended meaning of 'the next N projected games' for the marker list (implemented as the next N dispatchable games, N = free boards, matching the scheduler's own MARKER-4 rule)",
+                        "Publish V1.1.0 to GreasyFork (git tag v1.1.0 exists locally; userscript distribution not published per README)"
+                    ],
+    "blockers":  [
+
+                 ],
+    "dependencies":  [
+
+                     ],
+    "integrations":  [
+
+                     ],
+    "next_package":  "Continue scheduler slice 1 domain model; retain the protected corrective-pass checkpoint until any venue review feedback is explicit",
+    "history":  [
+                    {
+                        "date":  "2026-09-26",
+                        "work_package":  "V0.1.2/V0.1.3 era (Inertia JSON migration, overlay UI, Not Here, themes, live diagnostics)",
+                        "phase":  "V1.0 foundation",
+                        "agent":  "unknown",
+                        "model":  "unknown",
+                        "role":  "implementation",
+                        "from_checkpoint":  null,
+                        "to_checkpoint":  "63bca51710312ee88718e1557ed0184c9b831f0b",
+                        "outcome":  "IMPLEMENTED",
+                        "verification":  "checkpoint commit present in local history; per-version test evidence not established",
+                        "source":  "repository-evidence"
+                    },
+                    {
+                        "date":  "2026-09-27",
+                        "work_package":  "V1.0.0 release (used operationally on real match nights)",
+                        "phase":  "V1.0 foundation",
+                        "agent":  "unknown",
+                        "model":  "unknown",
+                        "role":  "implementation",
+                        "from_checkpoint":  null,
+                        "to_checkpoint":  "3d463b76fbf70e065d38d50de140ca33a1743c",
+                        "outcome":  "IMPLEMENTED",
+                        "verification":  "git tag v1.0.0; operational field use confirmed (edge cases around markers, unavailable players, board allocation fed later fixes); no independent verification recorded",
+                        "source":  "manually-confirmed"
+                    },
+                    {
+                        "date":  "2026-09-27",
+                        "work_package":  "V1.1 league-independent release candidate (dynamic league context, divisions, per-league state)",
+                        "phase":  "V1.1.0 release candidate plus scheduler slice 1",
+                        "agent":  "unknown",
+                        "model":  "unknown",
+                        "role":  "implementation",
+                        "from_checkpoint":  null,
+                        "to_checkpoint":  "d344cfae35a1e6384da18b2a424f89c5b383eae4",
+                        "outcome":  "IMPLEMENTED",
+                        "verification":  "git tag v1.1.0; README reports parse checks ALL PASS for RC scope (implementer-reported); not published to GreasyFork",
+                        "source":  "manually-confirmed"
+                    },
+                    {
+                        "date":  "2026-09-28",
+                        "work_package":  "Scheduler Slice 1 domain model",
+                        "phase":  "V1.1.0 release candidate plus scheduler slice 1",
+                        "agent":  "unknown",
+                        "model":  "unknown",
+                        "role":  "implementation",
+                        "from_checkpoint":  null,
+                        "to_checkpoint":  "18d42db595db7074f15920d80ef1878a0d2602f2",
+                        "outcome":  "IMPLEMENTED",
+                        "verification":  "scheduler checks exist in-repo; pass state at the time unrecorded",
+                        "source":  "repository-evidence"
+                    },
+                    {
+                        "date":  "2026-09-28",
+                        "work_package":  "Scheduler Slice 2A candidate sets, scoring and determinism",
+                        "phase":  "V1.1.0 release candidate plus scheduler slice 1",
+                        "agent":  "unknown",
+                        "model":  "unknown",
+                        "role":  "implementation",
+                        "from_checkpoint":  null,
+                        "to_checkpoint":  "af0e1e6aaaef0307f3265ea62e4fd86feaeba88a",
+                        "outcome":  "IMPLEMENTED",
+                        "verification":  "scheduler checks exist in-repo; pass state at the time unrecorded",
+                        "source":  "repository-evidence"
+                    },
+                    {
+                        "date":  "2026-09-28",
+                        "work_package":  "Scheduler Slice 2B global running order and waves",
+                        "phase":  "V1.1.0 release candidate plus scheduler slice 1",
+                        "agent":  "unknown",
+                        "model":  "unknown",
+                        "role":  "implementation",
+                        "from_checkpoint":  null,
+                        "to_checkpoint":  "3fd50297d13760f856007662ea012e661a8797b2",
+                        "outcome":  "IMPLEMENTED",
+                        "verification":  "scheduler checks exist in-repo; pass state at the time unrecorded",
+                        "source":  "repository-evidence"
+                    },
+                    {
+                        "date":  "2026-09-30",
+                        "work_package":  "Scheduler marker management and opening-wave corrective work",
+                        "phase":  "V1.1.0 release candidate plus scheduler slice 1",
+                        "agent":  "unknown",
+                        "model":  "unknown",
+                        "role":  "implementation",
+                        "from_checkpoint":  "aea35f3ada44c335eeacb1e3555bf62dc1ecbcda",
+                        "to_checkpoint":  "1fdc4ab5f7fb0cdb6e075cbe0b7d0583fffc8ada",
+                        "outcome":  "IMPLEMENTED",
+                        "verification":  "scheduler/parse checks exist; pass state for uncommitted follow-on changes unrecorded",
+                        "source":  "repository-evidence"
+                    },
+                    {
+                        "date":  "2026-10-16",
+                        "work_package":  "Match Night corrective pass: three-column layout acceptance, recommendation-row grid, Tonight/Delayed classification correction, delayed live-match awareness",
+                        "phase":  "V1.1.0 release candidate plus scheduler slice 1",
+                        "agent":  "unknown",
+                        "model":  "unknown",
+                        "role":  "implementation",
+                        "from_checkpoint":  "1fdc4ab5f7fb0cdb6e075cbe0b7d0583fffc8ada",
+                        "to_checkpoint":  "0c2381dca481b3a345bf35d23a314f268f40d7a3",
+                        "outcome":  "IMPLEMENTED",
+                        "verification":  "node test/parse-check.cjs and node test/scheduler-check.cjs exited 0 before commit; scheduler suite reported 0 failures. Previously recorded browser geometry verification in headless Chromium at 1366x768. Committed locally, unpushed.",
+                        "source":  "project-report"
+                    },
+                    {
+                        "date":  "2026-10-16",
+                        "work_package":  "Repository protection and migration cleanup",
+                        "phase":  "V1.1.0 release candidate plus scheduler slice 1",
+                        "agent":  "Codex",
+                        "model":  "GPT-5",
+                        "role":  "verification",
+                        "from_checkpoint":  "1fdc4ab5f7fb0cdb6e075cbe0b7d0583fffc8ada",
+                        "to_checkpoint":  "0c2381dca481b3a345bf35d23a314f268f40d7a3",
+                        "outcome":  "COMPLETE",
+                        "verification":  "Verified active Git root and feature branch; compared active and archived refs, tags, tracked changes and untracked files; found no unique archived committed history requiring a recovery ref; committed accepted work locally after parser and scheduler checks exited 0.",
+                        "source":  "repository-evidence",
+                        "resolves":  [
+                                         "Corrective pass 2 is uncommitted and awaiting manager review on the 1366x768 screen"
+                                     ]
+                    }
+                ]
+}
