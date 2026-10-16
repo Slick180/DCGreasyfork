@@ -281,7 +281,22 @@
   /** First discovered division is the default when no valid saved selection exists. */
   function defaultState(divisions) {
     const list = Array.isArray(divisions) ? divisions : [];
-    return { division: list.length ? list[0] : '', absentIds: [], selectedMatchDate: null, theme: null };
+    return {
+      division: list.length ? list[0] : '', absentIds: [], selectedMatchDate: null, theme: null,
+      // TRIAL-01: current-night operator settings, persisted inside the SAME
+      // league store key under `night` (no new storage key). TRIAL-04 marker
+      // availability overrides ride along as night.markerOffIds.
+      night: null,
+      markerOffIds: [],
+      // COLS-05: operator display state for the collapsible DELAYED columns,
+      // persisted inside the SAME league store key (no new storage key, no
+      // new storage mechanism). Keyed by division@date bucket, then by a
+      // STABLE fixture-group identifier (the fixture date), never a DOM
+      // position: manual Refresh is a full page reload, so the operator's
+      // collapse choices must survive a genuine reload to be preserved at
+      // all. Presentation only — the scheduler never reads it.
+      collapsedGroups: {},
+    };
   }
 
   /** Resolve the effective theme: saved value wins, else system preference. */
@@ -316,6 +331,72 @@
         if (typeof parsed.selectedMatchDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(parsed.selectedMatchDate)) {
           state.selectedMatchDate = parsed.selectedMatchDate;
         }
+        // COLS-05: persisted delayed-group collapse state, validated field by
+        // field (a group is only ever boolean; unknown buckets are dropped).
+        state.collapsedGroups = normalizeCollapsedGroups(parsed.collapsedGroups);
+        // TRIAL-01: current-night operator settings, validated field by
+        // field. Anything unsupported is dropped (falls back to defaults);
+        // nothing here is factual DartConnect state.
+        if (parsed.night && typeof parsed.night === 'object' && !Array.isArray(parsed.night)) {
+          const n = parsed.night;
+          const night = {};
+          if (typeof n.strategy === 'string' &&
+            Object.keys(SCHEDULING_STRATEGIES).map((k) => SCHEDULING_STRATEGIES[k]).indexOf(n.strategy) !== -1) {
+            night.strategy = n.strategy;
+          }
+          if (typeof n.includeDelayed === 'boolean') night.includeDelayed = n.includeDelayed;
+          if (typeof n.managedBoardsEnabled === 'boolean') night.managedBoardsEnabled = n.managedBoardsEnabled;
+          if (Number.isSafeInteger(n.boardCount) && n.boardCount >= 1 && n.boardCount <= 6) night.boardCount = n.boardCount;
+          if (isMarkerPolicy(n.markerPolicy)) night.markerPolicy = n.markerPolicy;
+          if (Array.isArray(n.markerOffIds)) night.markerOffIds = n.markerOffIds.filter((id) => Number.isSafeInteger(id));
+          if (n.delayedAllowance && typeof n.delayedAllowance === 'object' && !Array.isArray(n.delayedAllowance)) {
+            const da = {};
+            Object.keys(n.delayedAllowance).forEach((k) => {
+              const id = Number(k);
+              const v = n.delayedAllowance[k];
+              if (Number.isSafeInteger(id) && Number.isSafeInteger(v) && v >= 0) da[String(id)] = v;
+            });
+            night.delayedAllowance = da;
+          }
+          // ACCEPT-03/5: dispatched operator state per division@date bucket.
+          // Structure is validated here; whether an entry may be RESTORED
+          // (board number in range, game resolvable, no duplicates) is
+          // decided defensively by restoreDispatchState at boot.
+          if (n.dispatch && typeof n.dispatch === 'object' && !Array.isArray(n.dispatch)) {
+            const d = {};
+            Object.keys(n.dispatch).forEach((bucket) => {
+              const b = n.dispatch[bucket];
+              if (!b || typeof b !== 'object' || Array.isArray(b)) return;
+              const entry = {};
+              if (Array.isArray(b.boards)) {
+                entry.boards = b.boards
+                  .filter((x) => x && Number.isSafeInteger(x.boardNumber) && typeof x.gameKey === 'string' && x.gameKey)
+                  .map((x) => ({ boardNumber: x.boardNumber, gameKey: x.gameKey }));
+              }
+              if (b.pendingMarkers && typeof b.pendingMarkers === 'object' && !Array.isArray(b.pendingMarkers)) {
+                const pm = {};
+                Object.keys(b.pendingMarkers).forEach((k) => {
+                  const v = b.pendingMarkers[k];
+                  if (k && Number.isSafeInteger(v) && v >= 0) pm[k] = v;
+                });
+                entry.pendingMarkers = pm;
+              }
+              // MARKER-3: night marker history for fair rotation (minimum
+              // explicit history: confirmed marks per player + last marker).
+              entry.history = normalizeMarkerHistory(b.history);
+              // MARKER-6: CONFIRMED marker assignments for this bucket. Only
+              // shape is validated here; whether a stored duty may be
+              // RESTORED (game still exists, player not their own marker, one
+              // duty per player) is decided defensively at boot, exactly like
+              // board ownership.
+              entry.markers = snapshotMarkerAssignments(normalizeMarkerAssignments(b.markers));
+              d[bucket] = entry;
+            });
+            night.dispatch = d;
+          }
+          state.night = night;
+          if (Array.isArray(night.markerOffIds)) state.markerOffIds = night.markerOffIds.slice();
+        }
       }
     } catch (e) {
       warn('localStorage read failed, using defaults:', e);
@@ -340,6 +421,12 @@
           division: state.division,
           absentIds: state.absentIds,
           selectedMatchDate: state.selectedMatchDate || null,
+          // TRIAL-01: same key, same JSON — current-night operator settings.
+          night: state.night || null,
+          markerOffIds: Array.isArray(state.markerOffIds) ? state.markerOffIds : [],
+          // COLS-05: same key again — the operator's delayed-group collapse
+          // state (stable date keys, never DOM positions).
+          collapsedGroups: state.collapsedGroups || {},
         }));
       }
     } catch (e) {
@@ -428,6 +515,58 @@
   function withinSelectedDate(fixtures, dateIso) {
     if (!dateIso) return fixtures.slice();
     return fixtures.filter((f) => typeof f.date !== 'string' || !f.date || f.date <= dateIso);
+  }
+
+  /**
+   * COLS-09: the ONE authoritative Tonight/Delayed classification.
+   *
+   * A fixture's EFFECTIVE date is the date DartConnect places it under: the
+   * parser stores the containing group's date on the fixture (`f.date`), and
+   * every item in every group carries the same `sched_date` — verified against
+   * the captured league page — so a rescheduled match simply moves group and
+   * its effective date is the night it now belongs to. There is no separate
+   * per-match rescheduling field, therefore the effective date IS the
+   * authority; nothing is inferred beyond it.
+   *
+   * Relating that date to the SELECTED MATCH DATE (the night being run):
+   *   date === selected  -> CURRENT  (tonight's programme)
+   *   date  <  selected  -> DELAYED  (earlier outstanding backlog to catch up)
+   *   date  >  selected  -> FUTURE   (excluded from both panels and from the
+   *                                   scheduler; the upper-bound filter and the
+   *                                   session date guard already drop it, and
+   *                                   marking it non-delayed keeps a pending
+   *                                   bucket from leaking it in as "delayed")
+   * DartConnect's own bucket (pending/future groups) is only a FALLBACK, used
+   * when there is no match date to compare against (no selection, or a
+   * dateless fixture): it is stored per fixture as `bucketDelayed` and is what
+   * the parser used to apply unconditionally. Buckets are relative to the day
+   * the page was rendered, not to the operator's chosen night, which is why
+   * they cannot be the primary rule.
+   *
+   * Mutates `f.delayed` on the shared fixture objects so the fixture panels,
+   * the scheduler session, the delayed allowance and the diagnostics all read
+   * exactly the same flag. Idempotent; returns counts for tests/diagnostics.
+   */
+  function applyMatchDateClassification(fixtures, dateIso) {
+    const rows = Array.isArray(fixtures) ? fixtures : [];
+    const iso = typeof dateIso === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateIso) ? dateIso : '';
+    const counts = { total: rows.length, current: 0, delayed: 0, future: 0, undated: 0, bucketFallback: 0 };
+    rows.forEach((f) => {
+      if (!f) return;
+      const bucket = f.bucketDelayed === undefined ? !!f.delayed : !!f.bucketDelayed;
+      const date = typeof f.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(f.date) ? f.date : '';
+      if (!iso || !date) {
+        f.delayed = bucket;
+        counts.undated += 1;
+        if (bucket) counts.bucketFallback += 1;
+        return;
+      }
+      if (date === iso) { f.delayed = false; counts.current += 1; return; }
+      if (date < iso) { f.delayed = true; counts.delayed += 1; return; }
+      f.delayed = false;
+      counts.future += 1;
+    });
+    return counts;
   }
 
   /** Full display pipeline: division -> date upper bound -> Not Here removal. */
@@ -576,11 +715,15 @@
    * Only fixtures in `divisions` (discovered roster divisions) are accepted;
    * fixtures referencing divisions without a roster are skipped and counted
    * under skipped.unknownDivision (never silently merged, never invented).
-   * Skips completed (status C), byes, and entries without numeric IDs.
+   * Skips completed (status C) — but KEEPS them as factual completion
+   * evidence in `completed` (MARKER-2), because a player must have actually
+   * completed a game tonight before being recommended as a marker. Also skips
+   * byes and entries without numeric IDs.
    */
   function parseFixturesFromProps(props, divisions) {
     const allowed = new Set(Array.isArray(divisions) ? divisions : []);
     const fixtures = [];
+    const completed = [];
     const warnings = [];
     const skipped = { completed: 0, bye: 0, noIds: 0, unknownDivision: 0, notMatch: 0 };
     const groups = findMatchGroups(props, 'pending_match_groups').map((g) => ({ group: g, delayed: true }))
@@ -599,7 +742,26 @@
         }
         items.forEach((item) => {
         if (!item || item.item_type !== 'match') { skipped.notMatch += 1; return; }
-        if (item.status === 'C') { skipped.completed += 1; return; }
+        if (item.status === 'C') {
+          // MARKER-2: factual completion evidence for the FAIR "has already
+          // played tonight" preference (dated + division-scoped, ids only).
+          skipped.completed += 1;
+          const cHome = item.home || {};
+          const cAway = item.away || {};
+          const cHomeId = Number.isSafeInteger(cHome.id) ? cHome.id : null;
+          const cAwayId = Number.isSafeInteger(cAway.id) ? cAway.id : null;
+          if (cHomeId != null && cAwayId != null) {
+            completed.push({
+              matchId: typeof item.id === 'number' ? item.id : null,
+              date: typeof group.date === 'string' ? group.date.slice(0, 10) : '',
+              division,
+              playerA: { id: cAwayId },
+              playerB: { id: cHomeId },
+              source: 'schedule-props',
+            });
+          }
+          return;
+        }
         if (item.is_bye) { skipped.bye += 1; return; }
         const home = item.home || {};
         const away = item.away || {};
@@ -623,13 +785,19 @@
           sessionValue: parseSessionNumber(item.venue_board_label),
           playerA: { id: awayId, name: awayName },
           playerB: { id: homeId, name: homeName },
+          // COLS-09: DartConnect's own grouping, kept only as the FALLBACK
+          // classification used when there is no selected match date (or the
+          // fixture is dateless). The authoritative rule is the effective
+          // date against the selected match date — see
+          // applyMatchDateClassification.
           delayed: !!delayed,
+          bucketDelayed: !!delayed,
           status: 'waiting',
         });
         });
       });
     });
-    return { fixtures, warnings, skipped };
+    return { fixtures, completed, warnings, skipped };
   }
 
   /* ============================== 6b. Match Center live API ============================== */
@@ -777,8 +945,17 @@
     }
     const state = cleanName(m.status || m.state || m.stage || '');
     const ref = cleanName(m.match_reference || m.reference || m.spectator_key || '');
+    // MARKER-2: keep the FACTUAL date when the payload carries one, so a
+    // completed ('C') record can be scoped to the current match night
+    // instead of being guessed. reg-style payloads supply it via the date
+    // key (collectApiRecords); a per-record date field wins when present.
+    const dateRaw = cleanName(m.date || m.match_date || m.play_date || '');
+    const date = dateRaw ? dateRaw.slice(0, 10) : '';
     if (!matchIds.length && aId == null && !aName) return null;
-    return { matchIds, ids: [aId, bId], names: [aName, bName], state, ref, division: cleanName(m.division || '') };
+    return {
+      matchIds, ids: [aId, bId], names: [aName, bName], state, ref, date,
+      division: cleanName(m.division || ''),
+    };
   }
 
   /** Collect candidate record objects from an API payload of unknown shape. */
@@ -792,13 +969,17 @@
         : '(non-object)';
       stats.byStatus[key] = (stats.byStatus[key] || 0) + 1;
     }
-    function pushArray(arr) {
+    function pushArray(arr, dateHint) {
       arr.forEach((m) => {
         if (m && typeof m === 'object') {
           noteRaw(m);
           const rec = normalizeApiRecord(m);
-          if (rec) out.push(rec);
-          else if (stats) stats.dropped += 1;
+          if (rec) {
+            // MARKER-2: reg-style payloads nest matches under their factual
+            // date key; attach it when the record itself has none.
+            if (!rec.date && dateHint) rec.date = String(dateHint).slice(0, 10);
+            out.push(rec);
+          } else if (stats) stats.dropped += 1;
         }
       });
     }
@@ -814,7 +995,7 @@
           const byDate = v[d];
           if (byDate && typeof byDate === 'object' && !Array.isArray(byDate)) {
             Object.keys(byDate).forEach((date) => {
-              if (Array.isArray(byDate[date])) pushArray(byDate[date]);
+              if (Array.isArray(byDate[date])) pushArray(byDate[date], date);
             });
           }
         });
@@ -831,7 +1012,18 @@
    */
   function isLiveRecord(rec) {
     if (!rec.state) return true;
-    return !/^(c|completed|complete|finished|final)$/i.test(rec.state);
+    return !isCompletedRecord(rec);
+  }
+
+  /**
+   * MARKER-2: FACTUAL completion evidence. A record is completed when its
+   * state is one of c/completed/complete/finished/final. This is the ONLY
+   * completion signal the application accepts: absence from PLAYING proves
+   * nothing and is never treated as completion.
+   */
+  function isCompletedRecord(rec) {
+    if (!rec || !rec.state) return false;
+    return /^(c|completed|complete|finished|final)$/i.test(rec.state);
   }
 
   /** Safe shape summary of an API payload (keys + array lengths only, depth-limited). */
@@ -1023,26 +1215,42 @@
   function liveNoteText(info) {
     const clock = formatClock(info.lastChecked);
     const checked = clock ? ' · checked ' + clock : '';
+    // TRIAL-05: subtle operator cue that a background poll CHANGED the
+    // factual PLAYING set since the previous check — the screen updates
+    // itself, no manual Refresh needed.
+    const updated = info.updated ? ' · updated' : '';
     const playing = info.playing || 0;
     if (info.failed || (info.error && !info.rowsFound)) {
       currentLiveTitle = 'Match Center check failed (' + (info.error || 'unknown') + '). Showing schedule data only; PLAYING is last-known.';
       return 'Live: Connection error · ' + playing + ' playing (last known)' + checked;
     }
     if (info.fallback) {
-      currentLiveTitle = 'Live endpoint failed; schedule fallback in use. Source: ' + (info.source || 'none') + ' · HTTP ' + info.requestStatus;
-      return 'Live: Connected (schedule fallback) · ' + playing + ' playing' + checked;
+      currentLiveTitle = 'Live endpoint failed; schedule fallback in use. Source: ' + (info.source || 'none') + ' · HTTP ' + info.requestStatus +
+        (info.updated ? ' · PLAYING set changed at last check' : '');
+      return 'Live: Connected (schedule fallback) · ' + playing + ' playing' + checked + updated;
     }
     currentLiveTitle = 'Source: ' + (info.source || 'none') + ' · HTTP ' + info.requestStatus +
-      ' · rows ' + info.rowsFound + ' · ambiguous ' + (info.ambiguous ? info.ambiguous.length : 0);
-    return 'Live: Connected · ' + playing + ' playing' + checked;
+      ' · rows ' + info.rowsFound + ' · ambiguous ' + (info.ambiguous ? info.ambiguous.length : 0) +
+      (info.updated ? ' · PLAYING set changed at last check' : '');
+    return 'Live: Connected · ' + playing + ' playing' + checked + updated;
   }
 
   function refreshLive(ctx) {
     if (liveInFlight) return Promise.resolve();
     liveInFlight = true;
+    // COLS-09: identical classification rule for the live path, so the
+    // delayed-allowance consumption below and the fact that a delayed fixture
+    // is PLAYING always agree with what the panels show.
+    applyMatchDateClassification(ctx.data.fixtures, ctx.state.selectedMatchDate);
     const info = ctx.live;
     info.lastChecked = new Date().toISOString();
     info.error = null;
+    // TRIAL-05: snapshot the factual PLAYING set before this poll so the
+    // note can show whether the automatic check changed anything.
+    const liveGameKey = (f) => markerGameKey(f);
+    const playingKeysBefore = new Set(
+      (ctx.data.fixtures || []).filter((f) => f.status === 'playing').map(liveGameKey)
+    );
     const candidates = (ctx.data.fixtures || []).filter((f) =>
       f.division === ctx.state.division &&
       (!f.date || !ctx.state.selectedMatchDate || f.date <= ctx.state.selectedMatchDate));
@@ -1094,6 +1302,15 @@
         warn('live endpoints unreachable; preserving last-known PLAYING state.');
       }
       info.playing = ctx.data.fixtures.filter((f) => f.status === 'playing').length;
+      // TRIAL-05: did this poll change the factual PLAYING set?
+      const playingKeysAfter = new Set(
+        ctx.data.fixtures.filter((f) => f.status === 'playing').map(liveGameKey)
+      );
+      info.updated = playingKeysAfter.size !== playingKeysBefore.size ||
+        Array.from(playingKeysAfter).some((k) => !playingKeysBefore.has(k));
+      // ACCEPT-01: a factual DartConnect PLAYING change is a genuine re-plan —
+      // the remembered dispatch queue must not override it.
+      if (info.updated && ctx.data) ctx.data.dispatchOrder = null;
       // Slice 3C: the strongest reliable factual signal that a delayed
       // fixture has been taken into the programme is factual PLAYING.
       // Consumption happens at most once per fixture (identity recorded
@@ -1105,6 +1322,24 @@
           if (res.consumed) ctx.data.delayedAllowanceRuntime = res.runtime;
         }
       });
+      // MARKER-2: merge dated FACTUAL completion evidence from this poll
+      // (never inferred from PLAYING). New completion is a genuine
+      // eligibility change, so the remembered dispatch queue is dropped.
+      if (result.completed && result.completed.length) {
+        const keyOf = (m) => [m.date, m.matchId, m.playerA && m.playerA.id, m.playerB && m.playerB.id].join('|');
+        const existing = Array.isArray(ctx.data.completedMatches) ? ctx.data.completedMatches : [];
+        const seen = new Set(existing.map(keyOf));
+        const merged = existing.slice();
+        let added = false;
+        result.completed.forEach((m) => {
+          const k = keyOf(m);
+          if (!seen.has(k)) { seen.add(k); merged.push(m); added = true; }
+        });
+        if (added) {
+          ctx.data.completedMatches = merged;
+          ctx.data.dispatchOrder = null;
+        }
+      }
       ctx.rerender(liveNoteText(info));
     }).catch((e) => {
       liveInFlight = false;
@@ -1208,6 +1443,11 @@
     });
 
     function pushNotLive(out, all) {
+      // MARKER-2: completed ('C') records are FACTUAL completion evidence.
+      // They are surfaced as `completed` (never as PLAYING) so the
+      // FAIR "has already played tonight" preference has dated evidence to
+      // work from.
+      out.completed = completedMatchesFromApiRecords(all);
       all.forEach((rec) => {
         if (!isLiveRecord(rec)) out.rejected.push({ record: safeRecord(rec), reason: 'status-not-live' });
       });
@@ -1261,6 +1501,12 @@
     PLAYING: 'PLAYING',
     MARKING: 'MARKING',
     ABSENT: 'ABSENT',
+    // MARKER-1: a PENDING/RESERVED marker owner (proposal handed across at
+    // board dispatch). NOT factual MARKING — the operator has not confirmed
+    // it — but the player is unavailable to play or to mark anything else
+    // while the reservation stands, so one person can never own or be
+    // reserved for two marker assignments.
+    RESERVED: 'RESERVED',
   };
 
   const GAME_TYPES = {
@@ -1287,6 +1533,14 @@
     AVAILABLE: 'AVAILABLE',
     OCCUPIED: 'OCCUPIED',
   };
+
+  /**
+   * MARKER-4: the effective scheduling capacity the planner uses when Managed
+   * Boards are OFF. One named constant so the planner, the candidate-set
+   * search and the "next N" marker wave all agree — the capacity is never
+   * hard-coded to four in more than one place.
+   */
+  const DEFAULT_SCHEDULING_CAPACITY = 4;
 
   function createBoard(boardNumber) {
     return {
@@ -1367,6 +1621,9 @@
       activeGames: Array.isArray(cfg.activeGames) ? cfg.activeGames.slice() : [],
       completedMatchIds: toSet(cfg.completedMatchIds),
       markingPlayerIds: toSet(cfg.markingPlayerIds),
+      // MARKER-1: pending/reserved marker owners. NOT factual MARKING, but
+      // unavailable to play or to mark anything else meanwhile.
+      reservedMarkerIds: toSet(cfg.reservedMarkerIds),
       // Slice 3C: runtime delayed catch-up allowance (R per player). A NEW
       // delayed fixture is eligible only when BOTH participants hold R > 0.
       // Factual PLAYING delayed games are never constrained by R.
@@ -1453,6 +1710,14 @@
         }
       });
     }
+
+    // MARKER-1: pending/reserved marker owners project as RESERVED — a
+    // scheduler reservation, NOT factual MARKING and NOT a DartConnect fact.
+    // It only applies while the player holds no stronger factual state.
+    (session.reservedMarkerIds || []).forEach((id) => {
+      const p = map.get(id);
+      if (p && p.state === PLAYER_STATES.AVAILABLE) p.state = PLAYER_STATES.RESERVED;
+    });
 
     return map;
   }
@@ -1834,7 +2099,7 @@
    */
   function getCompatibleCandidateSets(session, playableGames, capacity, options) {
     const opts = options || {};
-    const cap = typeof capacity === 'number' && capacity > 0 ? Math.floor(capacity) : (session.managedBoardsEnabled ? session.boardCount : 4);
+    const cap = typeof capacity === 'number' && capacity > 0 ? Math.floor(capacity) : (session.managedBoardsEnabled ? session.boardCount : DEFAULT_SCHEDULING_CAPACITY);
     const pool = Array.isArray(playableGames) ? playableGames : getPlayableGames(session);
 
     if (pool.length === 0 || cap <= 0) return [];
@@ -2288,7 +2553,7 @@
 
     const capacity = (typeof opts.capacity === 'number' && opts.capacity > 0)
       ? Math.floor(opts.capacity)
-      : (session.managedBoardsEnabled ? (session.boardCount || 4) : 4);
+      : (session.managedBoardsEnabled ? (session.boardCount || DEFAULT_SCHEDULING_CAPACITY) : DEFAULT_SCHEDULING_CAPACITY);
 
     const maxWaves = typeof opts.maxWaves === 'number' && opts.maxWaves > 0 ? Math.floor(opts.maxWaves) : 50;
 
@@ -2609,6 +2874,253 @@
   }
 
   /**
+   * ACCEPT-01 (stable dispatch queue): order the freshly planned
+   * recommendations by the queue the operator actually SAW. Survivors keep
+   * their relative order and renumber from 1; newly valid games fill the
+   * tail in planner order. Never invents a game, never resurrects one the
+   * planner no longer recommends, never re-plans. Pure.
+   */
+  function applyDispatchOrder(recommended, orderKeys) {
+    const list = Array.isArray(recommended) ? recommended : [];
+    if (!Array.isArray(orderKeys) || orderKeys.length === 0) return list.slice();
+    const remaining = new Set(list.map((g) => markerGameKey(g)));
+    const out = [];
+    orderKeys.forEach((k) => {
+      if (!remaining.has(k)) return;
+      remaining.delete(k);
+      const g = list.find((x) => markerGameKey(x) === k);
+      if (g) out.push(g);
+    });
+    list.forEach((g) => {
+      const k = markerGameKey(g);
+      if (remaining.has(k)) { remaining.delete(k); out.push(g); }
+    });
+    return out;
+  }
+
+  /**
+   * ACCEPT-01: the displayed queue as stable game keys, for the next render
+   * in the CURRENT operator session. Session presentation memory only — it is
+   * NOT persisted and never overrides a genuine re-plan. Pure.
+   */
+  function rememberDispatchOrder(recommended) {
+    return (Array.isArray(recommended) ? recommended : []).map((g) => markerGameKey(g));
+  }
+
+  /** ACCEPT-03: operator board ownership snapshot (boardNumber + game key). Pure. */
+  function snapshotBoardAssignments(runtime) {
+    if (!runtime || !Array.isArray(runtime.boards)) return [];
+    return runtime.boards
+      .filter((b) => b && b.gameKey !== null)
+      .map((b) => ({ boardNumber: b.boardNumber, gameKey: b.gameKey }));
+  }
+
+  /**
+   * ACCEPT-03/5: snapshot of DISPATCHED operator state: explicit physical
+   * board ownership plus the PENDING (unconfirmed) marker advice handed off
+   * for those dispatched games only. Never contains planner output,
+   * PROJECTED waves, PLAYING or confirmed marker ownership. Pure.
+   */
+  function snapshotDispatchState(runtime, pendingMarkers, history) {
+    const boards = snapshotBoardAssignments(runtime);
+    const owned = new Set(boards.map((b) => b.gameKey));
+    const pendingMarkersOut = {};
+    const src = (pendingMarkers && typeof pendingMarkers === 'object') ? pendingMarkers : {};
+    Object.keys(src).forEach((k) => {
+      if (owned.has(k) && Number.isSafeInteger(src[k])) pendingMarkersOut[k] = src[k];
+    });
+    return { boards, pendingMarkers: pendingMarkersOut, history: normalizeMarkerHistory(history) };
+  }
+
+  /**
+   * ACCEPT-03/4B: defensive restore of dispatched operator state. An
+   * assignment is restored ONLY when the board number is valid for the
+   * current boardCount, the game key resolves to exactly one current fixture
+   * (unambiguous), no other restored game owns that board, and no game is
+   * restored to two boards. Everything else is discarded with a reason.
+   * Restoring NEVER implies PLAYING, completion, marker confirmation or
+   * player availability. Returns
+   * { runtime, pendingMarkers, markerRuntime, restored, rejected }; never
+   * throws.
+   */
+  function restoreDispatchState(boardCount, saved, fixtures) {
+    const runtime = createManagedBoardRuntime(boardCount);
+    const rows = runtime.boards.map((b) => ({ boardNumber: b.boardNumber, gameKey: null }));
+    const pendingMarkers = {};
+    const restored = [];
+    const rejected = [];
+    const list = (saved && Array.isArray(saved.boards)) ? saved.boards : [];
+    const pending = (saved && saved.pendingMarkers && typeof saved.pendingMarkers === 'object')
+      ? saved.pendingMarkers : {};
+    const fx = Array.isArray(fixtures) ? fixtures : [];
+    const usedBoards = new Set();
+    const usedKeys = new Set();
+    list.forEach((entry) => {
+      const bn = entry && entry.boardNumber;
+      const key = entry && entry.gameKey;
+      const fail = (reason) => { rejected.push({ boardNumber: bn, gameKey: key, reason }); };
+      if (!Number.isSafeInteger(bn) || bn < 1 || bn > rows.length) return fail('board-out-of-range');
+      if (typeof key !== 'string' || !key) return fail('invalid-game-key');
+      if (usedBoards.has(bn)) return fail('duplicate-board');
+      if (usedKeys.has(key)) return fail('duplicate-game');
+      const matches = fx.filter((f) => boardKeyForGame(f) === key);
+      if (matches.length === 0) return fail('unknown-game');
+      if (matches.length > 1) return fail('ambiguous-game');
+      usedBoards.add(bn);
+      usedKeys.add(key);
+      rows.find((b) => b.boardNumber === bn).gameKey = key;
+      restored.push({ boardNumber: bn, gameKey: key });
+      if (Number.isSafeInteger(pending[key])) pendingMarkers[key] = pending[key];
+    });
+    // MARKER-6/COLS-01: CONFIRMED marker ownership is operator FACT the night
+    // manager established deliberately, so it is restored with the same
+    // defensive discipline as board ownership: the game key must resolve to
+    // exactly ONE current fixture (a completed/vanished game's duty is over),
+    // the marker id must be a safe integer, one player may hold at most one
+    // duty, and a player can never mark their own game. Eligibility is NOT
+    // re-judged: a fact is not overwritten because availability has since
+    // changed (the conflict is surfaced, never silently repaired).
+    const savedMarkers = (saved && saved.markers && typeof saved.markers === 'object' && !Array.isArray(saved.markers))
+      ? saved.markers : {};
+    const markerRuntime = createMarkerRuntime();
+    Object.keys(savedMarkers).sort().forEach((key) => {
+      const id = savedMarkers[key];
+      if (!key || !Number.isSafeInteger(id) || id < 1) return;
+      const matches = fx.filter((f) => boardKeyForGame(f) === key);
+      if (matches.length !== 1) return;
+      if (Object.prototype.hasOwnProperty.call(markerRuntime.byMarker, id)) return;
+      const g = matches[0];
+      if ((g.playerA && g.playerA.id === id) || (g.playerB && g.playerB.id === id)) return;
+      markerRuntime.byGame[key] = id;
+      markerRuntime.byMarker[id] = key;
+    });
+    return { runtime: { boards: rows }, pendingMarkers, markerRuntime,
+      history: normalizeMarkerHistory((saved && saved.history) || null), restored, rejected };
+  }
+
+  /** ACCEPT-03: dispatch state is scoped to the current division + match date. Pure. */
+  function dispatchBucketKey(state) {
+    const division = (state && state.division) || '';
+    const date = (state && state.selectedMatchDate) || '';
+    return division + '@' + date;
+  }
+
+  /**
+   * ACCEPT-03: merge ONE scoped bucket while keeping the other
+   * division/date buckets intact, so one division's operator dispatch can
+   * never leak into another division's or another date's night. Pure.
+   */
+  function mergeDispatchBucket(previous, bucket, value) {
+    const out = {};
+    if (previous && typeof previous === 'object' && !Array.isArray(previous)) {
+      Object.keys(previous).forEach((k) => { out[k] = previous[k]; });
+    }
+    if (bucket && value) out[bucket] = value;
+    return out;
+  }
+
+  /* ============ 6e-bis. COLS-05: delayed fixture-group collapse state ============ */
+
+  /**
+   * STABLE identifier for one delayed fixture group: the fixture's own ISO
+   * DATE — the same identity the delayed date bar already uses — never a DOM
+   * index, row offset or position. A group therefore keeps its collapse
+   * choice through re-rendering, automatic polling, a manual Refresh (which
+   * is a genuine page reload) and back again. Falls back to the display
+   * label only for a fixture with no ISO date at all. Returns null when
+   * neither exists (such a group is never persisted). Pure.
+   */
+  function collapsedGroupKey(fixture) {
+    if (!fixture) return null;
+    if (typeof fixture.date === 'string' && fixture.date) return fixture.date;
+    if (typeof fixture.dateLabel === 'string' && fixture.dateLabel) return 'label:' + fixture.dateLabel;
+    return null;
+  }
+
+  /** Validate persisted collapse state: buckets of booleans, nothing else. Pure. */
+  function normalizeCollapsedGroups(raw) {
+    const out = {};
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+    Object.keys(raw).forEach((bucket) => {
+      const groups = raw[bucket];
+      if (!bucket || !groups || typeof groups !== 'object' || Array.isArray(groups)) return;
+      const entry = {};
+      Object.keys(groups).forEach((key) => {
+        if (key && typeof groups[key] === 'boolean') entry[key] = groups[key];
+      });
+      out[bucket] = entry;
+    });
+    return out;
+  }
+
+  /**
+   * The LIVE, mutable collapse map for the CURRENT division@date context,
+   * held inside the persisted state (so it survives a page reload) but only
+   * written to storage by an explicit persist call. A context that has never
+   * been seen starts EMPTY (every delayed group expanded) — changing
+   * division or match date therefore initialises that context's own state.
+   */
+  function collapsedGroupsFor(state) {
+    if (!state) return {};
+    if (!state.collapsedGroups || typeof state.collapsedGroups !== 'object' || Array.isArray(state.collapsedGroups)) {
+      state.collapsedGroups = {};
+    }
+    const bucket = dispatchBucketKey(state);
+    const all = state.collapsedGroups;
+    if (!all[bucket] || typeof all[bucket] !== 'object' || Array.isArray(all[bucket])) all[bucket] = {};
+    return all[bucket];
+  }
+
+  /**
+   * DELAY-LIVE: how many factually PLAYING fixtures each DELAYED date group
+   * currently holds, keyed by the SAME stable group key the collapse state
+   * uses. The live state itself is the existing one — a delayed fixture is
+   * PLAYING because the existing live poll matched a DartConnect record to it
+   * (`matchLiveFixtures`/`matchLiveRecords` through diagnoseLiveMatch); this
+   * helper only counts that fact per group. Pure.
+   */
+  function liveDelayedGroupCounts(delayedRows) {
+    const counts = {};
+    (Array.isArray(delayedRows) ? delayedRows : []).forEach((f) => {
+      if (!f || f.status !== 'playing') return;
+      const key = collapsedGroupKey(f);
+      if (!key) return;
+      counts[key] = (counts[key] || 0) + 1;
+    });
+    return counts;
+  }
+
+  /**
+   * DELAY-LIVE: the EFFECTIVE collapsed state of one delayed date group.
+   *
+   * A group containing a live match is always shown expanded, so the running
+   * game is never hidden behind a collapse the operator set earlier in the
+   * evening. This is derived, never written: the operator's stored preference
+   * is left untouched, so the moment the live match finishes (liveCount back
+   * to 0) the group returns to exactly the state the operator chose. Because
+   * the answer is a pure function of (stored preference, live count), repeated
+   * polling renders the same state every time — there is nothing to toggle, so
+   * no flicker and no collapse/expand loop. Pure.
+   */
+  function delayedGroupCollapsed(collapsedState, groupKey, liveCount) {
+    if (Number.isFinite(liveCount) && liveCount > 0) return false;
+    return !!(collapsedState && groupKey && collapsedState[groupKey]);
+  }
+
+  /**
+   * Drop collapse entries for fixture groups that no longer exist, so a
+   * removed date group can never leave stale UI behaviour behind (and the
+   * stored state cannot grow without bound). Returns the pruned map. Pure
+   * except for the state object it is explicitly given.
+   */
+  function pruneCollapsedGroups(state, liveGroupKeys) {
+    const map = collapsedGroupsFor(state);
+    const live = liveGroupKeys instanceof Set ? liveGroupKeys : new Set(liveGroupKeys || []);
+    Object.keys(map).forEach((key) => { if (!live.has(key)) delete map[key]; });
+    return map;
+  }
+
+  /**
    * Ownership conflicts with factual state, computed for presentation.
    * NEVER mutates: an assignment surviving a factual change (e.g. an
    * assigned player is marked NOT HERE) is preserved and surfaced
@@ -2678,6 +3190,15 @@
     const absent = ctx.absentIds || [];
     const playing = ctx.playingPlayerIds || [];
     const marking = ctx.markingPlayerIds || [];
+    // TRIAL-04: operator marker-availability overrides (stable player ids).
+    const markerOff = Array.isArray(ctx.markerOffIds) ? ctx.markerOffIds : [];
+    // MARKER-1: players RESERVED by a pending marker handoff on another
+    // board-dispatched game are not candidates anywhere else.
+    const reserved = Array.isArray(ctx.pendingMarkerIds) ? ctx.pendingMarkerIds : [];
+    // MARKER-9 (manager request): the list must only offer markers that leave
+    // the SEQUENCE playable. Players needed by the next projected games are not
+    // candidates — marking must never be the reason a later game cannot start.
+    const upcoming = Array.isArray(ctx.upcomingPlayerIds) ? ctx.upcomingPlayerIds : [];
     const gameKey = ctx.gameKey || null;
     const markedGames = ctx.markedGameKeys || [];
     const excludeParticipants = !!ctx.excludeParticipants;
@@ -2693,6 +3214,10 @@
       if (absent.indexOf(p.id) !== -1) return;
       if (playing.indexOf(p.id) !== -1) return;
       if (marking.indexOf(p.id) !== -1) return;
+      // TRIAL-04: MARKER OFF players are never offered as marker candidates.
+      if (markerOff.indexOf(p.id) !== -1) return;
+      if (reserved.indexOf(p.id) !== -1) return;
+      if (upcoming.indexOf(p.id) !== -1) return;
       if (rosterDivisionIds && rosterDivisionIds.indexOf(p.id) === -1) return;
       if (excludeParticipants && participants.indexOf(p.id) !== -1) return;
       if (gameKey != null && markedGames[gameKey] === p.id) return;
@@ -2700,6 +3225,372 @@
     });
     out.sort((a, b) => a.id - b.id);
     return out;
+  }
+
+  /* ============================== 6f-bis. MARKER model: policy, played preference, fair rotation ============================== */
+
+  /**
+   * MARKER-4: marker policy options. FAIR is the default.
+   *
+   * COLS-06: OFF is a first-class third option, not an absence of state.
+   * OFF disables AUTOMATIC marker recommendation only — ordinary fixture
+   * scheduling is untouched, a playable fixture is never rejected because no
+   * marker could be recommended, and neither confirmed marker facts nor the
+   * manual selector are removed. FAIR and LOSER keep their existing
+   * eligibility, fairness and dependency rules unchanged.
+   */
+  const MARKER_POLICIES = {
+    FAIR: 'FAIR',
+    LOSER: 'LOSER',
+    MANUAL: 'MANUAL',
+    OFF: 'OFF',
+  };
+
+  /** MARKER-7: does this mode let the OPERATOR assign markers by hand?
+   *  FAIR/LOSER/MANUAL all offer the selector; OFF offers no marker UI at all. */
+  function markerControlsVisible(policy) {
+    return policy !== MARKER_POLICIES.OFF;
+  }
+
+  /** MARKER-7: does this mode produce AUTOMATIC marker recommendations?
+   *  OFF and MANUAL both produce none — MANUAL is the operator's own choice
+   *  with no proposal, no preselection and no "no marker" verdict. */
+  function markerAdviceEnabledFor(policy) {
+    return policy === MARKER_POLICIES.FAIR || policy === MARKER_POLICIES.LOSER;
+  }
+
+  /** Is this a supported marker policy value? Pure. */
+  function isMarkerPolicy(value) {
+    return Object.keys(MARKER_POLICIES).map((k) => MARKER_POLICIES[k]).indexOf(value) !== -1;
+  }
+
+  /**
+   * MARKER-2: players with FACTUAL evidence of having completed at least one
+   * game on `date` (optionally within `division`). Accepted evidence is
+   * limited to completed ('C') entries parsed from the DartConnect schedule
+   * props and completed ('C') API records that carry a factual date.
+   * A game merely disappearing from PLAYING is NOT completion. Pure.
+   *
+   * This set is a FAIR ROTATION PREFERENCE (prefer somebody who has already
+   * played over an otherwise comparable candidate), NOT an eligibility gate:
+   * at the start of a night it is legitimately empty and the opening wave
+   * must still receive marker proposals.
+   */
+  function getPlayedPlayerIds(completedMatches, date, division) {
+    const out = new Set();
+    (Array.isArray(completedMatches) ? completedMatches : []).forEach((m) => {
+      if (!m) return;
+      if (date && m.date && m.date !== date) return;
+      if (division && m.division && m.division !== division) return;
+      const a = m.playerA && m.playerA.id;
+      const b = m.playerB && m.playerB.id;
+      if (Number.isSafeInteger(a)) out.add(a);
+      if (Number.isSafeInteger(b) && b !== a) out.add(b);
+    });
+    return out;
+  }
+
+  /**
+   * MARKER-2: completed matches from FACTUAL API records (live/matches
+   * endpoints). Only records that are completed AND carry a date and both
+   * competitor ids are usable; anything else is dropped rather than guessed.
+   * Pure.
+   */
+  function completedMatchesFromApiRecords(records) {
+    return (Array.isArray(records) ? records : [])
+      .filter((r) => r && isCompletedRecord(r) && typeof r.date === 'string' && r.date &&
+        Number.isSafeInteger(r.ids && r.ids[0]) && Number.isSafeInteger(r.ids && r.ids[1]))
+      .map((r) => ({
+        matchId: (r.matchIds && r.matchIds[0]) != null ? r.matchIds[0] : null,
+        date: r.date, division: r.division || '',
+        playerA: { id: r.ids[0] }, playerB: { id: r.ids[1] }, source: 'api-record',
+      }));
+  }
+
+  /* ------------------------- MARKER-3: night marker history + fair rotation ------------------------- */
+
+  /** Marker history runtime: marks per player + the most recent marker. Night scoped. */
+  function createMarkerHistory() {
+    return { marks: {}, recentPlayerId: null, recentGameKey: null };
+  }
+
+  /** How many games has this player been confirmed to mark tonight? Pure. */
+  function getMarkerMarkCount(history, playerId) {
+    const n = history && history.marks ? history.marks[playerId] : 0;
+    return Number.isSafeInteger(n) && n > 0 ? n : 0;
+  }
+
+  /** Record a CONFIRMED marker duty (operator act). Pure, never mutates. */
+  function recordMarkerMark(history, playerId, gameKey) {
+    const h = (history && history.marks) ? history : createMarkerHistory();
+    const marks = Object.assign({}, h.marks);
+    marks[playerId] = getMarkerMarkCount(h, playerId) + 1;
+    return { marks, recentPlayerId: playerId, recentGameKey: gameKey != null ? gameKey : null };
+  }
+
+  /**
+   * Release a confirmed marker duty: the mark no longer counts tonight (the
+   * operator stated it never happened). Pure, never mutates.
+   */
+  function releaseMarkerMark(history, playerId) {
+    const h = (history && history.marks) ? history : createMarkerHistory();
+    const marks = Object.assign({}, h.marks);
+    const cur = getMarkerMarkCount(h, playerId);
+    if (cur <= 1) delete marks[playerId];
+    else marks[playerId] = cur - 1;
+    return {
+      marks,
+      recentPlayerId: h.recentPlayerId === playerId ? null : (h.recentPlayerId != null ? h.recentPlayerId : null),
+      recentGameKey: h.recentPlayerId === playerId ? null : (h.recentGameKey != null ? h.recentGameKey : null),
+    };
+  }
+
+  /** Validate a persisted marker history (drops anything malformed). Pure. */
+  function normalizeMarkerHistory(raw) {
+    const out = createMarkerHistory();
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+    const marks = {};
+    if (raw.marks && typeof raw.marks === 'object' && !Array.isArray(raw.marks)) {
+      Object.keys(raw.marks).forEach((k) => {
+        const id = Number(k);
+        const n = raw.marks[k];
+        if (Number.isSafeInteger(id) && Number.isSafeInteger(n) && n > 0) marks[id] = n;
+      });
+    }
+    out.marks = marks;
+    if (Number.isSafeInteger(raw.recentPlayerId) && marks[raw.recentPlayerId]) {
+      out.recentPlayerId = raw.recentPlayerId;
+      if (typeof raw.recentGameKey === 'string' && raw.recentGameKey) out.recentGameKey = raw.recentGameKey;
+    }
+    return out;
+  }
+
+  /**
+   * MARKER-3/4: FAIR rotation ordering. Ranking tiers, in order:
+   *   1. has factually played/completed a game tonight - a PREFERENCE only
+   *      (never an eligibility gate: at the start of a night nobody has
+   *      played and the opening wave must still get markers);
+   *   2. fewer confirmed marks tonight (rotation burden);
+   *   3. the most recent marker is held back while an equivalent exists;
+   *   4. the planner's marker fitness;
+   *   5. id ascending - fully deterministic.
+   * Pure. Candidates may be player IDs or { id, name } objects.
+   */
+  function rankMarkerCandidatesByFairness(candidates, options) {
+    const o = options || {};
+    const history = o.history || null;
+    const scoreOf = typeof o.scoreOf === 'function' ? o.scoreOf : () => 0;
+    const avoid = Number.isSafeInteger(o.recentPlayerId) ? o.recentPlayerId : null;
+    const played = o.playedIds instanceof Set ? o.playedIds
+      : (Array.isArray(o.playedIds) ? new Set(o.playedIds) : null);
+    // Candidates may be player IDs or { id, name } objects.
+    const idOf = (c) => (c && typeof c === 'object' ? c.id : c);
+    return (Array.isArray(candidates) ? candidates.slice() : []).sort((a, b) => {
+      const ia = idOf(a);
+      const ib = idOf(b);
+      // Tier 1: factual "already played tonight" - preference, not a gate.
+      if (played) {
+        const pa = played.has(ia) ? 0 : 1;
+        const pb = played.has(ib) ? 0 : 1;
+        if (pa !== pb) return pa - pb;
+      }
+      const ca = getMarkerMarkCount(history, ia);
+      const cb = getMarkerMarkCount(history, ib);
+      if (ca !== cb) return ca - cb;
+      const ja = (avoid != null && ia === avoid) ? 1 : 0;
+      const jb = (avoid != null && ib === avoid) ? 1 : 0;
+      if (ja !== jb) return ja - jb;
+      const sa = scoreOf(ia);
+      const sb = scoreOf(ib);
+      if (sa !== sb) return sb - sa;
+      return ia - ib;
+    });
+  }
+
+  /**
+   * COLS-02: FACTUAL board occupancy versus effective capacity.
+   *
+   * The venue has a fixed number of physical boards. With Managed Boards OFF
+   * the operator never names them, so the planner's effective capacity is
+   * reused unchanged (this mode keeps its advisory meaning); with Managed
+   * Boards ON the operator's own board rows are the capacity.
+   *
+   * What is knowable in BOTH modes is how many boards are genuinely BUSY:
+   * every fixture that is factually PLAYING occupies one physical board, and
+   * every explicit managed assignment occupies one too. Occupancy is the
+   * union of those stable game keys, so a game that is both counting once —
+   * never double-counted, never above the venue capacity, never below zero.
+   * Returns { managed, boardsKnown, capacity, occupied, free }. Pure.
+   */
+  function getBoardOccupancy(session, boardRuntime) {
+    const managed = !!(session && session.managedBoardsEnabled);
+    const boards = boardRuntime && Array.isArray(boardRuntime.boards) ? boardRuntime.boards : null;
+    const rows = boards && boards.length > 0 ? boards.length : null;
+    const declared = session && Number.isSafeInteger(session.boardCount) && session.boardCount > 0
+      ? session.boardCount : null;
+    const capacity = Math.max(1, managed
+      ? (rows || declared || DEFAULT_SCHEDULING_CAPACITY)
+      : DEFAULT_SCHEDULING_CAPACITY);
+    const busy = new Set();
+    (boards || []).forEach((b) => {
+      if (b && typeof b.gameKey === 'string' && b.gameKey) busy.add(b.gameKey);
+    });
+    (session && Array.isArray(session.fixtures) ? session.fixtures : []).forEach((f) => {
+      if (!f || f.status !== 'playing') return;
+      const key = boardKeyForGame(f);
+      if (key) busy.add(key);
+    });
+    const occupied = Math.min(busy.size, capacity);
+    return { managed, boardsKnown: !!rows, capacity, occupied, free: Math.max(0, capacity - occupied) };
+  }
+
+  /**
+   * MARKER-4: how many games can currently be dispatched - the "next N" of
+   * the marker wave rule. This is the number of genuinely FREE physical
+   * board slots right now: an explicit dispatch occupies its board, and so
+   * does a factually PLAYING game the operator has not (or cannot) name,
+   * because the venue has no more boards than it has. A fully occupied
+   * venue therefore yields 0 — no new marker allocation is invented for
+   * games that cannot reach a board. Returns 0 when nothing can be
+   * dispatched. Pure.
+   */
+  function getNextDispatchCapacity(session, boardRuntime) {
+    return getBoardOccupancy(session, boardRuntime).free;
+  }
+
+  /**
+   * COLS-02: split the advisory running order into the games the venue can
+   * ACTUALLY START NOW (one per free physical board) and those that are
+   * merely next in the plan and therefore DEPEND on a board becoming free.
+   * The plan itself is never reordered, shortened or re-planned here — the
+   * split is presentation of the same plan against factual occupancy, so a
+   * venue with four games in play reports zero startable games instead of
+   * four "start now" recommendations. Pure.
+   */
+  function splitStartableRecommendations(recommended, freeBoards) {
+    const list = Array.isArray(recommended) ? recommended : [];
+    const n = Number.isSafeInteger(freeBoards) && freeBoards > 0
+      ? Math.min(freeBoards, list.length) : 0;
+    return { startable: list.slice(0, n), awaitingBoard: list.slice(n) };
+  }
+
+  /**
+   * MARKER-4: the HARD next-N participant exclusion. Returns every player who
+   * is due to play in the next `capacity` dispatchable games starting at
+   * `index` (a slice of the wave that could reach a board at or before this
+   * game), unioned with this game's own participants. Those players are NOT
+   * eligible to mark these games. Pure; capacity <= 0 yields the game's own
+   * participants only.
+   */
+  /**
+   * MARKER-9 (manager request): the players who must stay FREE so the sequence
+   * can be played — the next N games that can actually be dispatched, N being
+   * the number of free boards (the next N PROJECTED games). This is the very
+   * same union the scheduler's own marker search applies (MARKER-4), exposed so
+   * the operator's dropdown uses it too: until now the list offered players the
+   * scheduler itself would never have proposed, which is exactly the "markers
+   * that would break the following games" the manager saw.
+   *
+   * Deliberately NOT reserved: games beyond that next wave. A marker duty ends
+   * with the game it serves, so a player two waves out is not blocked here —
+   * reserving them would leave small divisions with no lists at all.
+   * Returns an array of player ids. Pure.
+   */
+  function markerSequenceReservedIds(adviceState, excludeGame) {
+    const out = new Set();
+    const a = adviceState || {};
+    const capacity = Number.isSafeInteger(a.freeBoards) && a.freeBoards > 0 ? a.freeBoards : 0;
+    if (capacity > 0 && Array.isArray(a.recommended)) {
+      nextDispatchParticipantIds(a.recommended, 0, capacity).forEach((id) => out.add(id));
+    }
+    // The game being marked is never "reserved against itself"; its own players
+    // are excluded as participants on every path anyway.
+    if (excludeGame) {
+      out.delete(excludeGame.playerA.id);
+      out.delete(excludeGame.playerB.id);
+    }
+    return Array.from(out).filter((id) => Number.isSafeInteger(id));
+  }
+
+  function nextDispatchParticipantIds(games, index, capacity) {
+    const out = new Set();
+    const list = Array.isArray(games) ? games : [];
+    const addGame = (g) => {
+      if (!g) return;
+      if (g.playerA && Number.isSafeInteger(g.playerA.id)) out.add(g.playerA.id);
+      if (g.playerB && Number.isSafeInteger(g.playerB.id)) out.add(g.playerB.id);
+    };
+    addGame(list[index]);
+    const n = Number.isSafeInteger(capacity) && capacity > 0 ? Math.floor(capacity) : 0;
+    for (let i = index; i < list.length && i < index + n; i += 1) addGame(list[i]);
+    return out;
+  }
+
+  /**
+   * MARKER-5: LOSER preference, FACTUAL ONLY. Ordered by factual loser ids
+   * supplied by a data source; when no factual result data exists this returns
+   * null so the caller falls back to FAIR. The loser is never guessed from
+   * scores, timing, board numbers or any heuristic, and is never
+   * auto-confirmed as MARKING. Pure.
+   */
+  function rankLoserCandidates(candidates, options) {
+    const o = options || {};
+    const loserIds = Array.isArray(o.loserIds) ? o.loserIds : null;
+    if (!loserIds) return null;
+    const losers = new Set(loserIds.filter((id) => Number.isSafeInteger(id)));
+    if (losers.size === 0) return null;
+    const idOf = (c) => (c && typeof c === 'object' ? c.id : c);
+    const list = Array.isArray(candidates) ? candidates.slice() : [];
+    return list.filter((c) => losers.has(idOf(c)))
+      .concat(rankMarkerCandidatesByFairness(list.filter((c) => !losers.has(idOf(c))), o));
+  }
+
+  /**
+   * MARKER-3/4: candidate ordering for the current policy. Unknown policies
+   * fall back to FAIR; LOSER falls back to FAIR whenever no factual loser
+   * evidence exists. Pure.
+   */
+  function orderMarkerCandidates(candidates, policy, options) {
+    const p = isMarkerPolicy(policy) ? policy : MARKER_POLICIES.FAIR;
+    if (p === MARKER_POLICIES.LOSER) {
+      const byLoser = rankLoserCandidates(candidates, options);
+      if (byLoser) return byLoser;
+    }
+    return rankMarkerCandidatesByFairness(candidates, options);
+  }
+
+  /**
+   * MARKER-5: is a policy usable with the factual data available right now?
+   * LOSER is unavailable until a factual result source supplies loser ids.
+   * Pure.
+   */
+  function isMarkerPolicyAvailable(policy, view) {
+    if (policy === MARKER_POLICIES.FAIR) return true;
+    // COLS-06: OFF needs no data at all — it is the absence of advice, which
+    // is always representable and always honest.
+    if (policy === MARKER_POLICIES.OFF) return true;
+    // MARKER-7: MANUAL needs no data either — the operator supplies the
+    // identity, and eligibility is checked when a marker is actually chosen.
+    if (policy === MARKER_POLICIES.MANUAL) return true;
+    if (policy === MARKER_POLICIES.LOSER) {
+      const ids = view && view.loserIds;
+      return Array.isArray(ids) && ids.some((id) => Number.isSafeInteger(id));
+    }
+    return false;
+  }
+
+  /**
+   * ACCEPT-02/3A: validate PENDING (unconfirmed) marker advice against
+   * CURRENT eligibility: NOT HERE, MARKER OFF, factual PLAYING, already
+   * MARKING elsewhere, wrong division, a participant, or this game's own
+   * confirmed marker all invalidate it. Returns the player id when the advice
+   * is still honest, otherwise null — stale advice is never converted into
+   * factual marker ownership. Pure.
+   */
+  function validatePendingMarker(pendingId, context) {
+    if (!Number.isSafeInteger(pendingId)) return null;
+    const eligible = getEligibleMarkerCandidates(context || {});
+    return eligible.some((c) => c.id === pendingId) ? pendingId : null;
   }
 
   /**
@@ -2726,6 +3617,14 @@
     // atomic operator transition).
     if (findMarkerForGame(runtime, game) != null) return { ok: false, runtime, reason: 'game-already-marked' };
     if ((ctx.absentIds || []).indexOf(playerId) !== -1) return { ok: false, runtime, reason: 'player-unavailable' };
+    // TRIAL-04: MARKER OFF is an operator availability override — the
+    // domain rejects the assignment (never only hidden in the dropdown).
+    if ((ctx.markerOffIds || []).indexOf(playerId) !== -1) return { ok: false, runtime, reason: 'player-marker-off' };
+    // MARKER-1: a pending/reserved marker duty elsewhere is exclusive — the
+    // operator can never confirm one player as marker for two games.
+    if ((ctx.pendingMarkerIds || []).indexOf(playerId) !== -1) {
+      return { ok: false, runtime, reason: 'player-marker-pending' };
+    }
     if ((ctx.playingPlayerIds || []).indexOf(playerId) !== -1) return { ok: false, runtime, reason: 'player-unavailable' };
     const currentDuty = findGameMarkedByPlayer(runtime, playerId);
     if (currentDuty != null) return { ok: false, runtime, reason: 'player-already-marking' };
@@ -2794,6 +3693,48 @@
   }
 
   /**
+   * FACTUALLY CONFIRMED marker ownership snapshot for persistence.
+   *
+   * The marker runtime remains the single source of truth; this is only a
+   * snapshot OF it, taken when the operator's state is already being written
+   * (dispatch/confirm/release), so no second truth is created. Keyed by the
+   * stable game key. ADVICE is deliberately excluded: an unconfirmed
+   * proposal must never come back as an assignment. Pure.
+   */
+  function snapshotMarkerAssignments(runtime) {
+    const out = {};
+    if (!runtime || !runtime.byGame || typeof runtime.byGame !== 'object') return out;
+    const seen = new Set();
+    Object.keys(runtime.byGame).forEach((key) => {
+      const id = runtime.byGame[key];
+      if (!key || !Number.isSafeInteger(id) || id < 1 || seen.has(id)) return;
+      // Both directions of the ownership pair must agree, otherwise the
+      // runtime is already broken and nothing is invented from it.
+      if (!runtime.byMarker || runtime.byMarker[id] !== key) return;
+      seen.add(id);
+      out[key] = id;
+    });
+    return out;
+  }
+
+  /** Validate persisted marker assignments into a marker runtime. Pure. */
+  function normalizeMarkerAssignments(raw) {
+    const runtime = createMarkerRuntime();
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return runtime;
+    const seen = new Set();
+    Object.keys(raw).forEach((key) => {
+      const id = raw[key];
+      // Player ids are positive integers (the same rule the manual selector
+      // enforces), so a malformed or negative entry is dropped, never obeyed.
+      if (!key || !Number.isSafeInteger(id) || id < 1 || seen.has(id)) return;
+      seen.add(id);
+      runtime.byGame[key] = id;
+      runtime.byMarker[id] = key;
+    });
+    return runtime;
+  }
+
+  /**
    * Factual conflicts for compact presentation. An assignment is preserved
    * when the operator later marks its marker NOT HERE; it is surfaced here
    * and resolved only by explicit operator action — never silently.
@@ -2816,9 +3757,12 @@
    * Delayed fixtures are OPPORTUNISTIC CATCH-UP games, never targets. The
    * per-player allowance bounds how many delayed catch-up fixtures each
    * player may be drawn into per runtime session. Runtime state only —
-   * never persisted.
+   * never persisted as invented truth (the OPERATOR's per-player overrides
+   * are persisted with the night settings; the default itself is not).
+   * TRIAL-06: the default is 0 — delayed catch-up is strictly opt-in per
+   * player (individual control or the All → 0 / All → 1 bulk controls).
    */
-  const DEFAULT_DELAYED_CATCHUP_ALLOWANCE = 1;
+  const DEFAULT_DELAYED_CATCHUP_ALLOWANCE = 0;
 
   /**
    * Factual outstanding-delayed backlog for every player id: N per player.
@@ -2851,7 +3795,10 @@
     const consumedDelayedGameKeys = {};
     Object.keys(backlog).forEach((idStr) => {
       const n = backlog[idStr];
-      if (n > 0) allowance[idStr] = Math.min(DEFAULT_DELAYED_CATCHUP_ALLOWANCE, n);
+      if (n > 0) {
+        const defaulted = Math.min(DEFAULT_DELAYED_CATCHUP_ALLOWANCE, n);
+        if (defaulted > 0) allowance[idStr] = defaulted;
+      }
     });
     return { allowance, consumedDelayedGameKeys };
   }
@@ -2930,6 +3877,39 @@
   /** Runtime-only consumed identities for delayed fixtures. Pure. */
   function getConsumedDelayedGameKeys(allowanceRuntime) {
     return (allowanceRuntime && allowanceRuntime.consumedDelayedGameKeys) || {};
+  }
+
+  /**
+   * TRIAL-01/06: snapshot of the operator's remaining-allowance overrides
+   * (R > 0 per player id) for night persistence. Consumption keys are
+   * runtime-only and never persisted. Pure.
+   */
+  function snapshotDelayedAllowance(allowanceRuntime) {
+    const out = {};
+    const allowance = (allowanceRuntime && allowanceRuntime.allowance) || {};
+    Object.keys(allowance).forEach((k) => {
+      const v = allowance[k];
+      if (Number.isSafeInteger(v) && v > 0) out[String(k)] = v;
+    });
+    return out;
+  }
+
+  /**
+   * TRIAL-01/06: re-apply saved operator allowance overrides on restore,
+   * re-clamped against the CURRENT factual backlog (0..N) via the domain
+   * core. Players without outstanding delayed games get nothing. Pure.
+   */
+  function applySavedDelayedAllowance(allowanceRuntime, saved, backlog) {
+    if (!allowanceRuntime || !saved || typeof saved !== 'object') return allowanceRuntime;
+    let rt = allowanceRuntime;
+    Object.keys(saved).forEach((k) => {
+      const id = Number(k);
+      if (Number.isSafeInteger(id)) {
+        const res = setRemainingDelayedAllowance(rt, id, saved[k], backlog);
+        if (res.ok) rt = res.runtime;
+      }
+    });
+    return rt;
   }
 
   /* ============================== 6g. UI scale (pure steps + FIT) ============================== */
@@ -3019,15 +3999,53 @@
 
   /* ============================== 6h. Slice 3A UI planning adapter (browser-dependent; NOT scheduler core) ============================== */
 
-  // Memory-only Slice 3A control state. Deliberately NOT persisted: every
-  // page load starts fresh. Existing division/date/absent/theme persistence
-  // is untouched.
+  // Memory-only Slice 3A control state defaults. TRIAL-01: the operator's
+  // CURRENT-NIGHT settings (strategy, delayed, managed boards, board count,
+  // TRIAL-04 marker availability, TRIAL-06 allowance overrides) now PERSIST
+  // inside the existing league store key under `night` — see loadState /
+  // saveState / buildNightPersistedState. Recommendations, projected waves,
+  // delayedCollapsed, PLAYING/completion and board/marker ownership
+  // runtimes stay memory-only: they are planner output or factual state
+  // that must come from DartConnect, never invented local truth.
   function defaultSchedulerUiState() {
     return {
       strategy: SCHEDULING_STRATEGIES.NORMAL,
       includeDelayed: false,
       managedBoardsEnabled: false,
       boardCount: 4, // UI default only; never hard-coded into scheduler logic.
+      // MARKER-4: marker policy. FAIR is the default; LOSER is only offered
+      // when factual result data exists (it does not today — see
+      // isMarkerPolicyAvailable).
+      markerPolicy: MARKER_POLICIES.FAIR,
+    };
+  }
+
+  /**
+   * TRIAL-01/ACCEPT-03: snapshot of the current-night operator configuration
+   * for persistence (inside the existing league store key, `night` field).
+   * Deliberately EXCLUDED: recommendations, projected waves, planner output,
+   * PLAYING/completion, delayedCollapsed, the remembered dispatch queue, and
+   * CONFIRMED marker ownership. INCLUDED: `dispatch` — explicit physical
+   * board ownership plus the pending (unconfirmed) marker advice handed off
+   * for those dispatched games, bucketed by division@date. That is operator
+   * state the Night Manager entered deliberately, never DartConnect truth.
+   */
+  function buildNightPersistedState(state, schedulerUi, delayedAllowanceRuntime, dispatchState, notHereWidth) {
+    const ui = schedulerUi || defaultSchedulerUiState();
+    const saved = Number.isSafeInteger(notHereWidth) && notHereWidth > 0 ? notHereWidth : null;
+    return {
+      // MARKER-10: the operator's Not Here width rides in the SAME night state
+      // as the zoom, the board count and the dispatch bucket — no new store.
+      notHereWidth: saved,
+      strategy: ui.strategy,
+      includeDelayed: !!ui.includeDelayed,
+      managedBoardsEnabled: !!ui.managedBoardsEnabled,
+      boardCount: Math.min(6, Math.max(1, Math.floor(ui.boardCount) || 4)),
+      markerPolicy: isMarkerPolicy(ui.markerPolicy) ? ui.markerPolicy : MARKER_POLICIES.FAIR,
+      markerOffIds: (Array.isArray(state.markerOffIds) ? state.markerOffIds : []).slice(),
+      delayedAllowance: snapshotDelayedAllowance(delayedAllowanceRuntime),
+      dispatch: (dispatchState && typeof dispatchState === 'object' && !Array.isArray(dispatchState))
+        ? dispatchState : {},
     };
   }
 
@@ -3051,6 +4069,42 @@
    *
    * No board identity is invented: unmanaged capacity is capacity only.
    */
+  /**
+   * MARKER-1: player ids reserved by PENDING marker handoffs on board-
+   * dispatched games, filtered by FACTUAL conflicts only (NOT HERE, factual
+   * PLAYING, already-confirmed MARKING, or a participant of the game the
+   * pending marker belongs to). Pure.
+   */
+  function reservedPendingMarkerIds(data, state, exceptGameKey) {
+    const pending = (data && data.pendingMarkers) || {};
+    const fixtures = (data && data.fixtures) || [];
+    const absent = new Set((state && state.absentIds) || []);
+    const playing = new Set();
+    fixtures.forEach((f) => {
+      if (f.status !== 'playing') return;
+      if (f.playerA && Number.isSafeInteger(f.playerA.id)) playing.add(f.playerA.id);
+      if (f.playerB && Number.isSafeInteger(f.playerB.id)) playing.add(f.playerB.id);
+    });
+    const marking = new Set();
+    const mrt = data && data.markerRuntime;
+    if (mrt && mrt.byMarker) {
+      Object.keys(mrt.byMarker).forEach((k) => { if (Number.isSafeInteger(Number(k))) marking.add(Number(k)); });
+    }
+    const out = [];
+    Object.keys(pending).forEach((gameKey) => {
+      // MARKER-1: a reservation only binds OTHER games — the dispatched game
+      // that owns the pending marker may still confirm/change it.
+      if (exceptGameKey != null && gameKey === exceptGameKey) return;
+      const id = pending[gameKey];
+      if (!Number.isSafeInteger(id)) return;
+      if (absent.has(id) || playing.has(id) || marking.has(id)) return;
+      const owner = fixtures.find((f) => boardKeyForGame(f) === gameKey);
+      if (owner && (owner.playerA.id === id || owner.playerB.id === id)) return;
+      if (out.indexOf(id) === -1) out.push(id);
+    });
+    return out;
+  }
+
   function buildNightSession(schedulerUiState, data, state) {
     const ui = schedulerUiState || defaultSchedulerUiState();
     const boardCount = Math.min(6, Math.max(1, Math.floor(ui.boardCount) || 4));
@@ -3092,6 +4146,11 @@
       boardCount,
       includeDelayed: !!ui.includeDelayed,
       absentIds: Array.isArray(state.absentIds) ? state.absentIds.slice() : [],
+      // MARKER-1: players reserved by a valid pending marker handoff. Only
+      // FACTUAL conflicts are pre-filtered here (NOT HERE, factual PLAYING,
+      // already-confirmed MARKING, or a participant of its own game); the
+      // full eligibility re-check happens at display time.
+      reservedMarkerIds: reservedPendingMarkerIds(data, state),
       activeGames,
       completedMatchIds: [],
       // Confirmed markers are FACT: each owning player is projected as
@@ -3151,6 +4210,16 @@
      * and their markers are unavailable via the factual MARKING
      * projection — they are never overwritten by a better combination. */
     const playerStates = derivePlayerStates(session);
+    /* TRIAL-03 opening-wave resource validity, MARKER-4 generalised: the
+     * HARD marker rule is the next-N wave, where N is the number of games
+     * that can currently be dispatched to available board slots. Every
+     * player due to play in the next N dispatchable games is excluded from
+     * marker proposals for the WHOLE wave (and so is each game's own pair,
+     * which is a subset of that union whenever the game sits inside it). N is
+     * capacity-driven, never a hard-coded four, and it shrinks as boards are
+     * occupied. A game that cannot obtain a legal marker gets
+     * proposedMarkerId=null — the wave marker set may be smaller than the
+     * wave, but it is never impossible and never steals a next-N player. */
     const availableIds = [];
     playerStates.forEach((p) => {
       if (p.state === PLAYER_STATES.AVAILABLE) availableIds.push(p.id);
@@ -3161,7 +4230,51 @@
     const divRoster = filterRosterForDivision(data.roster, state && state.division);
     const divRosterIds = divRoster.map((p) => p.id);
     const availableIdsDiv = availableIds.filter((id) => divRosterIds.indexOf(id) !== -1);
-    const openPool = divRosterIds.length > 0 ? availableIdsDiv : availableIds;
+    // TRIAL-04: players switched MARKER OFF are never proposed as markers
+    // (domain rule, not just a dropdown filter). They remain fully playable.
+    const markerOffIds = (state && Array.isArray(state.markerOffIds)) ? state.markerOffIds : [];
+    const markerOffSet = new Set(markerOffIds);
+    const openPool = (divRosterIds.length > 0 ? availableIdsDiv : availableIds)
+      .filter((id) => !markerOffSet.has(id));
+    // MARKER-1: pending/reserved marker owners are excluded from the GLOBAL
+    // opening-wave allocation — a reserved player can never be proposed for
+    // another game (the observed duplicate-marker defect, fixed in the
+    // domain rather than the DOM).
+    const reservedIds = session.reservedMarkerIds || new Set();
+    // MARKER-2/4: "has played a game tonight" is NOT a hard eligibility
+    // rule. Gating on it made every opening-wave row read "MARKER: -" at the
+    // start of a night, when by definition nobody has played yet. It is a
+    // FAIR PREFERENCE only; the HARD rules are NOT HERE / MARKER OFF /
+    // PLAYING / MARKING / RESERVED / wrong division and the next-N
+    // dispatchable participant union. Manual operator selection stays
+    // ungated by both (see render).
+    const playedIds = getPlayedPlayerIds(
+      (data && data.completedMatches) || [],
+      state && state.selectedMatchDate,
+      state && state.division);
+    const proposalPool = openPool.filter((id) => !reservedIds.has(id));
+    // MARKER-4: how many games can be dispatched right now (free board
+    // slots; the planner's effective capacity when Managed Boards are OFF).
+    // 0 free boards means no new dispatchable allocation at all.
+    const nextCapacity = getNextDispatchCapacity(session, data && data.boardRuntime);
+    // COLS-02: the board picture behind the recommendations, so the UI can
+    // state plainly whether the venue has room for them RIGHT NOW instead of
+    // describing them all as immediately startable. The PLAN is untouched:
+    // this is factual occupancy alongside it, recomputed on every render
+    // (and therefore on every live-status change).
+    const occupancy = getBoardOccupancy(session, data && data.boardRuntime);
+    advice.totalBoards = occupancy.capacity;
+    advice.occupiedBoards = occupancy.occupied;
+    advice.freeBoards = occupancy.free;
+    // COLS-06 / MARKER-7: the marker mode the proposals below were produced
+    // under. OFF and MANUAL produce NO automatic marker recommendation at all;
+    // OFF additionally offers no marker UI (see markerControlsVisible), while
+    // MANUAL keeps the operator's own selector.
+    const markerPolicy = isMarkerPolicy(ui.markerPolicy) ? ui.markerPolicy : MARKER_POLICIES.FAIR;
+    const markerAdviceEnabled = markerAdviceEnabledFor(markerPolicy);
+    advice.markerPolicy = markerPolicy;
+    advice.markerAdviceEnabled = markerAdviceEnabled;
+    advice.markerControlsVisible = markerControlsVisible(markerPolicy);
     const markedGameKeys = Object.assign({}, (data.markerRuntime && data.markerRuntime.byGame) || {});
     const CANDIDATE_BREADTH = 4;
     const openGames = [];
@@ -3170,17 +4283,70 @@
       game.confirmedMarkerId = markedGameKeys[gKey] != null ? markedGameKeys[gKey] : null;
       if (game.confirmedMarkerId == null) openGames.push(game);
     });
+    // COLS-06/MARKER-7 (OFF and MANUAL): no automatic marker recommendation at
+    // all — no proposal, no preselection and no "no marker" verdict. Every
+    // fact that already exists is left exactly as it is (confirmedMarkerId
+    // above is a FACT and is still reported), the schedule advice itself is
+    // unchanged, and an unassigned marker is a legitimate state rather than a
+    // defect: a fixture is never withheld for want of a marker.
+    if (!markerAdviceEnabled) {
+      advice.recommended.forEach((game) => {
+        game.proposedMarkerId = null;
+        game.markerUnavailable = false;
+      });
+      return advice;
+    }
     const impactCache = {};
     const fitness = (id) => {
       if (impactCache[id] === undefined) impactCache[id] = evaluateMarkerImpact(session, id).score;
       return impactCache[id];
     };
-    const perGameCandidates = openGames.map((game) =>
-      openPool
-        .filter((id) => id !== game.playerA.id && id !== game.playerB.id)
-        .sort((a, b) => (fitness(b) - fitness(a)) || (a - b))
-        .slice(0, CANDIDATE_BREADTH)
-    );
+    // MARKER-3: FAIR rotation must drive the GLOBAL opening-wave allocation,
+    // not merely the candidate slice order (the search maximises this score).
+    // Each confirmed mark costs far more than any planner fitness value, so
+    // the least-burdened eligible player always wins; the most recent marker
+    // is additionally held back while an equivalent alternative exists.
+    const markerHistory = (data && data.markerHistory) || null;
+    const recentPlayerId = markerHistory && Number.isSafeInteger(markerHistory.recentPlayerId)
+      ? markerHistory.recentPlayerId : null;
+    const MARKER_FAIR_PENALTY = 1000;
+    const MARKER_RECENT_PENALTY = 250;
+    // MARKER-2: having FACTUALLY played/completed a game tonight is worth a
+    // real bonus in the global search (it outranks planner fitness, which
+    // spans roughly -100..130), but it is a preference: a single extra
+    // confirmed mark (1000) still outweighs it, so rotation burden - a duty
+    // that actually happened - always wins over the soft "has played" hint.
+    const MARKER_PLAYED_BONUS = 500;
+    const combinedScore = (id) => fitness(id) +
+      (playedIds.has(id) ? MARKER_PLAYED_BONUS : 0) -
+      (getMarkerMarkCount(markerHistory, id) * MARKER_FAIR_PENALTY) -
+      (recentPlayerId === id ? MARKER_RECENT_PENALTY : 0);
+    // Zero capacity: nothing can be dispatched, so no NEW marker allocation
+    // is invented. Existing advice/pending state is left untouched.
+    // MARKER-4 next-N union: the participants of the next N games that can
+    // currently be dispatched, unioned, are excluded for the whole wave.
+    const nextWaveIds = nextCapacity > 0
+      ? nextDispatchParticipantIds(advice.recommended, 0, nextCapacity)
+      : new Set();
+
+    const perGameCandidates = nextCapacity > 0
+      ? openGames.map((game) => {
+        // Own participants are excluded unconditionally; when this game sits
+        // inside the next-N window the union already covers them.
+        const ownIds = nextDispatchParticipantIds([game], 0, 0);
+        return orderMarkerCandidates(
+          proposalPool.filter((id) => !nextWaveIds.has(id) && !ownIds.has(id)),
+          markerPolicy,
+          {
+            history: markerHistory,
+            recentPlayerId,
+            scoreOf: combinedScore,
+            playedIds,
+            loserIds: (data && data.loserIds) || null,
+          }
+        ).slice(0, CANDIDATE_BREADTH);
+      })
+      : [];
     const chosen = new Array(openGames.length).fill(null);
     let bestScore = -Infinity;
     let bestSeq = null;
@@ -3192,21 +4358,35 @@
         if (better) { bestScore = score; bestSeq = seq.slice(); }
         return;
       }
-      const cands = perGameCandidates[idx];
+      const cands = perGameCandidates[idx] || [];
       if (!cands.length) { select(idx + 1, score, seq); return; }
+      let extended = false;
       for (let i = 0; i < cands.length; i++) {
         const id = cands[i];
         if (used.has(id)) continue;
         used.add(id);
         seq.push(id);
-        select(idx + 1, score + fitness(id), seq);
+        select(idx + 1, score + combinedScore(id), seq);
         seq.pop();
         used.delete(id);
+        extended = true;
       }
+      // TRIAL-03: when every candidate for this game is already used by an
+      // earlier wave game, the game legitimately gets NO proposed marker —
+      // skipping is a first-class branch, never a dead end (previously an
+      // exhausted-but-non-empty candidate list silently killed the branch).
+      if (!extended) select(idx + 1, score, seq);
     })(0, 0, []);
     openGames.forEach((game, i) => { game.proposedMarkerId = bestSeq ? bestSeq[i] : null; });
     advice.recommended.forEach((game) => {
       if (game.proposedMarkerId === undefined) game.proposedMarkerId = null;
+      // COLS-03: distinguish a fixture that has a COMPLETE marker
+      // recommendation from one that is playable but has NO eligible marker
+      // at all (or whose only eligible volunteers went to other games of the
+      // same wave). The fixture is never withheld for this and no marker is
+      // ever invented; the shortfall is simply STATED, so the operator sees
+      // the difference instead of an unexplained blank.
+      game.markerUnavailable = game.confirmedMarkerId == null && game.proposedMarkerId == null;
     });
     return advice;
   }
@@ -3214,8 +4394,8 @@
   /* ============================== 7. Compact UI ============================== */
 
   const CSS = [
-    '.sssl-overlay{--bg:#0f172a;--panel:#1e293b;--roster:#111c30;--text:#e2e8f0;--muted:#b5c0cd;--faint:#94a3b8;--border:#334155;--control:#243244;--control-border:#475569;--accent:#14b8a6;--accent-ink:#06281c;--row-alt:rgba(148,163,184,0.08);--datebar:#243244;--datebar-text:#b5c0cd;--absent-bg:#3b2f14;--absent-border:#f59e0b;--absent-text:#fcd34d;--playing:#22c55e;--playing-bg:#166534;--playing-ink:#f0fdf4;--delayed:#f59e0b;--err-border:#ef4444;--err-bg:#3b2228;--err-text:#fecaca;--fs:14px;--fs-sm:13px;--fs-xs:12px;--fs-2xs:11px;--fs-3xs:10px;--pad-strip:5px 16px;--pad-row:3px 10px;--pad-btn:4px 12px;--pad-btn-sm:2px 10px;--pad-pane:8px 16px;--pad-pane-side:8px 12px;--pad-player:3px 8px;--pad-sel:4px 8px;--gap-bar:12px;--gap-ctrl:6px;--gap-strip:10px;--edge-reserve:96px;--roster-min:252px;--roster-max:282px;position:fixed;inset:0;z-index:2147483647;background:var(--bg);color:var(--text);font-family:"Segoe UI",Arial,sans-serif;font-size:var(--fs);display:flex;flex-direction:column}',
-    '.sssl-overlay[data-theme="light"]{--bg:#f1f5f9;--panel:#ffffff;--roster:#f8fafc;--text:#0f172a;--muted:#475569;--faint:#64748b;--border:#cbd5e1;--control:#ffffff;--control-border:#94a3b8;--accent:#0d9488;--accent-ink:#ffffff;--row-alt:rgba(15,23,42,0.045);--datebar:#334155;--datebar-text:#f8fafc;--absent-bg:#fef3c7;--absent-border:#b45309;--absent-text:#92400e;--playing:#15803d;--playing-bg:#15803d;--playing-ink:#ffffff;--delayed:#b45309;--err-border:#dc2626;--err-bg:#fef2f2;--err-text:#991b1b;color-scheme:light}',
+    '.sssl-overlay{--bg:#0f172a;--panel:#1e293b;--roster:#111c30;--text:#e2e8f0;--muted:#b5c0cd;--faint:#94a3b8;--border:#334155;--control:#243244;--control-border:#475569;--accent:#14b8a6;--accent-ink:#06281c;--row-alt:rgba(148,163,184,0.08);--datebar:#243244;--datebar-text:#b5c0cd;--absent-bg:#3b2f14;--absent-border:#f59e0b;--absent-text:#fcd34d;--playing:#22c55e;--playing-bg:#166534;--playing-ink:#f0fdf4;--delayed:#f59e0b;--err-border:#ef4444;--err-bg:#3b2228;--err-text:#fecaca;--fs:14px;--fs-sm:13px;--fs-xs:12px;--fs-2xs:11px;--fs-3xs:10px;--pad-strip:5px 16px;--pad-row:3px 10px;--pad-btn:4px 12px;--pad-btn-sm:2px 10px;--pad-pane:8px 16px;--pad-pane-side:8px 12px;--pad-player:3px 8px;--pad-sel:4px 8px;--gap-bar:12px;--gap-ctrl:6px;--gap-strip:10px;--edge-reserve:96px;--roster-min:252px;--roster-max:282px;position:fixed;inset:0;z-index:2147483647;background:var(--bg);color:var(--text);font-family:"Segoe UI",Arial,sans-serif;font-size:var(--fs);display:flex;flex-direction:column;overflow:hidden}',
+    '.sssl-overlay[data-theme="light"]{--bg:#e8eaf0;--panel:#f2f3f7;--roster:#eceef3;--text:#0f172a;--muted:#475569;--faint:#64748b;--border:#cbd5e1;--control:#f7f8fa;--control-border:#94a3b8;--accent:#0d9488;--accent-ink:#ffffff;--row-alt:rgba(15,23,42,0.045);--datebar:#334155;--datebar-text:#f8fafc;--absent-bg:#fef3c7;--absent-border:#b45309;--absent-text:#92400e;--playing:#15803d;--playing-bg:#15803d;--playing-ink:#ffffff;--delayed:#b45309;--err-border:#dc2626;--err-bg:#fef2f2;--err-text:#991b1b;color-scheme:light}',
     '.sssl-overlay[data-zoom="75"]{--fs:10.5px;--fs-sm:9.75px;--fs-xs:9px;--fs-2xs:8.25px;--fs-3xs:7.5px;--pad-strip:3.75px 12px;--pad-row:2.25px 7.5px;--pad-btn:3px 9px;--pad-btn-sm:1.5px 7.5px;--pad-pane:6px 12px;--pad-pane-side:6px 9px;--pad-player:2.25px 6px;--pad-sel:3px 6px;--gap-bar:9px;--gap-ctrl:4.5px;--gap-strip:7.5px;--edge-reserve:72px;--roster-min:190px;--roster-max:212px}',
     '.sssl-overlay[data-zoom="80"]{--fs:11.2px;--fs-sm:10.4px;--fs-xs:9.6px;--fs-2xs:8.8px;--fs-3xs:8px;--pad-strip:4px 12.8px;--pad-row:2.4px 8px;--pad-btn:3.2px 9.6px;--pad-btn-sm:1.6px 8px;--pad-pane:6.4px 12.8px;--pad-pane-side:6.4px 9.6px;--pad-player:2.4px 6.4px;--pad-sel:3.2px 6.4px;--gap-bar:9.6px;--gap-ctrl:4.8px;--gap-strip:8px;--edge-reserve:76.8px;--roster-min:202px;--roster-max:226px}',
     '.sssl-overlay[data-zoom="90"]{--fs:12.6px;--fs-sm:11.7px;--fs-xs:10.8px;--fs-2xs:9.9px;--fs-3xs:9px;--pad-strip:4.5px 14.4px;--pad-row:2.7px 9px;--pad-btn:3.6px 10.8px;--pad-btn-sm:1.8px 9px;--pad-pane:7.2px 14.4px;--pad-pane-side:7.2px 10.8px;--pad-player:2.7px 7.2px;--pad-sel:3.6px 7.2px;--gap-bar:10.8px;--gap-ctrl:5.4px;--gap-strip:9px;--edge-reserve:86.4px;--roster-min:227px;--roster-max:254px}',
@@ -3235,19 +4415,63 @@
     '.sssl-zoom button{background:var(--control);color:var(--text);border:1px solid var(--control-border);border-radius:4px;padding:var(--pad-btn-sm);font-size:var(--fs-sm);cursor:pointer;min-width:24px;text-align:center}',
     '.sssl-zoom button:hover{border-color:var(--accent)}',
     '.sssl-zoom .val{font-size:var(--fs-sm);color:var(--muted);min-width:42px;text-align:center;white-space:nowrap}',
-    '.sssl-main{flex:1;display:flex;min-height:0}',
-    '.sssl-fixtures{flex:1 1 77%;overflow-y:auto;padding:var(--pad-pane);min-width:0}',
-    // Slice 3C: content-aware sidebar. The roster hugs its rendered content
-    // (max-content: larger names + the delayed allowance control) and grows
-    // ONLY up to the per-scale --roster-max safety bound, never without
-    // limit; below the content width it falls back to --roster-min. The
-    // fixture area always stays dominant (flex-shrink on the sidebar only).
-    '.sssl-roster{flex:0 1 max-content;min-width:var(--roster-min);max-width:var(--roster-max);border-left:1px solid var(--border);overflow-y:auto;overflow-x:hidden;padding:var(--pad-pane-side);background:var(--roster)}',
+    // COLS-07: the scheduling area stacks above the columns (column flex), and
+    // the columns themselves are one flex row of independent scrollers.
+    '.sssl-main{flex:1;display:flex;flex-direction:column;min-height:0}',
+    // The 1366x768 operator screen is the primary target: the scheduling area
+    // stays as compact as it can be (30vh ceiling) so the fixture columns keep
+    // the majority of a ~640px usable viewport.
+    '.sssl-advicepane{flex:0 1 auto;min-height:0;max-height:30vh;overflow-y:auto;overflow-x:hidden;padding:0 var(--pad-pane)}',
+    '.sssl-cols{flex:1;display:flex;min-height:0;align-items:stretch}',
+    // LEFT region = recommendations on top, tonight | delayed beneath them.
+    '.sssl-left{flex:1 1 75%;display:flex;flex-direction:column;min-height:0;min-width:0}',
+    '.sssl-fixtures-row{flex:1;display:flex;min-height:0;min-width:0}',
+    '.sssl-col{display:flex;flex-direction:column;min-height:0;min-width:0;overflow:hidden}',
+    // 2:1 inside the 75% left region keeps tonight ~50% of the page and
+    // delayed ~25%; NOT HERE is a FIXED 25% and runs the full height.
+    '.sssl-col.today{flex:2 1 0}',
+    '.sssl-col.delayed{flex:1 1 0;border-left:1px solid var(--border);background:var(--roster)}',
+    // MARKER-10: the Not Here column is ADJUSTABLE. Its default (25%) is what
+    // it always was; --nh-w takes over once the operator drags the divider or
+    // the panel remembers a width from a previous night in this league.
+    '.sssl-col.nothere{flex:0 0 var(--nh-w,25%);border-left:1px solid var(--border);background:var(--roster)}',
+    '.sssl-splitter{flex:0 0 7px;align-self:stretch;cursor:col-resize;position:relative;background:transparent;touch-action:none}',
+    '.sssl-splitter::before{content:"";position:absolute;left:3px;top:0;bottom:0;width:1px;background:var(--border)}',
+    '.sssl-splitter:hover::before,.sssl-splitter:focus-visible::before{background:var(--accent);width:2px;left:2px}',
+    '.sssl-splitter:focus-visible{outline:1px solid var(--accent);outline-offset:-1px}',
+    // The rail: the fly-out's one advantage (out of the way) without losing the
+    // left columns, and one click back.
+    '.sssl-nhrail{display:none}',
+    '.sssl-overlay[data-nh="rail"] .sssl-col.nothere{flex:0 0 54px;overflow:hidden}',
+    '.sssl-overlay[data-nh="rail"] .sssl-roster{display:none}',
+    '.sssl-overlay[data-nh="rail"] .sssl-nhrail{display:flex;align-items:center;justify-content:center;writing-mode:vertical-rl;font-size:var(--fs-2xs);font-weight:700;letter-spacing:0.14em;color:var(--muted);padding:10px 0;cursor:pointer;height:100%}',
+    '.sssl-fixtures{flex:1;overflow-y:auto;overflow-x:hidden;padding:var(--pad-pane);min-width:0;min-height:0}',
+    '.sssl-fixtures.delayed{padding:var(--pad-pane-side)}',
+    // Narrow windows: the three columns stack rather than clip (no horizontal
+    // overflow, no lost control), and each keeps scrolling on its own.
+    '@media (max-width:860px){.sssl-cols{flex-wrap:wrap;overflow-y:auto}.sssl-cols .sssl-left{flex:1 1 100%}.sssl-col.today,.sssl-col.delayed{flex:1 1 50%}.sssl-col.nothere{flex:1 1 100%;border-left:none;border-top:1px solid var(--border)}}',
+    // NOT HERE is now its own column. Its header (heading + Clear Not Here +
+    // the bulk allowance controls) is FIXED at the top and only the player
+    // list scrolls, so the clear action and the bulk controls are always
+    // reachable without scrolling back up. The header stays compact.
+    '.sssl-rosterhead{flex:none;padding:6px var(--pad-pane-side) 4px;background:var(--roster);border-bottom:1px solid var(--border)}',
+    '.sssl-rosterhead .sssl-rhead{margin:0}',
+    '.sssl-rheadrow{display:flex;align-items:center;gap:6px;min-width:0}',
+    '.sssl-rheadrow .sssl-rhead{flex:1;min-width:0}',
+    '.sssl-rheadrow .sssl-btn{padding:1px 8px;font-size:var(--fs-2xs)}',
+    '.sssl-roster{flex:1;min-height:0;min-width:0;overflow-y:auto;overflow-x:hidden;padding:var(--pad-pane-side);background:var(--roster)}',
     '.sssl-datebar{background:var(--datebar);color:var(--datebar-text);font-size:var(--fs-xs);font-weight:700;padding:3px var(--gap-strip);border-radius:4px;margin:10px 0 4px;position:sticky;top:0}',
     '.sssl-datebar.collapsible{cursor:pointer;user-select:none}',
     '.sssl-datebar.collapsible:hover{opacity:0.85}',
     '.sssl-datebar .fold{margin-right:6px;font-size:var(--fs-xs)}',
     '.sssl-datebar .delayed{color:var(--delayed);font-weight:700;margin-left:8px;font-size:var(--fs-2xs)}',
+    // DELAY-LIVE: a delayed group holding a live match reads as live at a
+    // glance (green bar + compact count) without moving anything: the bar
+    // keeps its height, position and the whole layout unchanged.
+    '.sssl-datebar.live{background:var(--playing-bg);color:var(--playing-ink)}',
+    '.sssl-datebar.live .delayed{color:var(--playing-ink)}',
+    '.sssl-datebar .liven{display:inline-block;margin-left:6px;padding:0 5px;border-radius:8px;font-size:var(--fs-3xs);font-weight:700;letter-spacing:0.04em;background:var(--playing);color:var(--playing-ink)}',
+    '.sssl-datebar.autolive{cursor:default}',
     '.sssl-row{display:flex;align-items:center;padding:var(--pad-row);border-radius:3px;line-height:1.35;position:relative}',
     // Matchup centre invariance: right-side status/action controls are
     // absolute overlays and never consume flex width. The two name spans
@@ -3292,7 +4516,13 @@
     // Options stay 0..N (the caret is not an option); picking a value never
     // toggles NOT HERE.
     '.sssl-rwrap{position:relative;display:inline-flex;align-items:center}',
-    '.sssl-rsel{background:var(--control);color:var(--accent);border:1px solid var(--control-border);border-radius:3px;padding:1px 14px 1px 5px;font-size:var(--fs-2xs);width:calc(var(--fs-2xs) * 3 + 4px);cursor:pointer;font-weight:700;text-align:left;-webkit-appearance:none;appearance:none}',
+    // MARKER-8 (Not Here numerics): the value is CENTRED horizontally and
+    // vertically, set at ~13px at 100% (--fs 14px minus 1px, so it scales with
+    // every zoom step), bold for readability on the venue screen, and the box
+    // is a consistent width that fits a single- or multi-digit value without
+    // clipping. Symmetric padding keeps the centred value clear of the overlaid
+    // caret; the caret itself is unchanged and still pointer-events:none.
+    '.sssl-rsel{background:var(--control);color:var(--accent);border:1px solid var(--control-border);border-radius:3px;padding:2px 12px;font-size:calc(var(--fs) - 1px);width:calc(var(--fs) * 2 + 16px);min-height:calc(var(--fs) + 5px);line-height:1.1;cursor:pointer;font-weight:700;text-align:center;text-align-last:center;vertical-align:middle;-webkit-appearance:none;appearance:none}',
     '.sssl-rsel:hover,.sssl-rsel:focus{border-color:var(--accent);color:var(--text);outline:none}',
     '.sssl-rwrap .dcaret{position:absolute;right:3px;top:50%;transform:translateY(-50%);pointer-events:none;color:var(--accent);font-size:var(--fs-3xs);font-weight:700}',
     '.sssl-note{font-size:var(--fs-2xs);color:var(--faint);margin-top:8px}',
@@ -3306,27 +4536,48 @@
     '.sssl-ctrlstrip button:hover{border-color:var(--accent)}',
     '.sssl-ctrlstrip button.on{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:700}',
     '.sssl-ctrlstrip .hint{font-size:var(--fs-2xs);color:var(--faint);margin-left:auto;white-space:nowrap}',
-    '.sssl-advicehead{font-size:var(--fs-2xs);font-weight:700;letter-spacing:0.08em;color:var(--muted);margin:12px 0 4px}',
+    '.sssl-advicehead{font-size:var(--fs-2xs);font-weight:700;letter-spacing:0.08em;color:var(--muted);margin:6px 0 3px}',
     '.sssl-advicehead .badge{display:inline-block;padding:0 6px;border-radius:8px;margin-right:6px;font-size:var(--fs-3xs);color:var(--accent-ink);background:var(--accent)}',
     '.sssl-advicehead.projected .badge{background:var(--border);color:var(--text)}',
-    '.sssl-advice{position:relative;display:flex;align-items:center;padding:var(--pad-row);border-radius:3px;border:1px dashed var(--accent);margin-bottom:2px}',
-    // RECOMMENDED centring = the FIXTURES centring contract, SHARED (no
-    // third scheme): same global .sssl-pa/.sssl-vs/.sssl-pb flex rules,
-    // SYMMETRIC --edge-reserve margins, and every control (sequence,
-    // BOARD, MARKER) in an absolute overlay slot so no control can shift
-    // the matchup centre. Sequence is left-edge metadata, never a board
-    // number; BOARD sits at the reserve edge; MARKER sits one slot further
-    // out (+96px, the fixture spacing) so a board-assigned row can carry
-    // both without overlap.
-    '.sssl-advice .sssl-pa{margin-left:var(--edge-reserve)}',
-    '.sssl-advice .sssl-pb{margin-right:var(--edge-reserve)}',
-    '.sssl-advice .amark{position:absolute;left:calc(var(--edge-reserve) - 18px);top:50%;transform:translateY(-50%);min-width:14px;text-align:center;font-weight:700;font-size:var(--fs-2xs);color:var(--faint)}',
+    // COLS-08: ONE recommendation row = ONE explicit CSS GRID with a column
+    // for every cell (sequence | board | player | vs | player | marker |
+    // status). Every cell is appended on EVERY row, so columns line up
+    // between rows — and because each control owns a column, a long player
+    // name can only ellipsise inside its own column. It can never be painted
+    // underneath the marker dropdown or the board select, which is exactly
+    // what the previous absolute overlay slots allowed at 1366x768
+    // (BOARD 4 / Mark Bennett vs David Ashworth-Taylor / marker).
+    // Column widths derive from the existing scale variables, so 75%-125%
+    // zoom keeps the same proportions with no per-zoom override.
+    // --adv-board stays 0px unless managed boards are ON: the board cell
+    // exists in BOTH modes (identical markup), it just occupies no gutter
+    // when there is nothing to put in it.
+    '.sssl-advice{--adv-seq:calc(var(--fs-2xs) + 6px);--adv-vs:calc(var(--fs-xs) * 3);--adv-marker:calc(var(--fs-xs) * 17);--adv-board:0px;--adv-status:0px;--adv-tpl:var(--adv-seq) var(--adv-board) minmax(0,1fr) var(--adv-vs) minmax(0,1fr) var(--adv-marker) var(--adv-status);display:grid;grid-template-columns:var(--adv-tpl);align-items:center;gap:var(--gap-ctrl);padding:var(--pad-row);border-radius:3px;border:1px dashed var(--accent);margin-bottom:2px}',
+    '.sssl-advicepane.managed .sssl-advice{--adv-board:calc(var(--fs-xs) * 8)}',
+    // MARKER-7 OFF: the marker track is REMOVED from the template and the row
+    // carries no marker cell at all, so the reclaimed width goes to the names
+    // and the board selector. Nothing is left blank or disabled.
+    '.sssl-advicepane.nomarkers .sssl-advice{--adv-tpl:var(--adv-seq) var(--adv-board) minmax(0,1fr) var(--adv-vs) minmax(0,1fr) var(--adv-status)}',
+    '.sssl-advicepane.hasstatus .sssl-advice{--adv-status:calc(var(--fs-3xs) * 9)}',
+    '.sssl-advice .sssl-pa,.sssl-advice .sssl-pb{min-width:0}',
+    '.sssl-advice .amark{min-width:0;text-align:left;font-weight:700;font-size:var(--fs-2xs);color:var(--faint)}',
     '.sssl-advice.projected{border-style:dotted;border-color:var(--faint);opacity:0.9}',
     '.sssl-advice.projected .amark{color:var(--muted)}',
-    '.sssl-advice .bown{position:absolute;right:var(--edge-reserve);top:50%;transform:translateY(-50%);display:inline-flex;align-items:center;gap:4px}',
-    '.sssl-advice .bassign-slot{position:absolute;right:var(--edge-reserve);top:50%;transform:translateY(-50%)}',
-    '.sssl-advice .mkslot{position:absolute;right:calc(var(--edge-reserve) + 96px);top:50%;transform:translateY(-50%)}',
-    '.sssl-advice .mkown{position:absolute;right:calc(var(--edge-reserve) + 96px);top:50%;transform:translateY(-50%);display:inline-flex;align-items:center;gap:4px}',
+    // Cell 2 — BOARD: the factual BOARD N chip + its release ×, or the board
+    // allocation select. Own column, so it cannot overlap the names.
+    '.sssl-advice .g-board{display:flex;align-items:center;min-width:0;overflow:hidden}',
+    '.sssl-advice .g-board .bown{display:inline-flex;align-items:center;gap:4px;min-width:0}',
+    '.sssl-advice .g-board .bassign-slot{display:inline-flex;min-width:0;max-width:100%}',
+    '.sssl-advice .g-board .sssl-bassign{max-width:100%;min-width:0}',
+    // Cell 6 — MARKER: the confirmed chip + ×, or the marker selector. It
+    // fills its own column and truncates inside it.
+    '.sssl-advice .mkslot{display:flex;align-items:center;min-width:0;overflow:hidden}',
+    '.sssl-advice .mkslot .sssl-mksel{width:100%;max-width:100%;min-width:0}',
+    '.sssl-advice .mkown{display:inline-flex;align-items:center;gap:4px;min-width:0;overflow:hidden}',
+    '.sssl-advice .mkown .mkchip{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    // Cell 7 — STATUS: row state that is not a control (NO MARKER, waiting
+    // for a board, projection dependency). Own column: never over a name.
+    '.sssl-advice .astat{display:flex;align-items:center;gap:4px;min-width:0;white-space:nowrap}',
     // Slice 3B managed physical boards.
     '.sssl-boards{margin-top:2px}',
     '.sssl-boards .brow{display:flex;align-items:center;padding:var(--pad-row);border-radius:3px;border:1px solid var(--border);margin-bottom:2px;min-height:calc(var(--fs) + 8px)}',
@@ -3337,7 +4588,14 @@
     '.sssl-boards .brow .names .pb{flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis}',
     '.sssl-boards .brow .un{color:var(--faint);font-size:var(--fs-2xs);letter-spacing:0.06em}',
     '.sssl-boards .brow .rel{margin-left:8px;flex:none}',
-    '.sssl-bassign{background:var(--control);color:var(--text);border:1px solid var(--control-border);border-radius:4px;padding:1px 6px;font-size:var(--fs-xs);cursor:pointer;max-width:96px}',
+    // MARKER-9 (manager request): the marker drop-down is now the SAME control
+    // as the board drop-down — one solid box, no dashed/dotted outline. ADVICE
+    // vs FACT never depended on the border: it is carried by the option TEXT
+    // ('ADVISE: <name>' versus 'MARKER: <name>' versus the unassigned '—'), and
+    // a pending handoff keeps its delayed INK colour. Both controls therefore
+    // share one rule so they cannot drift apart again.
+    '.sssl-bassign,.sssl-mksel{background:var(--control);color:var(--text);border:1px solid var(--control-border);border-radius:4px;padding:1px 6px;font-size:var(--fs-xs);cursor:pointer;line-height:1.2;vertical-align:middle;text-overflow:ellipsis}',
+    '.sssl-bassign{max-width:96px}',
     '.sssl-bassign:hover{border-color:var(--accent)}',
     '.sssl-bassign:disabled{opacity:0.5;cursor:default}',
     '.sssl-brel{background:var(--control);color:var(--text);border:1px solid var(--control-border);border-radius:4px;padding:1px 8px;font-size:var(--fs-2xs);cursor:pointer;white-space:nowrap}',
@@ -3346,11 +4604,75 @@
     '.sssl-row.playing .mkown{right:calc(var(--edge-reserve) + 96px)}',
     '.sssl-row .mkslot{position:absolute;right:var(--edge-reserve);top:50%;transform:translateY(-50%)}',
     '.sssl-row.playing .mkslot{right:calc(var(--edge-reserve) + 96px)}',
-    '.sssl-mksel{background:var(--control);color:var(--text);border:1px dashed var(--accent);border-radius:4px;padding:1px 6px;font-size:var(--fs-xs);max-width:160px;height:calc(var(--fs-xs) + 8px);line-height:1.2;vertical-align:middle;text-overflow:ellipsis}',
+    '.sssl-mksel{max-width:260px}',
     '.sssl-mksel:hover{border-color:var(--accent)}',
-    '.sssl-mkchip{display:inline-block;font-size:var(--fs-3xs);font-weight:700;letter-spacing:0.06em;padding:0 6px;border-radius:8px;color:var(--accent-ink);background:var(--border);vertical-align:1px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    // COLS-01: a CONFIRMED marker is a fact, and it stays the only select that
+    // is never ellipsised below its own name. The base control is solid now
+    // (MARKER-9), so this rule is the no-change marker that the accepted
+    // contract still holds.
+    '.sssl-mksel.confirmed{border-style:solid}',
+    '.sssl-mkchip{display:inline-block;font-size:var(--fs-3xs);font-weight:700;letter-spacing:0.06em;padding:0 6px;border-radius:8px;color:var(--accent-ink);background:var(--border);vertical-align:1px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    // ACCEPT-04: marker overlays may extend LEFT into the reserved overlay
+    // space (absolute, never in-flow) so real names display in full; the
+    // accepted pa/vs/pb centring contract is untouched.
+    // MARKER-9: a pending handoff is still unmistakable, but by INK not by a
+    // dotted outline — the control keeps the shared solid board-style box.
+    '.sssl-mkslot.pending .sssl-mksel{border-color:var(--delayed);color:var(--delayed)}',
     '.sssl-chip{display:inline-block;font-size:var(--fs-3xs);font-weight:700;letter-spacing:0.06em;padding:0 6px;border-radius:8px;margin-right:6px;color:var(--accent-ink);background:var(--accent);vertical-align:1px}',
+    // TRIAL-02B: compact BOARD chip so BOARD N × fits the right-edge overlay
+    // slot without clipping at any supported zoom scale.
+    '.sssl-chip.sm{padding:0 4px;margin-right:3px;letter-spacing:0.03em;border-radius:7px}',
+    // TRIAL-04: per-player MARKER OFF toggle in the roster (compact, sits
+    // beside the NOT HERE button; amber when OFF).
+    '.sssl-playerrow .mkoff{flex:none;background:var(--control);color:var(--muted);border:1px solid var(--control-border);border-radius:3px;font-size:var(--fs-3xs);font-weight:700;padding:1px 4px;cursor:pointer;line-height:1.2}',
+    '.sssl-playerrow .mkoff:hover{border-color:var(--accent)}',
+    '.sssl-playerrow .mkoff.on{background:var(--absent-bg);border-color:var(--absent-border);color:var(--absent-text)}',
+    // TRIAL-06: bulk delayed-allowance controls under the NOT HERE header.
+    '.sssl-bulkdelay{display:flex;align-items:center;gap:4px;margin:0 0 6px}',
+    '.sssl-bulkdelay .sssl-btn{padding:1px 8px;font-size:var(--fs-2xs)}',
     '.sssl-chip.warn{background:var(--absent-border);color:#fff}',
+    // COLS-02/03/04: board-availability, missing-marker and dependency cues.
+    // All of them use the reserved edges (never the matchup centre) so the
+    // existing centring contract is untouched.
+    '.sssl-advice.awaiting{border-style:dotted;opacity:0.92}',
+    '.sssl-advicesep{font-size:var(--fs-3xs);font-weight:700;letter-spacing:0.06em;color:var(--delayed);margin:5px 0 2px}',
+    '.sssl-advice .mknone{font-size:var(--fs-3xs);font-weight:700;letter-spacing:0.04em;color:var(--delayed);border:1px dashed var(--delayed);border-radius:8px;padding:0 5px;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}',
+    '.sssl-hintline{font-size:var(--fs-2xs);color:var(--faint);margin:4px 0 2px}',
+    // MARKER-9/COLS-10 (manager request): ONE line per fixture row, in three
+    // FIXED bands — [board] [game] [marker]. The board identifier sits at the
+    // LEFT edge, the marker control at the RIGHT edge, and the game stays
+    // centred on the SAME x on every row of the column.
+    //
+    // Why bands rather than "centre the whole row": a flex row centres each
+    // row's CONTENT, so a row carrying a control pushes its own names sideways
+    // and the 'vs' wanders (exactly what the manager saw). Reserving the two
+    // side bands per PANE instead means no row's control can ever steal width
+    // from another row's names, and no name can run under a control, while the
+    // game keeps one stable centre. A band is reserved per pane, never per row:
+    // that is what makes the centre constant.
+    '.sssl-col .sssl-row{display:grid;grid-template-columns:var(--fx-l,0px) minmax(0,1fr) var(--fx-r,0px);align-items:center;column-gap:4px}',
+    '.fx-pair{display:grid;grid-template-columns:minmax(0,1fr) 44px minmax(0,1fr);align-items:center;column-gap:4px;min-width:0}',
+    '.fx-left,.fx-right{display:flex;align-items:center;gap:4px;min-width:0}',
+    '.fx-left{justify-content:flex-start}',
+    '.fx-right{justify-content:flex-end}',
+    // the control fills its reserved band, so a column of selects lines up
+    '.fx-right .mkslot{flex:1 1 auto;min-width:0}',
+    '.fx-right .sssl-mksel{width:100%}',
+    '.fx-left .bassign-slot{flex:0 1 auto;min-width:0}',
+    '.sssl-col .sssl-row .sssl-pa{margin-left:4px}',
+    '.sssl-col .sssl-row .sssl-pb{margin-right:4px}',
+    '.sssl-col .sssl-row .sssl-pa,.sssl-col .sssl-row .sssl-pb{min-width:0}',
+    '.sssl-col .sssl-row .bown,.sssl-col .sssl-row .mkslot,.sssl-col .sssl-row .mkown,.sssl-col .sssl-row .bassign-slot,.sssl-col .sssl-row .sssl-playing{position:static;right:auto;top:auto;transform:none;margin-left:0}',
+    '.sssl-col .sssl-row .sssl-playing{font-size:var(--fs-3xs)}',
+    // MARKER-9: liveness without an extra line. The green fill and bold names
+    // stay; an INSET accent bar (box-shadow, so nothing shifts by a pixel)
+    // makes the live row unmistakable for anyone who cannot rely on the fill
+    // colour, and the row chip only renders when the control line exists for a
+    // board/marker fact anyway.
+    '.sssl-col .sssl-row.playing{box-shadow:inset 3px 0 0 var(--playing)}',
+    // No control may ever be clipped by a narrow column (1366px and below).
+    '.sssl-col .sssl-row .sssl-mksel,.sssl-col .sssl-row .sssl-bassign{max-width:100%}',
+    '.sssl-col .sssl-row .mkslot,.sssl-col .sssl-row .mkown,.sssl-col .sssl-row .bown,.sssl-col .sssl-row .bassign-slot{max-width:100%}',
   ].join('\n');
 
   function el(tag, cls, text) {
@@ -3391,9 +4713,17 @@
     sel.setAttribute('aria-label', 'Marker for this game');
     const ph = document.createElement('option');
     ph.value = '';
-    ph.textContent = 'MARKER: —';
+    // MARKER-9 (manager request): in the narrow fixture columns the labels are
+    // abbreviated to give the names the space — Board = 'B', Marker = 'M',
+    // Advise = 'A'. Nothing is lost: `title` on the control spells the state out
+    // in full, and the aria-label stays descriptive.
+    ph.textContent = 'M: —';
     sel.appendChild(ph);
     const confirmedId = o.confirmedMarkerId != null ? o.confirmedMarkerId : null;
+    // CONFIRMED facts get a solid border; advice keeps the dashed one.
+    // (className rather than classList: the shared selector is also driven by
+    // the minimal DOM contract shim in the test harness.)
+    if (confirmedId != null) sel.className = 'sssl-mksel confirmed';
     const eligible = getEligibleMarkerCandidates(o.context);
     const proposedEligible = confirmedId == null && o.proposedMarkerId != null &&
       eligible.some((c) => c.id === o.proposedMarkerId);
@@ -3402,12 +4732,20 @@
       // become ineligible — a fact is never overwritten by advice.
       const confirmed = document.createElement('option');
       confirmed.value = String(confirmedId);
-      confirmed.textContent = 'MARKER: ' + o.nameFor(confirmedId);
+      confirmed.textContent = 'M: ' + o.nameFor(confirmedId);
+      sel.title = 'Confirmed marker: ' + o.nameFor(confirmedId) +
+        ' (a fact — × on the marker chip releases the duty)';
       sel.appendChild(confirmed);
     } else if (proposedEligible) {
       const proposed = document.createElement('option');
       proposed.value = String(o.proposedMarkerId);
-      proposed.textContent = 'MARKER: ' + o.nameFor(o.proposedMarkerId);
+      // COLS-01: an unconfirmed recommendation must not READ like an
+      // assignment. A proposal is labelled ADVISE (advice), a confirmed duty
+      // is labelled MARKER (fact), and the placeholder is the honest
+      // unassigned state.
+      proposed.textContent = 'A: ' + o.nameFor(o.proposedMarkerId);
+      sel.title = 'Advised marker: ' + o.nameFor(o.proposedMarkerId) +
+        ' — advice only, NOT a confirmed assignment until you pick it';
       sel.appendChild(proposed);
     }
     eligible.forEach((c) => {
@@ -3428,9 +4766,27 @@
     } else if (proposedEligible) {
       sel.value = String(o.proposedMarkerId);
     }
+    // COLS-01: say plainly WHAT the closed control is showing, so an
+    // unassigned marker can never be mistaken for a lost assignment.
+    sel.title = confirmedId != null
+      ? 'CONFIRMED marker: ' + o.nameFor(confirmedId) + ' (an operator fact; use × to release the duty).'
+      : (proposedEligible
+        ? 'RECOMMENDED marker: ' + o.nameFor(o.proposedMarkerId) +
+          ' — advice only, NOT yet assigned. Choose it to confirm, pick someone else, or leave it blank.'
+        : 'No marker assigned. DartConnect does not publish marker assignments, so this is the factual ' +
+          'unknown/unassigned state; a recommendation would appear here as advice only, never as a fact.');
     sel.addEventListener('change', () => {
-      const chosen = parseInt(sel.value, 10);
+      // MARKER-9: an EMPTY choice is a deliberate act too. Choosing 'M: —'
+      // removes the duty that was showing (reallocation is 'pick another
+      // name'), so a row that already holds a marker can be cleared here
+      // without hunting for a separate × control.
+      const raw = sel.value;
+      const chosen = parseInt(raw, 10);
       sel.value = '';
+      if (raw === '') {
+        if (typeof o.onClear === 'function') o.onClear();
+        return;
+      }
       if (Number.isSafeInteger(chosen) && chosen >= 1 && o.onConfirm) o.onConfirm(chosen);
     });
     return sel;
@@ -3443,7 +4799,8 @@
     sel.setAttribute('aria-label', 'Assign to board');
     const placeholder = document.createElement('option');
     placeholder.value = '';
-    placeholder.textContent = 'BOARD ▾';
+    placeholder.textContent = 'B ▾';
+    placeholder.title = 'Assign this live game to a board';
     sel.appendChild(placeholder);
     const free = getAvailableManagedBoards(rtv);
     free.forEach((b) => {
@@ -3454,7 +4811,11 @@
     });
     if (free.length === 0) {
       sel.disabled = true;
-      placeholder.textContent = 'NO FREE BOARD';
+      // MARKER-9: abbreviated like every other row-level label (Board = 'B') so
+      // it still fits the reserved left band without clipping. The full meaning
+      // is on the tooltip.
+      placeholder.textContent = 'B: FULL';
+      placeholder.title = 'No free board — every board is already assigned';
     }
     sel.addEventListener('change', () => {
       const n = parseInt(sel.value, 10);
@@ -3475,12 +4836,104 @@
     // backlog (N). Created once per boot; consumption and overrides update
     // it in place. Never persisted.
     if (!data.delayedAllowanceRuntime) data.delayedAllowanceRuntime = createDelayedAllowanceRuntime(data.fixtures);
+    // ACCEPT-02: pending (unconfirmed) marker advice handed off at dispatch.
+    // Runtime map keyed by stable game key; validated on every use.
+    if (!data.pendingMarkers) data.pendingMarkers = {};
     const rtv = data.boardRuntime;
     const mkr = data.markerRuntime;
     // Slice 3C marker isolation: the selected division's roster ids gate
     // every marker candidate context and every confirmation in this view.
     const divRosterIds = filterRosterForDivision(data.roster, state.division).map((p) => p.id);
     activeBoardRuntime = rtv;
+    // TRIAL-01: persist current-night operator settings whenever they change
+    // (same league store key, `night` field). NOT HERE persistence is the
+    // pre-existing saveState path and keeps working unchanged.
+    //
+    // ACCEPT-01: EVERY call site here is a genuine change (strategy, delayed,
+    // managed boards, board count, marker availability, delayed allowance),
+    // so the remembered dispatch queue is dropped and the next plan is fully
+    // global again. Board dispatch/release NEVER comes through here.
+    const invalidateDispatchOrder = () => { data.dispatchOrder = null; };
+    // MARKER-10: the operator's Not Here width. Held in one place and passed
+    // through EVERY night persist, so a board allocation or a mode change can
+    // never drop it, while the DOM stays the thing that renders it.
+    let nhWidthPx = Number.isSafeInteger(state.night && state.night.notHereWidth)
+      ? state.night.notHereWidth : null;
+    const persistNight = () => {
+      invalidateDispatchOrder();
+      state.night = buildNightPersistedState(state, schedulerUi, data.delayedAllowanceRuntime,
+        state.night && state.night.dispatch, nhWidthPx);
+      saveState(storage, state, data.storeKey);
+    };
+    // ACCEPT-03/5: dispatched operator state (explicit board ownership +
+    // pending marker advice), scoped to division@date, persisted immediately
+    // so an immediate Refresh/F5 cannot lose it. Keeps the dispatch order.
+    const persistDispatch = () => {
+      state.night = buildNightPersistedState(state, schedulerUi, data.delayedAllowanceRuntime,
+        mergeDispatchBucket(state.night && state.night.dispatch, dispatchBucketKey(state),
+          // MARKER-3: the minimum explicit marker history rides with the
+          // dispatched operator state, bucketed by division@date. MARKER-6:
+          // so does CONFIRMED marker ownership — an operator fact that must
+          // survive an immediate Refresh/F5 exactly like board ownership and
+          // the pending handoff already do.
+          Object.assign(
+            snapshotDispatchState(data.boardRuntime, data.pendingMarkers, data.markerHistory),
+            { markers: snapshotMarkerAssignments(data.markerRuntime) })),
+        // MARKER-10: an unrelated persist must never drop the panel width
+        nhWidthPx);
+      saveState(storage, state, data.storeKey);
+    };
+    // COLS-05: delayed-group collapse state is display state the operator set
+    // deliberately, so it is written with the rest of this league's state —
+    // no new key, no new mechanism, and nothing the scheduler ever reads.
+    const persistCollapsed = () => { saveState(storage, state, data.storeKey); };
+    // ACCEPT-01/02: dispatch a game to a physical board. Applies the
+    // immutable assignGameToBoard result, hands the current marker proposal
+    // over as PENDING advice (never factual MARKING), persists, and re-plans.
+    // The surviving queue keeps its order: dispatch does NOT invalidate it.
+    const dispatchToBoard = (boardNumber, game, proposedMarkerId) => {
+      const res = assignGameToBoard(rtv, game, boardNumber, { absentIds: Array.from(new Set(state.absentIds)) });
+      if (res.ok) {
+        data.boardRuntime = res.runtime;
+        if (Number.isSafeInteger(proposedMarkerId)) {
+          data.pendingMarkers = Object.assign({}, data.pendingMarkers, { [markerGameKey(game)]: proposedMarkerId });
+        }
+        persistDispatch();
+      }
+      render(state, storage, data, liveNote, diagnostics, schedulerUi);
+    };
+    // ACCEPT-02: the operator confirmed (or replaced) the handed-off advice:
+    // it stops being PENDING and the fact lives in the marker runtime only.
+    const clearPendingMarker = (game) => {
+      const key = markerGameKey(game);
+      if (!data.pendingMarkers || data.pendingMarkers[key] == null) return;
+      const next = Object.assign({}, data.pendingMarkers);
+      delete next[key];
+      data.pendingMarkers = next;
+      persistDispatch();
+    };
+    // ACCEPT-02: one marker-candidate context per game, shared by the
+    // selector, the confirmation defence and pending-advice validation.
+    const markerCtxFor = (game) => ({
+      players: data.roster,
+      absentIds: Array.from(new Set(state.absentIds)),
+      playingPlayerIds: data.fixtures.filter((x) => x.status === 'playing')
+        .flatMap((x) => [x.playerA.id, x.playerB.id]).filter((id) => id != null),
+      markingPlayerIds: Object.keys(mkr.byMarker).map(Number).filter(Number.isSafeInteger),
+      markedGameKeys: mkr.byGame,
+      rosterDivisionIds: divRosterIds,
+      markerOffIds: Array.isArray(state.markerOffIds) ? state.markerOffIds : [],
+      // MARKER-1: players reserved by a pending handoff elsewhere can never be
+      // offered or confirmed here — no duplicate marker ownership.
+      pendingMarkerIds: reservedPendingMarkerIds(data, state, markerGameKey(game)).filter((id) =>
+        id !== game.playerA.id && id !== game.playerB.id),
+      // MARKER-9: only players whose marking leaves the SEQUENCE playable are
+      // offered — the next N dispatchable games and the projected wave are
+      // reserved, through the same helper the scheduler's proposal search uses.
+      upcomingPlayerIds: markerSequenceReservedIds(advice, game),
+      excludeParticipants: true,
+      participantIds: [game.playerA.id, game.playerB.id],
+    });
     closeOverlay();
     const style = document.createElement('style');
     style.textContent = CSS;
@@ -3499,6 +4952,8 @@
       b.type = 'button';
       b.addEventListener('click', () => {
         state.division = div;
+        // ACCEPT-01: a division change is a genuine re-plan, not a dispatch.
+        data.dispatchOrder = null;
         saveState(storage, state, data.storeKey);
         render(state, storage, data, liveNote, diagnostics, activeSchedulerUi);
         if (activeLiveCtx) refreshLive(activeLiveCtx);
@@ -3520,6 +4975,8 @@
       });
       select.addEventListener('change', () => {
         state.selectedMatchDate = select.value || null;
+        // ACCEPT-01: a match-date change is a genuine re-plan.
+        data.dispatchOrder = null;
         saveState(storage, state, data.storeKey);
         render(state, storage, data, liveNote, diagnostics, activeSchedulerUi);
         if (activeLiveCtx) refreshLive(activeLiveCtx);
@@ -3569,7 +5026,7 @@
     themeBtn.setAttribute('aria-label', 'Switch appearance, currently ' + (state.theme === 'light' ? 'light' : 'dark'));
     themeBtn.addEventListener('click', () => {
       state.theme = state.theme === 'light' ? 'dark' : 'light';
-      saveState(storage, state);
+      saveState(storage, state, data.storeKey);
       render(state, storage, data, liveNote, diagnostics, activeSchedulerUi);
     });
     topbar.appendChild(themeBtn);
@@ -3602,6 +5059,7 @@
       b.setAttribute('aria-pressed', schedulerUi.strategy === mode ? 'true' : 'false');
       b.addEventListener('click', () => {
         schedulerUi.strategy = mode;
+        persistNight();
         render(state, storage, data, liveNote, diagnostics, schedulerUi);
       });
       stratGroup.appendChild(b);
@@ -3617,11 +5075,51 @@
       b.setAttribute('aria-pressed', schedulerUi.includeDelayed === on ? 'true' : 'false');
       b.addEventListener('click', () => {
         schedulerUi.includeDelayed = on;
+        persistNight();
         render(state, storage, data, liveNote, diagnostics, schedulerUi);
       });
       delayGroup.appendChild(b);
     });
     strip.appendChild(delayGroup);
+    // MARKER-4: marker policy selector. FAIR rotates marking fairly among
+    // eligible players who have already played; LOSER prefers the loser of a
+    // completed game and is ONLY available when factual result data exists
+    // (it does not today), so it is shown disabled and says so honestly.
+    // COLS-06: OFF | FAIR | LOSER. Three mutually exclusive options in the one
+    // existing compact marker control — no second toggle anywhere. The active
+    // mode is the one shown pressed. Switching mode changes ADVICE only: it
+    // never touches live fixture records, confirmed markers or the manual
+    // selector, and the choice persists with the other night settings.
+    strip.appendChild(el('span', 'lbl', 'Marker'));
+    const markerGroup = el('span', 'grp');
+    const markerPolicy = isMarkerPolicy(schedulerUi.markerPolicy) ? schedulerUi.markerPolicy : MARKER_POLICIES.FAIR;
+    const loserAvailable = isMarkerPolicyAvailable(MARKER_POLICIES.LOSER, data);
+    [[MARKER_POLICIES.OFF, 'OFF',
+       'OFF = no marker UI anywhere: no dropdowns, no MARKER placeholders, no ADVISE and no marker messages. ' +
+       'Matches and boards are scheduled exactly as before, and confirmed/manual markers are kept internally.'],
+     [MARKER_POLICIES.MANUAL, 'MANUAL',
+       'MANUAL = you choose every marker yourself. The dropdowns are offered on the fixtures you can act on, ' +
+       'nothing is recommended and nothing is preselected; eligibility and conflict rules still apply.'],
+     [MARKER_POLICIES.FAIR, 'FAIR', 'FAIR = rotate marking fairly among eligible players who have already played tonight'],
+     [MARKER_POLICIES.LOSER, 'LOSER', loserAvailable
+       ? 'LOSER = prefer the loser of a completed game when factual result data supports it (a preference only \u2014 you can still choose anyone eligible)'
+       : 'LOSER unavailable: no factual winner/loser result data is available from DartConnect']].forEach(([mode, label, tip]) => {
+      const usable = mode !== MARKER_POLICIES.LOSER || loserAvailable;
+      const b = el('button', markerPolicy === mode ? 'on' : '', label);
+      b.type = 'button';
+      b.title = tip;
+      b.disabled = !usable;
+      if (!usable) b.style.opacity = '0.5';
+      b.setAttribute('aria-pressed', markerPolicy === mode ? 'true' : 'false');
+      b.addEventListener('click', () => {
+        if (!usable) return;
+        schedulerUi.markerPolicy = mode;
+        persistNight();
+        render(state, storage, data, liveNote, diagnostics, schedulerUi);
+      });
+      markerGroup.appendChild(b);
+    });
+    strip.appendChild(markerGroup);
     strip.appendChild(el('span', 'lbl', 'Managed Boards'));
     const mbGroup = el('span', 'grp');
     [[false, 'OFF', 'Advisory scheduling without physical board identity (effective capacity only)'],
@@ -3639,6 +5137,7 @@
         if (on && !data.boardRuntime) {
           data.boardRuntime = createManagedBoardRuntime(schedulerUi.boardCount);
         }
+        persistNight();
         render(state, storage, data, liveNote, diagnostics, schedulerUi);
       });
       mbGroup.appendChild(b);
@@ -3662,6 +5161,7 @@
           data.boardNotice = null;
           schedulerUi.boardCount = n;
           data.boardRuntime = res.runtime;
+          persistNight();
           render(state, storage, data, liveNote, diagnostics, schedulerUi);
         });
         boardGroup.appendChild(b);
@@ -3690,20 +5190,178 @@
         strip.appendChild(cf);
       });
     }
-    strip.appendChild(el('span', 'hint', 'Scheduler advice only — factual state is unchanged'));
+    // MARKER-9 (manager request): the old "Scheduler advice only — factual
+    // state is unchanged" hint is GONE. It was the only element that wrapped
+    // the strip onto a second line, and the reassurance is already carried by
+    // the ADViSE: label on every proposal (and by the per-mode labels), so it
+    // was noise on a 768px-tall screen. Every control now sits on ONE line.
     overlay.appendChild(strip);
 
+    /* COLS-07: three-column Match Night layout. The whole scheduling area
+     * (title bar, division/venue/date selectors, NORMAL/OPTIMISED, Delayed,
+     * Marker OFF/FAIR/LOSER, Managed Boards, RECOMMENDED and PROJECTED NEXT)
+     * stays FULL WIDTH above; below it the operator sees tonight's fixtures,
+     * the delayed backlog and NOT HERE side by side, each scrolling on its
+     * own so the toolbar and the advice never scroll away. No recommendation
+     * section is duplicated inside a column. */
     const main = el('div', 'sssl-main');
+    const cols = el('div', 'sssl-cols');
+    // LEFT region: recommendations at the top, tonight and delayed beneath.
+    const left = el('div', 'sssl-left');
+    const fixturesRow = el('div', 'sssl-fixtures-row');
+    const advicePane = el('div', 'sssl-advicepane');
+    // COLS-08: ONE advice grid, whose BOARD column exists only while managed
+    // boards are on. The rows themselves are identical in both modes.
+    advicePane.classList.toggle('managed', schedulerUi.managedBoardsEnabled === true);
+    // MARKER-7: with marker controls OFF the marker column is REMOVED from the
+    // grid (not blanked and not disabled) and its width goes back to the
+    // player names and the board selector.
+    const markerModeNow = isMarkerPolicy(schedulerUi.markerPolicy) ? schedulerUi.markerPolicy : MARKER_POLICIES.FAIR;
+    const markerUiOn = markerControlsVisible(markerModeNow);
+    // MARKER-9: the marker DIALOG belongs to the RECOMMENDED pane above (it
+    // offers the selector in every mode, MANUAL included, because that is where
+    // a game is allocated to a marker). The game table below no longer offers it
+    // speculatively — see markerControlWanted().
+    // MARKER-7: does THIS mode produce automatic recommendations? Only
+    // FAIR/LOSER do; the fixture rows must never preselect (or label anything
+    // ADVISE) in MANUAL/OFF, whatever pending handoff state exists.
+    const adviceModeOn = markerAdviceEnabledFor(markerModeNow);
+    advicePane.classList.toggle('nomarkers', !markerUiOn);
     const listPane = el('div', 'sssl-fixtures');
+    const delayedPane = el('div', 'sssl-fixtures delayed');
     const rosterPane = el('div', 'sssl-roster');
+    const colToday = el('div', 'sssl-col today');
+    const colDelayed = el('div', 'sssl-col delayed');
+    // RIGHT region: NOT HERE runs the FULL height from beneath the second
+    // toolbar to the bottom of the viewport (it is a sibling of the whole
+    // left region, not of the fixture columns).
+    const colNotHere = el('div', 'sssl-col nothere');
+    // MARKER-10 (manager question: slider or fly-out?): ADJUSTABLE, not a
+    // fly-out. NOT HERE is not just a list — it carries the All → 0 / All → 1
+    // bulk controls and every player's MX toggle, which the operator uses WHILE
+    // working the fixture columns. A fly-out hides exactly that while it is
+    // hidden and costs a click to peek; a drag handle keeps both visible and
+    // lets the width be traded per task in one gesture. The fly-out's only real
+    // advantage (getting the panel out of the way) is kept as a double-click
+    // COLLAPSE to a slim rail, which the same handle restores.
+    const nhRail = el('div', 'sssl-nhrail', 'NOT HERE');
+    nhRail.title = 'Show the Not Here panel again (or double-click the divider)';
+    colNotHere.appendChild(nhRail);
+    colToday.appendChild(listPane);
+    colDelayed.appendChild(delayedPane);
+    colNotHere.appendChild(rosterPane);
+    fixturesRow.appendChild(colToday);
+    fixturesRow.appendChild(colDelayed);
+    left.appendChild(advicePane);
+    left.appendChild(fixturesRow);
 
+    // MARKER-10: the divider that makes NOT HERE adjustable. Width is held in
+    // one custom property on the columns row, clamped between a usable minimum
+    // and half the row, persisted with the rest of the night's display state
+    // (the same mechanism as the zoom and the board count — no new store), and
+    // reachable from the keyboard as a real separator.
+    const NH_MIN = 190;
+    const splitter = el('div', 'sssl-splitter');
+    splitter.setAttribute('role', 'separator');
+    splitter.setAttribute('aria-orientation', 'vertical');
+    splitter.setAttribute('aria-label', 'Resize the Not Here panel');
+    splitter.title = 'Drag to resize Not Here — double-click to collapse it to a rail';
+    splitter.tabIndex = 0;
+    const nhWidthOf = () => Math.round(colNotHere.getBoundingClientRect().width);
+    const applyNhWidth = (px, persist) => {
+      const limit = Math.max(NH_MIN + 40, Math.round(cols.getBoundingClientRect().width * 0.5));
+      const val = Math.max(NH_MIN, Math.min(limit, Math.round(px)));
+      cols.style.setProperty('--nh-w', val + 'px');
+      splitter.setAttribute('aria-valuenow', String(val));
+      splitter.setAttribute('aria-valuemin', String(NH_MIN));
+      splitter.setAttribute('aria-valuemax', String(limit));
+      if (persist) {
+        nhWidthPx = val;
+        persistNight();
+      }
+      return val;
+    };
+    const setRail = (rail) => {
+      if (rail) {
+        overlay.dataset.nh = 'rail';
+        splitter.setAttribute('aria-expanded', 'false');
+      } else {
+        overlay.dataset.nh = 'wide';
+        splitter.setAttribute('aria-expanded', 'true');
+        // restore the operator's own width, or the default quarter of the row
+        applyNhWidth(Number.isSafeInteger(state.night && state.night.notHereWidth)
+          ? state.night.notHereWidth
+          : Math.round(cols.getBoundingClientRect().width * 0.25), false);
+      }
+    };
+    nhRail.addEventListener('click', () => setRail(false));
+    splitter.addEventListener('dblclick', (ev) => {
+      ev.preventDefault();
+      setRail(overlay.dataset.nh !== 'rail');
+    });
+    splitter.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      const startX = ev.clientX;
+      const startW = nhWidthOf();
+      const onMove = (e) => applyNhWidth(startW - (e.clientX - startX), false);
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        applyNhWidth(nhWidthOf(), true);
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+    });
+    splitter.addEventListener('keydown', (ev) => {
+      if (ev.key === 'ArrowLeft') applyNhWidth(nhWidthOf() + 16, true);
+      else if (ev.key === 'ArrowRight') applyNhWidth(nhWidthOf() - 16, true);
+      else if (ev.key === 'Home') applyNhWidth(Math.round(cols.getBoundingClientRect().width * 0.25), true);
+      else if (ev.key === 'Enter' || ev.key === ' ') setRail(overlay.dataset.nh !== 'rail');
+      else return;
+      ev.preventDefault();
+    });
+    if (Number.isSafeInteger(state.night && state.night.notHereWidth)) {
+      cols.style.setProperty('--nh-w', state.night.notHereWidth + 'px');
+    }
+
+    // COLS-09: classify ONCE per render, BEFORE anything reads `f.delayed`, so
+    // the Tonight/Delayed panels, the scheduler session built below, the
+    // delayed allowance and the diagnostics all use the same authoritative
+    // rule. Recomputing here (rather than at parse time) is what makes the
+    // classification follow the selected match date when the operator changes
+    // it — the fixture list itself is parsed once per page load.
+    applyMatchDateClassification(data.fixtures, state.selectedMatchDate);
     const absent = new Set(state.absentIds);
     const shown = applyDisplayFilters(data.fixtures, state.division, state.selectedMatchDate, absent);
+    // COLS-01/07: ONE classifier per column, using the SAME factual delayed
+    // flag the date bars, the delayed allowance and the scheduler already
+    // use. Nothing new is inferred and the existing order inside each column
+    // is the existing fixture order, untouched.
+    const delayedRows = shown.filter((f) => f.delayed);
+    const currentRows = shown.filter((f) => !f.delayed);
+    // COLS-05: persisted collapse state for THIS division@date context,
+    // pruned against the groups that actually exist, so a removed group can
+    // leave nothing stale behind.
+    const delayedCollapsed = pruneCollapsedGroups(state,
+      new Set(delayedRows.map(collapsedGroupKey).filter(Boolean)));
 
     if (data.parseFailed) {
       listPane.appendChild(el('div', 'sssl-error', 'Could not parse the DartConnect schedule.\n' + (diagnostics || '')));
     } else if (shown.length === 0) {
       listPane.appendChild(el('div', 'sssl-empty', 'No outstanding fixtures for ' + state.division + '.'));
+    }
+    const todayHead = el('div', 'sssl-advicehead projected');
+    todayHead.appendChild(el('span', 'badge', 'TONIGHT'));
+    todayHead.appendChild(document.createTextNode('tonight + outstanding current games · factual schedule (PLAYING = live)' +
+      (currentRows.length ? ' · ' + currentRows.length : '')));
+    listPane.appendChild(todayHead);
+    const delayedHead = el('div', 'sssl-advicehead projected');
+    delayedHead.appendChild(el('span', 'badge', 'DELAYED'));
+    delayedHead.appendChild(document.createTextNode('outstanding earlier dates' +
+      (delayedRows.length ? ' · ' + delayedRows.length : '')));
+    delayedPane.appendChild(delayedHead);
+    if (delayedRows.length === 0) {
+      delayedPane.appendChild(el('div', 'sssl-empty', 'No delayed fixtures in view.'));
     }
 
     /* Slice 3A: scheduler ADVICE above the factual rows. RECOMMENDED is
@@ -3721,84 +5379,137 @@
       }
     }
     if (advice) {
+      // ACCEPT-01: PLAN GLOBALLY, EXECUTE LOCALLY. The plan itself is always
+      // global and fresh; this only preserves the ORDER the operator already
+      // sees, so dispatching #1 renumbers survivors (B, C, D) instead of
+      // replacing them. New games fill the tail; invalidated survivors drop.
+      advice.recommended = applyDispatchOrder(advice.recommended, data.dispatchOrder);
+      data.dispatchOrder = rememberDispatchOrder(advice.recommended);
+      // COLS-02: how many of these can REALLY start now is factual board
+      // occupancy, not the length of the plan. Games beyond the free boards
+      // are still shown — they are the next wave — but they are labelled as
+      // waiting for a board instead of being described as startable.
+      const split = splitStartableRecommendations(advice.recommended, advice.freeBoards);
+      const startableCount = split.startable.length;
+      const awaitingCount = split.awaitingBoard.length;
+      // COLS-08: the optional status column is a PANE-level decision, so every
+      // row in the pane reserves exactly the same width for it. A per-row
+      // (content-sized) status column would let one row's chip shift its own
+      // player columns, breaking the alignment the grid exists to guarantee.
+      // It is decided HERE, where the advice object exists — the pane is
+      // created long before the advice is computed.
+      advicePane.classList.toggle('hasstatus',
+        advice.markerAdviceEnabled === true &&
+        advice.recommended.some((r) => r.markerUnavailable));
       if (advice.recommended.length > 0) {
         const head = el('div', 'sssl-advicehead');
         head.appendChild(el('span', 'badge', 'RECOMMENDED'));
-        head.appendChild(document.createTextNode(
-          'start now' + (advice.recommended.length > 1 ? ' · up to ' + advice.recommended.length + ' games' : '') +
-          (advice.laterCount > 0 ? ' · ' + advice.laterCount + ' planned later' : '')));
-        listPane.appendChild(head);
-        advice.recommended.forEach((g, seq) => {
-          // RECOMMENDATION SEQUENCE (1..n, follow the actual advice order):
-          // presentation metadata in an absolute left-edge slot, symmetric
-          // with the right control overlays. It is NOT a physical board number
-          // and implies no board mapping — boards remain explicit operator
-          // assignment only.
+        head.appendChild(document.createTextNode(startableCount > 0
+          ? 'start now' + (startableCount > 1 ? ' · ' + startableCount + ' games' : '') +
+            ' · ' + advice.freeBoards + ' of ' + advice.totalBoards + ' boards free' +
+            (awaitingCount > 0 ? ' · ' + awaitingCount + ' waiting for a board' : '') +
+            (advice.laterCount > 0 ? ' · ' + advice.laterCount + ' planned later' : '')
+          : 'no free board — ' + advice.occupiedBoards + ' of ' + advice.totalBoards +
+            ' boards in play; these start as boards free'));
+        advicePane.appendChild(head);
+        // COLS-08: one recommendation row = one explicit GRID with a fixed
+        // cell for every column (order | board | player | vs | player |
+        // marker | status). EVERY cell is appended for every row, including
+        // the empty ones, so columns line up between rows and no control can
+        // ever be painted over a player name. Long names ellipsise safely
+        // (with the full name in the tooltip) instead of running underneath
+        // the marker dropdown.
+        // MARKER-7: when marker controls are OFF there is no marker cell at
+        // all — no placeholder, no ADVISE, no column. The status cell stays
+        // (it is not marker-specific).
+        const markerControlsShown = advice.markerControlsVisible === true;
+        const buildAdviceRow = (g, seq, awaiting) => {
           const row = el('div', 'sssl-advice');
-          // SEQUENCE: absolute left-edge metadata glyph (not a board
-          // number) — outside the flex flow so it cannot shift the centre.
+          if (awaiting) row.classList.add('awaiting');
+          // RECOMMENDATION SEQUENCE (1..n, follow the actual advice order):
+          // its own column. It is NOT a physical board number and implies no
+          // board mapping — boards remain explicit operator assignment only.
           row.appendChild(el('span', 'amark', String(seq + 1)));
-          // Matchup uses the SHARED fixture spans (.sssl-pa/.sssl-vs/
-          // .sssl-pb) so RECOMMENDED rows centre exactly like FIXTURES rows.
-          row.appendChild(el('span', 'sssl-pa', g.playerA.name));
-          row.appendChild(el('span', 'sssl-vs', 'vs'));
-          row.appendChild(el('span', 'sssl-pb', g.playerB.name));
+          // BOARD column (empty when boards are unmanaged).
+          const boardCell = el('span', 'g-board');
           if (schedulerUi.managedBoardsEnabled) {
             const assignedBoard = findBoardOwningGame(rtv, g);
             if (assignedBoard) {
               const chip = el('span', 'bown');
-              chip.appendChild(el('span', 'chip', 'BOARD ' + assignedBoard.boardNumber));
+              chip.appendChild(el('span', 'sssl-chip sm', 'B' + assignedBoard.boardNumber));
               const rel = el('button', 'sssl-brel', '×');
               rel.type = 'button';
               rel.title = 'Unassign this game from Board ' + assignedBoard.boardNumber + ' (the game itself is unchanged)';
               rel.setAttribute('aria-label', 'Release Board ' + assignedBoard.boardNumber);
               rel.addEventListener('click', () => {
-                releaseBoard(rtv, assignedBoard.boardNumber);
+                // TRIAL-02: releaseBoard is pure — APPLY its returned runtime,
+                // otherwise the release is a silent no-op and the BOARD chip
+                // can never be removed.
+                const res = releaseBoard(rtv, assignedBoard.boardNumber);
+                if (res.ok) data.boardRuntime = res.runtime;
                 render(state, storage, data, liveNote, diagnostics, schedulerUi);
               });
               chip.appendChild(rel);
-              row.appendChild(chip);
+              boardCell.appendChild(chip);
             } else {
               const ctrl = el('span', 'bassign-slot');
-              ctrl.appendChild(boardSelectEl(rtv, (n) => {
-                const res = assignGameToBoard(rtv, g, n, { absentIds: Array.from(absent) });
-                if (res.ok) data.boardRuntime = res.runtime;
-                render(state, storage, data, liveNote, diagnostics, schedulerUi);
-              }));
-              row.appendChild(ctrl);
+              // ACCEPT-02: dispatch carries the current proposal over as
+              // PENDING advice on the factual board-assigned row.
+              ctrl.appendChild(boardSelectEl(rtv, (n) => dispatchToBoard(n, g, g.proposedMarkerId)));
+              boardCell.appendChild(ctrl);
             }
           }
-          // Slice 3C marker control (overlay slots, fixture-identical):
+          row.appendChild(boardCell);
+          // Matchup uses the SHARED fixture spans (.sssl-pa/.sssl-vs/
+          // .sssl-pb); the full name is always available on hover.
+          const paEl = el('span', 'sssl-pa', g.playerA.name);
+          paEl.title = g.playerA.name;
+          const pbEl = el('span', 'sssl-pb', g.playerB.name);
+          pbEl.title = g.playerB.name;
+          row.appendChild(paEl);
+          row.appendChild(el('span', 'sssl-vs', 'vs'));
+          row.appendChild(pbEl);
           // Slice 3C marker control: proposed = ADVICE (preselected only);
           // choosing/confirming is the operator's explicit act. Confirmed
           // games show the factual chip + × (duty-only release).
-          if (g.confirmedMarkerId != null) {
+          // COLS-08: the marker control is ALWAYS cell 6 and the non-control
+          // status is ALWAYS cell 7, whether they are empty or not, so no row
+          // can ever have a different column count from its neighbours and no
+          // control can be painted over a player name.
+          const markerCell = markerControlsShown ? el('span', 'mkslot') : null;
+          const statusCell = el('span', 'astat');
+          if (!markerControlsShown) {
+            // A confirmed duty is deliberately NOT deleted: it stays in the
+            // marker runtime and reappears with its chip when a marker mode is
+            // selected again. Only its presentation is withheld.
+          } else if (g.confirmedMarkerId != null) {
             const mk = el('span', 'mkown');
-            mk.appendChild(el('span', 'mkchip', 'MARKER ' + markerNameForId(data, g.confirmedMarkerId)));
+            mk.appendChild(el('span', 'mkchip', 'M ' + markerNameForId(data, g.confirmedMarkerId)));
             mk.title = 'Confirmed factual marker. Use × to release, or the marker dropdown to change.';
             const relMk = el('button', 'sssl-brel', '×');
             relMk.type = 'button';
             relMk.title = 'Release marker duty only (board ownership, factual state and DartConnect are unchanged)';
             relMk.addEventListener('click', () => {
               const res = releaseMarkerFromGame(mkr, g);
-              if (res.ok) data.markerRuntime = res.runtime;
+              if (res.ok) {
+                data.markerRuntime = res.runtime;
+                // MARKER-3: a released duty no longer counts for rotation.
+                data.markerHistory = releaseMarkerMark(data.markerHistory, g.confirmedMarkerId);
+                persistDispatch();
+              }
               render(state, storage, data, liveNote, diagnostics, schedulerUi);
             });
             mk.appendChild(relMk);
-            row.appendChild(mk);
+            markerCell.appendChild(mk);
           } else {
-            const mkCtx = {
-              players: data.roster,
-              absentIds: Array.from(absent),
-              playingPlayerIds: data.fixtures.filter((x) => x.status === 'playing').flatMap((x) => [x.playerA.id, x.playerB.id]).filter((id) => id != null),
-              markingPlayerIds: Object.keys(mkr.byMarker).map(Number).filter(Number.isSafeInteger),
-              markedGameKeys: mkr.byGame,
-              rosterDivisionIds: divRosterIds,
-              excludeParticipants: true,
-              participantIds: [g.playerA.id, g.playerB.id],
-            };
+            const mkCtx = markerCtxFor(g);
+            // ACCEPT-02: a still-valid pending handoff keeps continuity; a
+            // stale one is discarded honestly and the planner proposal is
+            // never replaced by it.
+            const gPending = validatePendingMarker(
+              (data.pendingMarkers || {})[markerGameKey(g)], mkCtx);
             const sel = markerSelectEl({
-              proposedMarkerId: g.proposedMarkerId,
+              proposedMarkerId: gPending != null ? gPending : g.proposedMarkerId,
               nameFor: (id) => markerNameForId(data, id),
               context: mkCtx,
               onConfirm: (chosen) => {
@@ -3806,47 +5517,149 @@
                   absentIds: mkCtx.absentIds,
                   playingPlayerIds: mkCtx.playingPlayerIds,
                   rosterDivisionIds: divRosterIds,
+                  markerOffIds: mkCtx.markerOffIds,
+                  pendingMarkerIds: mkCtx.pendingMarkerIds,
                   participantIds: [g.playerA.id, g.playerB.id],
                 });
-                if (res.ok) data.markerRuntime = res.runtime;
-                else warn('marker assignment rejected:', res.reason);
+                if (res.ok) {
+                  data.markerRuntime = res.runtime;
+                  // MARKER-3: a confirmed duty counts toward fair rotation.
+                  data.markerHistory = recordMarkerMark(data.markerHistory, chosen, markerGameKey(g));
+                  clearPendingMarker(g);
+                } else warn('marker assignment rejected:', res.reason);
                 render(state, storage, data, liveNote, diagnostics, schedulerUi);
               },
             });
-            const mkWrap = el('span', 'mkslot');
-            mkWrap.appendChild(sel);
-            row.appendChild(mkWrap);
+            markerCell.appendChild(sel);
+            // COLS-03: a playable fixture with NO marker recommendation at all
+            // is stated plainly rather than left looking like an ordinary
+            // unassigned row. Nothing is invented and the fixture is never
+            // withheld: the operator can still choose a marker manually (the
+            // selector beside it) or start it without one.
+            if (advice.markerAdviceEnabled && g.markerUnavailable) {
+              const nm = el('span', 'mknone', 'NO MARKER');
+              nm.title = 'No eligible marker could be recommended for this game ' +
+                '(nobody eligible is free, or the eligible volunteers are allocated to other games). ' +
+                'Pick one manually if you want coverage.';
+              statusCell.appendChild(nm);
+            }
           }
-          listPane.appendChild(row);
+          // COLS-02: recommendations beyond the free boards are the NEXT wave.
+          // The group is labelled ONCE above its first row (a divider, not a
+          // repeated chip per row); the row itself only carries the dotted
+          // `awaiting` border, so its status cell stays empty.
+          if (markerCell) row.appendChild(markerCell);
+          row.appendChild(statusCell);
+          return row;
+        };
+        let awaitingSep = false;
+        advice.recommended.forEach((g, seq) => {
+          const awaiting = seq >= startableCount;
+          if (awaiting && !awaitingSep) {
+            awaitingSep = true;
+            const sep = el('div', 'sssl-advicesep', '↓ waiting for a board · ' + awaitingCount);
+            sep.title = 'These fixtures are in the plan but every board is occupied or already ' +
+              'allocated. They start as boards free up.';
+            advicePane.appendChild(sep);
+          }
+          advicePane.appendChild(buildAdviceRow(g, seq, awaiting));
         });
+        // MARKER-7: OFF shows NOTHING marker-related — no hint, no "no marker"
+        // verdict, no placeholder wording. MANUAL states its one rule once,
+        // because "nothing was recommended" must not look like a failure.
+        if (!advice.markerAdviceEnabled && advice.markerControlsVisible) {
+          advicePane.appendChild(el('div', 'sssl-hintline',
+            'MANUAL — pick a marker for a fixture you can act on. Nothing is recommended or preselected; ' +
+            'eligibility and conflict rules still apply.'));
+        }
       }
       if (advice.projectedNext.length > 0) {
         const pHead = el('div', 'sssl-advicehead projected');
         pHead.appendChild(el('span', 'badge', 'PROJECTED NEXT'));
-        pHead.appendChild(document.createTextNode('next projected possibility' +
+        pHead.appendChild(document.createTextNode('next projected possibility · starts after the games above' +
           (advice.projectedNext.length > 1 ? ' · +' + (advice.projectedNext.length - 1) + ' more' : '')));
-        listPane.appendChild(pHead);
+        advicePane.appendChild(pHead);
         const pRow = el('div', 'sssl-advice projected');
+        pRow.classList.add('dependent');
+        // COLS-08: the projected row is the SAME grid as a recommended row, so
+        // it obeys the identical collision rules; its board and marker cells
+        // are empty because a projection assigns neither.
         pRow.appendChild(el('span', 'amark', '→'));
-        pRow.appendChild(el('span', 'sssl-pa', advice.projectedNext[0].playerA.name));
+        pRow.appendChild(el('span', 'g-board'));
+        const pnA = el('span', 'sssl-pa', advice.projectedNext[0].playerA.name);
+        pnA.title = advice.projectedNext[0].playerA.name;
+        const pnB = el('span', 'sssl-pb', advice.projectedNext[0].playerB.name);
+        pnB.title = advice.projectedNext[0].playerB.name;
+        pRow.appendChild(pnA);
         pRow.appendChild(el('span', 'sssl-vs', 'vs'));
-        pRow.appendChild(el('span', 'sssl-pb', advice.projectedNext[0].playerB.name));
-        listPane.appendChild(pRow);
+        pRow.appendChild(pnB);
+        // The projected row keeps the SAME cells as the rows above (so its
+        // columns line up) but assigns nothing: no board, no marker, no status.
+        // With marker controls OFF the marker cell is absent there too.
+        if (advice.markerControlsVisible === true) pRow.appendChild(el('span', 'mkslot'));
+        pRow.appendChild(el('span', 'astat'));
+        // COLS-04: a projected game is NEVER presented as immediately
+        // executable. A player named here may still be playing or marking a
+        // game above; the projection assumes those finish first. The
+        // dependency is one short tooltip, not another panel.
+        pRow.title = 'Projected next wave — not startable yet. It assumes the games above finish first; ' +
+          'a player named here may still be PLAYING or MARKING above.';
+        advicePane.appendChild(pRow);
       }
-      const listHead = el('div', 'sssl-advicehead projected');
-      listHead.appendChild(el('span', 'badge', 'FIXTURES'));
-      listHead.appendChild(document.createTextNode('factual schedule (PLAYING = live)'));
-      listPane.appendChild(listHead);
     }
 
+    /* Date-grouped fixture rows for ONE column. A single shared
+     * implementation renders both columns, so there is no duplicated row,
+     * marker or board control anywhere. `delayedCollapsed` is display state
+     * the operator set deliberately: it hides fixture ROWS visually and
+     * nothing else, and is never read by the scheduler adapters. */
+    /* MARKER-9: the ONE predicate that decides whether a fixture row offers a
+     * marker control. The row builder and the column band planner both call it,
+     * so a reserved marker band can never disagree with what is drawn. */
+    const markerControlWanted = (f) => {
+      if (!markerUiOn || f.delayed) return false;
+      if (findMarkerForGame(mkr, f) != null) return true;
+      // MARKER-9 (manager request): the game table NO LONGER offers the marker
+      // dialog speculatively. A marker is allocated from the TOP (the RECOMMENDED
+      // pane, in every mode including MANUAL), so a table row only gains a marker
+      // control once that allocation has actually happened — as a PENDING
+      // handoff the operator confirms here, or as the confirmed chip above.
+      // Nothing is proposed in the table, and an unallocated game shows no
+      // marker UI at all (its width goes to the names), which is the whole point
+      // of the reserved bands.
+      const key = markerGameKey(f);
+      return validatePendingMarker((data.pendingMarkers || {})[key], markerCtxFor(f)) != null;
+    };
+    /* MARKER-9/COLS-10: reserve the two fixed side bands of a fixture column.
+     * The widths are MEASURED at 1366x768 in the real UI, not guessed: the
+     * compact 'B4 ×' chip is 48px, the widest marker selector
+     * ('A: David Ashworth-Taylor') is 171px, and a confirmed
+     * 'M <name> ×' chip is 132px after the manager's abbreviations (B / M / A).
+     * A band is only reserved when the pane actually uses it, so a marker-OFF
+     * column (or a column with Managed Boards off) hands that width straight
+     * back to the player names. */
+    const BOARD_BAND = 52;
+    const MARKER_BAND = 176;
+    const FACT_BAND = 132;
+    const planColumnBands = (pane, rows, paneDelayed) => {
+      // The board column belongs to the layout whenever boards are managed at
+      // all; in the DELAYED column it appears only when a delayed game actually
+      // holds one (facts only there, per the manager's rule).
+      const anyBoard = rows.some((f) => findBoardOwningGame(rtv, f) != null);
+      const boardBand = paneDelayed
+        ? (anyBoard ? BOARD_BAND : 0)
+        : (schedulerUi.managedBoardsEnabled ? BOARD_BAND : 0);
+      const anyControl = rows.some((f) => markerControlWanted(f));
+      const anyFact = markerUiOn && rows.some((f) => findMarkerForGame(mkr, f) != null);
+      pane.style.setProperty('--fx-l', boardBand + 'px');
+      pane.style.setProperty('--fx-r', (anyControl ? MARKER_BAND : (anyFact ? FACT_BAND : 0)) + 'px');
+    };
+    const renderFixtureGroups = (pane, rows, liveCounts) => {
     let lastDate = null;
     let alt = false;
-    // Presentation-only collapse state for delayed date groups. Runtime
-    // only (per boot, never persisted, never read by the scheduler
-    // adapters): toggling hides fixture ROWS visually and nothing else.
-    const delayedCollapsed = data.delayedCollapsed || (data.delayedCollapsed = {});
-    shown.forEach((f) => {
-      const groupKey = f.date || f.dateLabel;
+    const liveIn = liveCounts || {};
+    rows.forEach((f) => {
+      const groupKey = collapsedGroupKey(f);
       if (f.dateLabel !== lastDate) {
         lastDate = f.dateLabel;
         alt = false;
@@ -3854,30 +5667,89 @@
         if (f.delayed) {
           // Historical/delayed groups are individually collapsible and
           // default to EXPANDED. The current-night group is not collapsible.
-          const collapsed = !!delayedCollapsed[groupKey];
-          bar.classList.add('collapsible');
+          // DELAY-LIVE: a group holding a factually PLAYING delayed fixture is
+          // forced OPEN (and marked), while the operator's stored preference
+          // is preserved for when the match finishes.
+          const live = liveIn[groupKey] || 0;
+          const collapsed = delayedGroupCollapsed(delayedCollapsed, groupKey, live);
+          if (live > 0) bar.classList.add('live');
           bar.appendChild(el('span', 'fold', collapsed ? '▸' : '▾'));
           bar.appendChild(document.createTextNode(f.dateLabel || 'Unscheduled'));
           bar.appendChild(el('span', 'delayed', 'DELAYED'));
-          bar.setAttribute('role', 'button');
-          bar.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-          bar.title = collapsed ? 'Expand delayed fixtures for this date' : 'Collapse delayed fixtures for this date';
-          bar.addEventListener('click', () => {
-            delayedCollapsed[groupKey] = !delayedCollapsed[groupKey];
-            render(state, storage, data, liveNote, diagnostics, schedulerUi);
-          });
+          if (live > 0) {
+            const chip = el('span', 'liven', '● PLAYING ' + live);
+            chip.title = live === 1
+              ? 'One fixture in this delayed group is live on a dartboard right now.'
+              : live + ' fixtures in this delayed group are live on dartboards right now.';
+            bar.appendChild(chip);
+          }
+          if (live > 0) {
+            // Not a toggle while live: the group is expanded automatically, so
+            // offering a collapse control that polling would immediately
+            // reverse is exactly the flicker this must avoid. The hint says
+            // what happened and that the saved choice is kept.
+            bar.classList.add('autolive');
+            bar.title = 'Expanded automatically: a fixture in this group is PLAYING. ' +
+              'Your saved collapse preference for this date is kept and comes back when it finishes.';
+          } else {
+            bar.classList.add('collapsible');
+            bar.setAttribute('role', 'button');
+            bar.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+            bar.title = collapsed ? 'Expand delayed fixtures for this date' : 'Collapse delayed fixtures for this date';
+            bar.addEventListener('click', () => {
+              delayedCollapsed[groupKey] = !delayedCollapsed[groupKey];
+              // COLS-05: the operator's choice is written with the rest of this
+              // league's state, so a manual Refresh — a genuine page reload —
+              // and automatic polling both keep it.
+              persistCollapsed();
+              render(state, storage, data, liveNote, diagnostics, schedulerUi);
+            });
+          }
         } else {
           bar.appendChild(document.createTextNode(f.dateLabel || 'Unscheduled'));
         }
-        listPane.appendChild(bar);
+        pane.appendChild(bar);
       }
-      // Collapsed delayed group: hide these rows visually only.
-      if (f.delayed && delayedCollapsed[groupKey]) return;
+      // Collapsed delayed group: hide these rows visually only. A live match
+      // can never be hidden by this (delayedGroupCollapsed forces it open).
+      if (f.delayed && delayedGroupCollapsed(delayedCollapsed, groupKey, liveIn[groupKey] || 0)) return;
       const row = el('div', 'sssl-row' + (alt ? ' alt' : '') + (f.status === 'playing' ? ' playing' : ''));
       alt = !alt;
-      row.appendChild(el('span', 'sssl-pa', f.playerA.name));
-      row.appendChild(el('span', 'sssl-vs', 'vs'));
-      row.appendChild(el('span', 'sssl-pb', f.playerB.name));
+      // COLS-08: a narrow fixture column can genuinely force an ellipsis, so
+      // the COMPLETE name is always available on hover (same rule the
+      // recommendation grid follows). Names are never truncated silently.
+      const paSpan = el('span', 'sssl-pa', f.playerA.name);
+      paSpan.title = f.playerA.name;
+      const pbSpan = el('span', 'sssl-pb', f.playerB.name);
+      pbSpan.title = f.playerB.name;
+      // COLS-09 (manager request): the pairing gets its OWN line, laid out as a
+      // three-column grid [1fr | vs | 1fr]. Two things follow, for every row in
+      // the column, with or without controls:
+      //   - the 'vs' sits at the SAME x on every row (it is the pane centre),
+      //     so the games read as one aligned block instead of a ragged edge;
+      //   - the right-hand names ALL begin at the same x, and it is the LONGEST
+      //     right-hand name that fixes where that is (equal 1fr sides, so the
+      //     widest name on the right defines the usable column and the left
+      //     names right-justify into theirs).
+      // Controls are appended to fx-ctrl (their own right-aligned line) and are
+      // NEVER in flow on the pairing line: sharing it was what squeezed the
+      // names and let the 'vs' wander from row to row.
+      const leftCol = el('div', 'fx-left');
+      const pair = el('div', 'fx-pair');
+      pair.appendChild(paSpan);
+      pair.appendChild(el('span', 'sssl-vs', 'vs'));
+      pair.appendChild(pbSpan);
+      const rightCol = el('div', 'fx-right');
+      row.appendChild(leftCol);
+      row.appendChild(pair);
+      row.appendChild(rightCol);
+      // ACCEPT-02: factual marker facts for THIS row, resolved before the
+      // board block so a board-first dispatch can hand over the proposal.
+      const fMarkerId = findMarkerForGame(mkr, f);
+      const fKey = markerGameKey(f);
+      const adviceFor = (advice && advice.recommended.find((g) => markerGameKey(g) === fKey)) || null;
+      const pendingRaw = (data.pendingMarkers || {})[fKey];
+      const pendingId = validatePendingMarker(pendingRaw, markerCtxFor(f));
       if (schedulerUi.managedBoardsEnabled) {
         const assignedBoard = findBoardOwningGame(rtv, f);
         if (assignedBoard) {
@@ -3887,29 +5759,43 @@
           // PLAYING, completion, a DartConnect start or a result, and ×
           // performs the same factual release as every other release path.
           const own = el('span', 'bown');
-          own.appendChild(el('span', 'chip', 'BOARD ' + assignedBoard.boardNumber));
+          own.appendChild(el('span', 'sssl-chip sm', 'B' + assignedBoard.boardNumber));
           const x = el('button', 'sssl-brel', '×');
           x.type = 'button';
           x.title = 'Release Board ' + assignedBoard.boardNumber + ' (assignment only; the fixture itself is unchanged)';
           x.setAttribute('aria-label', 'Release Board ' + assignedBoard.boardNumber);
           x.addEventListener('click', () => {
-            releaseBoard(rtv, assignedBoard.boardNumber);
+            // TRIAL-02: releaseBoard is pure — APPLY its returned runtime,
+            // otherwise the release is a silent no-op and the BOARD chip
+            // can never be removed. ACCEPT-03/4C: the release is persisted
+            // so a later Refresh/F5 cannot resurrect it. Marker advice,
+            // PLAYING and completeness are untouched.
+            const res = releaseBoard(rtv, assignedBoard.boardNumber);
+            if (res.ok) {
+              data.boardRuntime = res.runtime;
+              persistDispatch();
+            }
             render(state, storage, data, liveNote, diagnostics, schedulerUi);
           });
           own.appendChild(x);
-          row.appendChild(own);
-        } else if (f.status === 'playing') {
+          leftCol.appendChild(own);
+        } else if (f.status === 'playing' && !f.delayed) {
           // Reliable DartConnect live rows may be associated with a board.
+          // MARKER-9 (manager request): a DELAYED row offers NO board control.
+          // Delayed games are picked up by whoever volunteers, so a drop-down
+          // there is a control nobody asked for; the board that IS allocated to
+          // one keeps its compact BOARD n × chip above.
           const ctrl = el('span', 'bassign-slot');
-          ctrl.appendChild(boardSelectEl(rtv, (n) => {
-            const res = assignGameToBoard(rtv, f, n, { absentIds: Array.from(absent) });
-            if (res.ok) data.boardRuntime = res.runtime;
-            render(state, storage, data, liveNote, diagnostics, schedulerUi);
-          }));
-          row.appendChild(ctrl);
+          ctrl.appendChild(boardSelectEl(rtv, (n) => dispatchToBoard(n, f, adviceFor ? adviceFor.proposedMarkerId : null)));
+          leftCol.appendChild(ctrl);
         }
       }
-      if (f.status === 'playing') row.appendChild(el('span', 'sssl-playing', '● PLAYING'));
+      // MARKER-9 (manager request): NO row-level PLAYING label. The row is
+      // already GREEN with bold names, and the word added a second line to a
+      // row that otherwise needs none. Liveness stays visible three other ways:
+      // the green fill, an inset accent bar (never colour alone) and the row
+      // tooltip, plus the factual '● PLAYING n' count on the delayed group bar
+      // and the live status in the top bar.
       // Slice 3C: factual marker overlay (right edge). Presence of a
       // confirmed marker never means PLAYING/completion — duty only. It is
       // shown on the row regardless of Managed Boards and regardless of the
@@ -3919,62 +5805,202 @@
       //  - unmarked PLAYING rows: assignment slot offered (reliably
       //    identified live games are operator-actionable);
       //  - unmarked waiting rows: only when board-assigned (board-first
-      //    workflow) or currently actionable advice (proposal preselect).
-      //  - ordinary waiting rows: NO marker control — clean list.
-      const fMarkerId = findMarkerForGame(mkr, f);
-      const adviceFor = (advice && advice.recommended.find((g) => markerGameKey(g) === markerGameKey(f))) || null;
-      const showMarkerControl = fMarkerId != null || f.status === 'playing' ||
-        findBoardOwningGame(rtv, f) != null || adviceFor != null;
-      if (fMarkerId != null) {
+      //    workflow) or currently actionable advice (proposal preselect);
+      //  - ACCEPT-02: a dispatched game keeps showing its PENDING (still
+      //    unconfirmed) marker advice until the operator confirms it.
+      //  - ordinary waiting rows: NO marker control — clean list;
+      //  - MARKER-9: the marker DIALOG lives at the TOP (the RECOMMENDED pane,
+      //    which offers it in every mode, MANUAL included). A table row shows
+      //    one only after the top has allocated that game to a marker — as the
+      //    pending 'A: <name>' control the operator confirms here. Board-first
+      //    allocation from the top hands its marker proposal over with it, so
+      //    that row keeps its control too. Delayed rows are excluded above;
+      //  - MARKER-7 OFF: no marker control on any row, and a confirmed duty is
+      //    hidden rather than deleted (the runtime keeps it).
+      //  - MARKER-9: DELAYED rows never carry a marker drop-down in ANY mode.
+      //    Board and marker are a manual, volunteer, at-the-board decision
+      //    there; the delayed column shows only compact FACTS (BOARD n ×,
+      //    MARKER name ×, ● PLAYING) so it cannot overflow.
+      //  - MARKER-9: DELAYED rows get NO marker drop-down at all (any mode).
+      //    A delayed game is marked by a volunteer physically at the board, so
+      //    the operator picks a name elsewhere (or not at all); the FACT of a
+      //    confirmed duty is still shown on the delayed row as a compact chip.
+      //    The predicate lives in markerControlWanted() so the reserved marker
+      //    band and the rendered control can never disagree.
+      const showMarkerControl = markerControlWanted(f);
+      if (markerUiOn && fMarkerId != null && f.delayed) {
+        // MARKER-9: the DELAYED column is FACT-ONLY (no drop-downs there, at
+        // the manager's request), so a confirmed duty on a delayed game keeps
+        // the compact chip + × — visible, and removable, without a selector.
         const mkOwn = el('span', 'mkown');
-        mkOwn.appendChild(el('span', 'mkchip', 'MARKER ' + markerNameForId(data, fMarkerId)));
+        mkOwn.appendChild(el('span', 'mkchip', 'M ' + markerNameForId(data, fMarkerId)));
+        mkOwn.title = 'Confirmed marker duty: ' + markerNameForId(data, fMarkerId) +
+          ' (a fact, not advice; × releases the duty only)';
         const mkX = el('button', 'sssl-brel', '×');
         mkX.type = 'button';
         mkX.title = 'Release marker duty only (board ownership, PLAYING and factual state are unchanged)';
         mkX.setAttribute('aria-label', 'Release marker ' + markerNameForId(data, fMarkerId));
         mkX.addEventListener('click', () => {
           const res = releaseMarkerFromGame(mkr, f);
-          if (res.ok) data.markerRuntime = res.runtime;
+          if (res.ok) {
+            data.markerRuntime = res.runtime;
+            // MARKER-3: a released duty no longer counts for rotation.
+            data.markerHistory = releaseMarkerMark(data.markerHistory, fMarkerId);
+            persistDispatch();
+          }
           render(state, storage, data, liveNote, diagnostics, schedulerUi);
         });
         mkOwn.appendChild(mkX);
-        row.appendChild(mkOwn);
+        rightCol.appendChild(mkOwn);
       } else if (showMarkerControl) {
-        const mkCtx = {
-          players: data.roster,
-          absentIds: Array.from(absent),
-          playingPlayerIds: data.fixtures.filter((x) => x.status === 'playing').flatMap((x) => [x.playerA.id, x.playerB.id]).filter((id) => id != null),
-          markingPlayerIds: Object.keys(mkr.byMarker).map(Number).filter(Number.isSafeInteger),
-          markedGameKeys: mkr.byGame,
-          rosterDivisionIds: divRosterIds,
-          excludeParticipants: true,
-          participantIds: [f.playerA.id, f.playerB.id],
-        };
+        // MARKER-9: ONE control in the table, and only for a game that has
+        // actually been allocated to a marker from the top (confirmed) or that
+        // carries the handoff from that allocation (pending). It shows the FACT
+        // in its own text ('M: <name>'), and it lets the operator do what the
+        // manager asked right here: choose another name to REALLOCATE, or choose
+        // 'M: —' to REMOVE the duty. Nothing is proposed in the table, and a
+        // game with no marker shows no marker UI at all.
+        const mkCtx = markerCtxFor(f);
         const sel = markerSelectEl({
-          proposedMarkerId: adviceFor ? adviceFor.proposedMarkerId : null,
+          // a confirmed duty is displayed, never overwritten, and stays
+          // selectable so it can be reallocated deliberately
+          confirmedMarkerId: fMarkerId,
+          // ACCEPT-02: the handed-off pending proposal wins over a fresh
+          // re-plan, so the operator sees continuity across the dispatch.
+          // MARKER-7: only while advice is actually produced (FAIR/LOSER) —
+          // MANUAL and OFF preselect nothing, including a handoff left over
+          // from an earlier mode. The pending state itself is preserved and
+          // comes back with its ADVISE label if advice is switched on again.
+          proposedMarkerId: adviceModeOn && pendingId != null ? pendingId : null,
           nameFor: (id) => markerNameForId(data, id),
           context: mkCtx,
           onConfirm: (chosen) => {
-            const res = assignMarkerToGame(mkr, f, chosen, {
+            // MARKER-9: REALLOCATION of a game that already holds a duty goes
+            // through the atomic changeMarkerForGame (release + assign in one
+            // transition, so the game is never left unmarked or double-marked);
+            // a fresh allocation uses assignMarkerToGame. Both refuse on the
+            // same eligibility grounds, so nothing can be smuggled in here.
+            const assignCtx = {
               absentIds: mkCtx.absentIds,
               playingPlayerIds: mkCtx.playingPlayerIds,
               rosterDivisionIds: divRosterIds,
+              markerOffIds: mkCtx.markerOffIds,
+              pendingMarkerIds: mkCtx.pendingMarkerIds,
               participantIds: [f.playerA.id, f.playerB.id],
-            });
-            if (res.ok) data.markerRuntime = res.runtime;
-            else warn('marker assignment rejected:', res.reason);
+            };
+            const res = fMarkerId != null
+              ? changeMarkerForGame(mkr, f, chosen, assignCtx)
+              : assignMarkerToGame(mkr, f, chosen, assignCtx);
+            if (res.ok) {
+              data.markerRuntime = res.runtime;
+              // MARKER-3: rotation follows the FACTS — the replaced duty stops
+              // counting and the new one starts counting.
+              if (fMarkerId != null) data.markerHistory = releaseMarkerMark(data.markerHistory, fMarkerId);
+              data.markerHistory = recordMarkerMark(data.markerHistory, chosen, markerGameKey(f));
+              clearPendingMarker(f);
+              // MARKER-9: persist the CONFIRMED duty even when there was no
+              // pending handoff to clear (clearPendingMarker only writes when
+              // it actually removed something). Without this a manual
+              // confirmation appeared on the row and then vanished on Refresh.
+              persistDispatch();
+            } else warn('marker assignment rejected:', res.reason);
+            render(state, storage, data, liveNote, diagnostics, schedulerUi);
+          },
+          // MARKER-9: 'M: —' in a row that HOLDS a marker is a removal, and it
+          // releases the duty only — board ownership, PLAYING and the fixture
+          // itself are untouched. Choosing any other name reallocated it above.
+          onClear: () => {
+            const res = releaseMarkerFromGame(mkr, f);
+            if (res.ok) {
+              data.markerRuntime = res.runtime;
+              // MARKER-3: a released duty no longer counts for rotation.
+              data.markerHistory = releaseMarkerMark(data.markerHistory, fMarkerId);
+              clearPendingMarker(f);
+              persistDispatch();
+            }
             render(state, storage, data, liveNote, diagnostics, schedulerUi);
           },
         });
-        const slot = el('span', 'mkslot');
+        const slot = el('span', 'mkslot' +
+          (fMarkerId == null && pendingId != null ? ' pending' : ''));
+        if (fMarkerId == null && pendingId != null) {
+          slot.title = 'Pending marker advice from the recommendation — NOT a confirmed marker. ' +
+            'Choose to confirm it, pick someone else, or leave it unconfirmed.';
+        }
         slot.appendChild(sel);
-        row.appendChild(slot);
+        rightCol.appendChild(slot);
       }
-      row.title = [f.dateLabel, f.roundLabel, f.sessionLabel].filter(Boolean).join(' · ');
-      listPane.appendChild(row);
+      // MARKER-9: PLAYING is stated in WORDS on the row itself, so hiding the
+      // row chip never leaves colour as the only cue.
+      row.title = [f.dateLabel, f.roundLabel, f.sessionLabel,
+        f.status === 'playing' ? 'PLAYING — live on DartConnect' : null]
+        .filter(Boolean).join(' · ');
+      pane.appendChild(row);
     });
+    };
+    // DELAY-LIVE: computed ONCE per render from the factual delayed rows, and
+    // handed to the shared row builder for the delayed column.
+    const liveDelayedCounts = liveDelayedGroupCounts(delayedRows);
+    // MARKER-9/COLS-10: bands are decided per PANE, before the rows are built,
+    // so every row in a column shares one centre for the game.
+    planColumnBands(listPane, currentRows, false);
+    planColumnBands(delayedPane, delayedRows, true);
+    renderFixtureGroups(listPane, currentRows, {});
+    renderFixtureGroups(delayedPane, delayedRows, liveDelayedCounts);
 
-    rosterPane.appendChild(el('div', 'sssl-rhead', 'NOT HERE'));
+    // MARKER-8 (Not Here toolbar): the heading and Clear Not Here share the
+    // FIRST row and the bulk controls sit on the SECOND, all of it fixed above
+    // the list. Only the player list scrolls, so the clear action is always in
+    // reach and there is exactly ONE Clear Not Here in the panel.
+    const rosterHead = el('div', 'sssl-rosterhead');
+    const headRow = el('div', 'sssl-rheadrow');
+    headRow.appendChild(el('div', 'sssl-rhead', 'NOT HERE'));
+    const clear = el('button', 'sssl-btn', 'Clear Not Here');
+    clear.type = 'button';
+    clear.title = 'Clear every Not Here selection for this division';
+    clear.setAttribute('aria-label', 'Clear Not Here');
+    clear.addEventListener('click', () => {
+      state.absentIds = [];
+      // ACCEPT-01: clearing NOT HERE is a genuine eligibility change.
+      data.dispatchOrder = null;
+      saveState(storage, state);
+      render(state, storage, data, liveNote, diagnostics, activeSchedulerUi);
+    });
+    headRow.appendChild(clear);
+    rosterHead.appendChild(headRow);
+    // TRIAL-06: bulk delayed-allowance controls. They apply ONLY to players
+    // who are HERE and have outstanding delayed games (backlog > 0):
+    // All → 1 sets R = min(1, N); All → 0 sets R = 0. Individual overrides
+    // can still be changed independently afterwards.
+    const bulkRow = el('div', 'sssl-bulkdelay');
+    const applyBulkAllowance = (value) => {
+      const bl = getDelayedBacklogByPlayer(data.fixtures);
+      const absentSet = new Set(state.absentIds);
+      let rt = data.delayedAllowanceRuntime || createDelayedAllowanceRuntime(data.fixtures);
+      Object.keys(bl).forEach((idStr) => {
+        const id = Number(idStr);
+        if (!(bl[id] > 0) || absentSet.has(id)) return;
+        const res = setRemainingDelayedAllowance(rt, id, value, bl);
+        if (res.ok) rt = res.runtime;
+      });
+      data.delayedAllowanceRuntime = rt;
+      persistNight();
+      render(state, storage, data, liveNote, diagnostics, schedulerUi);
+    };
+    const bulkZero = el('button', 'sssl-btn', 'All \u2192 0');
+    bulkZero.type = 'button';
+    bulkZero.title = 'Set remaining delayed catch-up allowance to 0 for every HERE player with outstanding delayed games';
+    bulkZero.setAttribute('aria-label', 'All delayed allowances to 0');
+    bulkZero.addEventListener('click', () => applyBulkAllowance(0));
+    const bulkOne = el('button', 'sssl-btn', 'All \u2192 1');
+    bulkOne.type = 'button';
+    bulkOne.title = 'Set remaining delayed catch-up allowance to 1 (bounded by each player\'s outstanding count) for every HERE player with outstanding delayed games';
+    bulkOne.setAttribute('aria-label', 'All delayed allowances to 1');
+    bulkOne.addEventListener('click', () => applyBulkAllowance(1));
+    bulkRow.appendChild(bulkZero);
+    bulkRow.appendChild(bulkOne);
+    rosterHead.appendChild(bulkRow);
+    colNotHere.insertBefore(rosterHead, rosterPane);
     const roster = data.roster.filter((p) => p.division === state.division);
     roster.sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0));
     // Slice 3C: informational factual delayed backlog (N) + remaining
@@ -3995,10 +6021,39 @@
         if (next.has(p.id)) next.delete(p.id);
         else next.add(p.id);
         state.absentIds = Array.from(next);
+        // ACCEPT-01: NOT HERE is a genuine eligibility change.
+        data.dispatchOrder = null;
         saveState(storage, state, data.storeKey);
         render(state, storage, data, liveNote, diagnostics, activeSchedulerUi);
       });
       rowWrapItem.appendChild(b);
+      // TRIAL-04: compact per-player MARKER OFF toggle. Operator availability
+      // state, independent of NOT HERE (NOT HERE still wins: an absent player
+      // is filtered first everywhere). A MARKER OFF player is never proposed
+      // or selectable as a marker, but remains fully playable. Persisted with
+      // the night settings; offered for every roster player.
+      // MARKER-7 OFF: marker availability is meaningless with no marker UI at
+      // all, so the toggle is not rendered. The saved overrides are untouched
+      // and reappear (still set) when a marker mode with controls is chosen.
+      if (markerUiOn) {
+        const markerOff = Array.isArray(state.markerOffIds) && state.markerOffIds.indexOf(p.id) !== -1;
+        const mkT = el('button', 'mkoff' + (markerOff ? ' on' : ''), 'M\u2715');
+        mkT.type = 'button';
+        mkT.setAttribute('aria-pressed', markerOff ? 'true' : 'false');
+        mkT.title = markerOff
+          ? 'Marker availability: OFF \u2014 never proposed or selectable as marker (still plays). Click to re-enable.'
+          : 'Marker availability: ON \u2014 click to switch this player\'s marker availability OFF for tonight';
+        mkT.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const s = new Set(Array.isArray(state.markerOffIds) ? state.markerOffIds : []);
+          if (s.has(p.id)) s.delete(p.id);
+          else s.add(p.id);
+          state.markerOffIds = Array.from(s);
+          persistNight();
+          render(state, storage, data, liveNote, diagnostics, schedulerUi);
+        });
+        rowWrapItem.appendChild(mkT);
+      }
       if (n > 0) {
         // (N/R): hidden entirely when N = 0. The allowance number is an
         // interactive override, clamped by the domain core to 0..N.
@@ -4029,6 +6084,7 @@
           const res = setRemainingDelayedAllowance(delayRt, p.id, chosen, backlog);
           if (res.ok) {
             data.delayedAllowanceRuntime = res.runtime;
+            persistNight();
             render(state, storage, data, liveNote, diagnostics, schedulerUi); // global re-plan
           }
         });
@@ -4047,23 +6103,23 @@
       rowWrap.appendChild(rowWrapItem);
     });
     while (rowWrap.firstChild) rosterPane.appendChild(rowWrap.firstChild);
-    const clear = el('button', 'sssl-btn', 'Clear Not Here');
-    clear.type = 'button';
-    clear.style.marginTop = '8px';
-    clear.addEventListener('click', () => {
-      state.absentIds = [];
-      saveState(storage, state);
-      render(state, storage, data, liveNote, diagnostics, activeSchedulerUi);
-    });
-    rosterPane.appendChild(clear);
+    // The Clear Not Here button lives in the fixed header above; there is no
+    // second copy here (MARKER-8).
     if (liveNote) {
       const noteEl = el('div', 'sssl-note', liveNote);
       if (currentLiveTitle) noteEl.title = currentLiveTitle;
       rosterPane.appendChild(noteEl);
     }
 
-    main.appendChild(listPane);
-    main.appendChild(rosterPane);
+    cols.appendChild(left);
+    // MARKER-10: the divider sits BETWEEN the two regions, so dragging it is
+    // the single control that trades width for the Delayed column.
+    cols.appendChild(splitter);
+    cols.appendChild(colNotHere);
+    if (Number.isSafeInteger(state.night && state.night.notHereWidth)) {
+      splitter.setAttribute('aria-valuenow', String(state.night.notHereWidth));
+    }
+    main.appendChild(cols);
     overlay.appendChild(main);
     document.documentElement.appendChild(overlay);
     overlay._ssslStyle = style;
@@ -4136,6 +6192,18 @@
     migrateLegacyState(storage, league);
     const storeKey = league ? storageKeyForLeague(league) : null;
     const state = loadState(storage, [], storeKey);
+    // TRIAL-01: restore current-night operator settings into the scheduler
+    // UI (strategy / delayed / managed boards / board count). TRIAL-04
+    // marker availability is restored by loadState into state.markerOffIds;
+    // TRIAL-06 allowance overrides are re-applied to the runtime once the
+    // factual backlog is parsed (below).
+    if (state.night) {
+      if (state.night.strategy) schedulerUi.strategy = state.night.strategy;
+      if (typeof state.night.includeDelayed === 'boolean') schedulerUi.includeDelayed = state.night.includeDelayed;
+      if (typeof state.night.managedBoardsEnabled === 'boolean') schedulerUi.managedBoardsEnabled = state.night.managedBoardsEnabled;
+      if (Number.isSafeInteger(state.night.boardCount)) schedulerUi.boardCount = state.night.boardCount;
+      if (isMarkerPolicy(state.night.markerPolicy)) schedulerUi.markerPolicy = state.night.markerPolicy;
+    }
     state.theme = defaultTheme(state.theme, systemPrefersDark());
     log('state restored:', state.division, '| absent:', state.absentIds.length);
     const data = { fixtures: [], roster: [], divisions: [], parseFailed: false, league, storeKey };
@@ -4162,19 +6230,61 @@
       info.playerLinks = roster.players.length;
       const parsed = parseFixturesFromProps(props, data.divisions);
       parsed.warnings.forEach(warnOnce);
+      // MARKER-2: FACTUAL completion evidence (schedule props status 'C').
+      // API-derived completions are merged in below from live polls. This is
+      // the only evidence accepted for the played-before-marking rule; a game
+      // merely leaving PLAYING is never treated as completion.
+      data.completedMatches = Array.isArray(parsed.completed) ? parsed.completed.slice() : [];
       info.candidates = parsed.fixtures.length;
       const deduped = dedupeFixtures(parsed.fixtures);
       info.duplicates = deduped.removed;
       data.fixtures = sortFixtures(deduped.fixtures);
       info.parsed = data.fixtures.length;
       info.delayed = data.fixtures.filter((f) => f.delayed).length;
+      // TRIAL-01/06: re-apply saved per-player allowance overrides, re-clamped
+      // against the CURRENT factual backlog via the domain core. Players
+      // without outstanding delayed games get nothing; consumption keys stay
+      // runtime-only. Board/marker ownership runtimes stay memory-only.
+      if (state.night && state.night.delayedAllowance && Object.keys(state.night.delayedAllowance).length) {
+        const savedBacklog = getDelayedBacklogByPlayer(data.fixtures);
+        data.delayedAllowanceRuntime = applySavedDelayedAllowance(
+          createDelayedAllowanceRuntime(data.fixtures), state.night.delayedAllowance, savedBacklog
+        );
+      }
+      // ACCEPT-03/5: restore dispatched operator state for THIS division +
+      // match-date bucket only — explicit board assignments and the pending
+      // marker advice handed off for them. Restored defensively (valid board
+      // number, unambiguous existing game, no duplicate board/game); nothing
+      // is inferred from DartConnect, and a deliberately released board stays
+      // released because release already removed it from persistence.
+      if (state.night && state.night.dispatch) {
+        const bucket = dispatchBucketKey(state);
+        const savedDispatch = state.night.dispatch[bucket];
+        if (savedDispatch) {
+          const restored = restoreDispatchState(schedulerUi.boardCount, savedDispatch, data.fixtures);
+          data.boardRuntime = restored.runtime;
+          data.pendingMarkers = restored.pendingMarkers;
+          // MARKER-3: restore the minimum explicit marker history for fair
+          // rotation in this division@date night.
+          data.markerHistory = restored.history;
+          // MARKER-6: and the CONFIRMED marker assignments themselves — an
+          // operator fact, restored defensively against the CURRENT fixture
+          // list, so Refresh/F5 no longer loses a marker and no duty is
+          // resurrected for a game that has since gone.
+          data.markerRuntime = restored.markerRuntime;
+          info.dispatchRestored = restored.restored.length;
+          info.dispatchRejected = restored.rejected.length;
+          log('dispatch restored:', restored.restored.length, '| rejected:',
+            JSON.stringify(restored.rejected.map((x) => x.reason)));
+        }
+      }
       data.availableDates = distinctMatchDates(data.fixtures);
       data.dateLabels = {};
       data.fixtures.forEach((f) => {
         if (f.date && !data.dateLabels[f.date] && f.dateLabel) data.dateLabels[f.date] = f.dateLabel;
       });
       state.selectedMatchDate = resolveMatchDate(data.availableDates, state.selectedMatchDate, todayLocalIso());
-      saveState(storage, state);
+      saveState(storage, state, data.storeKey);
       lastInfo = {
         version: VERSION,
         leagueCode: league ? league.leagueCode : null,
@@ -4306,6 +6416,7 @@
     defaultMatchDate,
     resolveMatchDate,
     withinSelectedDate,
+    applyMatchDateClassification,
     applyDisplayFilters,
     tvApiUrl,
     matchCentreUrl,
@@ -4380,6 +6491,43 @@
     releaseBoard,
     resizeManagedBoards,
     detectManagedBoardConflicts,
+    applyDispatchOrder,
+    rememberDispatchOrder,
+    snapshotBoardAssignments,
+    snapshotDispatchState,
+    snapshotMarkerAssignments,
+    normalizeMarkerAssignments,
+    restoreDispatchState,
+    dispatchBucketKey,
+    mergeDispatchBucket,
+    getBoardOccupancy,
+    splitStartableRecommendations,
+    collapsedGroupKey,
+    liveDelayedGroupCounts,
+    delayedGroupCollapsed,
+    normalizeCollapsedGroups,
+    collapsedGroupsFor,
+    pruneCollapsedGroups,
+    validatePendingMarker,
+    MARKER_POLICIES,
+    isMarkerPolicy,
+    isMarkerPolicyAvailable,
+    getPlayedPlayerIds,
+    getNextDispatchCapacity,
+    nextDispatchParticipantIds,
+    markerSequenceReservedIds,
+    completedMatchesFromApiRecords,
+    isCompletedRecord,
+    createMarkerHistory,
+    getMarkerMarkCount,
+    recordMarkerMark,
+    releaseMarkerMark,
+    normalizeMarkerHistory,
+    rankMarkerCandidatesByFairness,
+    rankLoserCandidates,
+    orderMarkerCandidates,
+    reservedPendingMarkerIds,
+    defaultSchedulerUiState,
     createMarkerRuntime,
     markerGameKey,
     findMarkerForGame,
@@ -4399,6 +6547,9 @@
     canScheduleDelayedFixture,
     consumeDelayedAllowance,
     getConsumedDelayedGameKeys,
+    snapshotDelayedAllowance,
+    applySavedDelayedAllowance,
+    buildNightPersistedState,
     UI_SCALE_VALUES,
     UI_SCALE_DEFAULT,
     normalizeUiScale,

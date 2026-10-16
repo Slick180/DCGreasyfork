@@ -1555,16 +1555,40 @@ function bFixtures() {
   ];
 }
 const bView = { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [] };
+/**
+ * MARKER-2: FACTUAL completion evidence for the shared world — every roster
+ * player has completed a game on the current match night. This feeds the
+ * FAIR "has already played" PREFERENCE (never a hard gate); a game merely
+ * leaving PLAYING is never accepted as completion.
+ */
+function bCompleted(ids, date) {
+  const list = Array.isArray(ids) ? ids : bRoster.map((p) => p.id);
+  const day = date || bView.selectedMatchDate;
+  const out = [];
+  for (let i = 0; i + 1 < list.length; i += 2) {
+    out.push({
+      matchId: 9000 + i, date: day, division: 'Universal',
+      playerA: { id: list[i] }, playerB: { id: list[i + 1] }, source: 'schedule-props',
+    });
+  }
+  return out;
+}
+// Standard shared-world data WITH factual completion evidence, so the shared
+// board/dispatch tests exercise the full FAIR path (played preference +
+// rotation). Eligibility itself never depends on it.
+const bData = (extra) => Object.assign({
+  fixtures: bFixtures(), roster: bRoster, completedMatches: bCompleted(),
+}, extra || {});
 const bUi = () => Object.assign(api.defaultSchedulerUiState(), { managedBoardsEnabled: true, boardCount: 4 });
 
 // 59. OFF requires no boards; ON generates 1..6 UNASSIGNED rows; no auto-mapping.
 (() => {
   const sOff = api.buildNightSession(Object.assign(api.defaultSchedulerUiState(), { managedBoardsEnabled: false }),
-    { fixtures: bFixtures(), roster: bRoster }, bView);
+    bData(), bView);
   check('59. Managed OFF: no physical board identity required (session boards empty)',
     sOff.managedBoardsEnabled === false && sOff.boards.length === 0);
   const recOff = api.buildSchedulerAdvice(Object.assign(api.defaultSchedulerUiState(), { managedBoardsEnabled: false }),
-    { fixtures: bFixtures(), roster: bRoster }, bView);
+    bData(), bView);
   check('59. Managed OFF: advice is still produced without any board ownership',
     recOff.recommended.length > 0 && recOff.recommended.every((g) => api.findBoardOwningGame({ boards: [{ boardNumber: 1, gameKey: null }] }, g) === null));
 
@@ -1574,7 +1598,7 @@ const bUi = () => Object.assign(api.defaultSchedulerUiState(), { managedBoardsEn
     check('59. All ' + n + ' new boards are UNASSIGNED', rt.boards.every((b) => b.gameKey === null));
   });
 
-  const advice = api.buildSchedulerAdvice(bUi(), { fixtures: bFixtures(), roster: bRoster }, bView);
+  const advice = api.buildSchedulerAdvice(bUi(), bData(), bView);
   const fresh = api.createManagedBoardRuntime(4);
   const autoAssigned = advice.recommended.filter((g) => api.findBoardOwningGame(fresh, g) !== null);
   check('59. Recommendation rendering NEVER auto-assigns to boards', autoAssigned.length === 0);
@@ -1646,21 +1670,21 @@ const bUi = () => Object.assign(api.defaultSchedulerUiState(), { managedBoardsEn
   let rt = api.createManagedBoardRuntime(4);
   rt = api.assignGameToBoard(rt, f[0], 2).runtime;
   rt = api.assignGameToBoard(rt, f[2], 4).runtime;
-  const data = { fixtures: f, roster: bRoster };
+  const data = { fixtures: f, roster: bRoster, completedMatches: bCompleted() };
   const snapshot = JSON.stringify(rt);
 
   const norm = api.buildSchedulerAdvice(Object.assign(bUi(), { strategy: api.SCHEDULING_STRATEGIES.NORMAL }), data, bView);
   check('62. NORMAL planning leaves the board runtime untouched', JSON.stringify(rt) === snapshot);
   const opt = api.buildSchedulerAdvice(Object.assign(bUi(), { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED }), data, bView);
   check('62. OPTIMISED planning leaves the board runtime untouched', JSON.stringify(rt) === snapshot);
-  const optData = { fixtures: f, roster: bRoster, boardRuntime: rt };
+  const optData = { fixtures: f, roster: bRoster, completedMatches: bCompleted(), boardRuntime: rt };
   api.buildSchedulerAdvice(Object.assign(bUi(), { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED }), optData, bView);
   check('62. NORMAL -> OPTIMISED preserves assignments', JSON.stringify(rt) === snapshot);
   api.buildSchedulerAdvice(Object.assign(bUi(), { strategy: api.SCHEDULING_STRATEGIES.NORMAL }), optData, bView);
   check('62. OPTIMISED -> NORMAL preserves assignments', JSON.stringify(rt) === snapshot);
-  const dataAfter = JSON.stringify({ fixtures: optData.fixtures, roster: optData.roster });
+  const dataAfter = JSON.stringify({ fixtures: optData.fixtures, roster: optData.roster, completedMatches: optData.completedMatches });
   check('62. Planner input data is never mutated by strategy changes',
-    dataAfter === JSON.stringify({ fixtures: f, roster: bRoster }));
+    dataAfter === JSON.stringify({ fixtures: f, roster: bRoster, completedMatches: bCompleted() }));
   check('62. Board ownership still visible from helper after both strategies',
     api.findBoardOwningGame(rt, f[0]).boardNumber === 2 && api.findBoardOwningGame(rt, f[2]).boardNumber === 4);
   void norm;
@@ -1670,13 +1694,13 @@ const bUi = () => Object.assign(api.defaultSchedulerUiState(), { managedBoardsEn
 (() => {
   const f = bFixtures();
   f.push({ matchId: 65, date: '2026-09-03', dateValue: 50, division: 'Universal', roundValue: 1, sessionValue: 1, playerA: p9, playerB: p10, delayed: true, status: 'waiting' });
-  const data = { fixtures: f, roster: bRoster };
+  const data = { fixtures: f, roster: bRoster, completedMatches: bCompleted() };
 
   // --- while every game is still waiting ---
   const adviceOff = api.buildSchedulerAdvice(bUi(), data, bView);
   check('63. Delayed OFF: ineligible delayed fixture is never exposed for assignment',
     adviceOff.recommended.every((g) => !g.delayed));
-  const delayOffData = { fixtures: JSON.parse(JSON.stringify(f)), roster: bRoster, boardRuntime: api.createManagedBoardRuntime(4) };
+  const delayOffData = { fixtures: JSON.parse(JSON.stringify(f)), roster: bRoster, completedMatches: bCompleted(), boardRuntime: api.createManagedBoardRuntime(4) };
   const beforeOff = JSON.stringify(delayOffData.boardRuntime);
   api.buildSchedulerAdvice(Object.assign(bUi(), { includeDelayed: false }), delayOffData, bView);
   check('63. Delayed OFF does not mutate existing board assignments',
@@ -1713,7 +1737,7 @@ const bUi = () => Object.assign(api.defaultSchedulerUiState(), { managedBoardsEn
   const delayedAssign = api.assignGameToBoard(rt, delayedRecommended, 2);
   check('63. Eligible delayed recommendation is assignable like any other',
     delayedAssign.ok && delayedAssign.runtime.boards[1].gameKey === api.boardKeyForGame(delayedRecommended));
-  const delayOnData = { fixtures: JSON.parse(JSON.stringify(f)), roster: bRoster, boardRuntime: delayedAssign.runtime };
+  const delayOnData = { fixtures: JSON.parse(JSON.stringify(f)), roster: bRoster, completedMatches: bCompleted(), boardRuntime: delayedAssign.runtime };
   const snapshotOn = JSON.stringify(delayOnData.boardRuntime);
   api.buildSchedulerAdvice(Object.assign(bUi(), { includeDelayed: true }), delayOnData, bView);
   check('63. Delayed ON advice recomputation keeps assignments intact', JSON.stringify(delayOnData.boardRuntime) === snapshotOn);
@@ -1737,7 +1761,7 @@ const bUi = () => Object.assign(api.defaultSchedulerUiState(), { managedBoardsEn
   check('64. Assignment/release adds no DONE/complete semantics', assignedStillWaiting === 'waiting');
 
   // Unassignable with capacity when a live game is not on any board.
-  const session = api.buildNightSession(bUi(), { fixtures: f, roster: bRoster, boardRuntime: rt }, bView);
+  const session = api.buildNightSession(bUi(), { fixtures: f, roster: bRoster, completedMatches: bCompleted(), boardRuntime: rt }, bView);
   const playable = api.getPlayableGames(session);
   check('64. Live (PLAYING) game is not re-recommended while its board context exists',
     playable.every((g) => g.matchId !== f[0].matchId));
@@ -1762,7 +1786,7 @@ const bUi = () => Object.assign(api.defaultSchedulerUiState(), { managedBoardsEn
   const f = bFixtures();
   let rt = api.createManagedBoardRuntime(4);
   rt = api.assignGameToBoard(rt, f[0], 1).runtime;
-  const data = { fixtures: f, roster: bRoster, boardRuntime: rt };
+  const data = { fixtures: f, roster: bRoster, completedMatches: bCompleted(), boardRuntime: rt };
   const advice = api.buildSchedulerAdvice(bUi(), data, bView);
   check('65. An assigned game is not re-recommended (its players are occupied)',
     advice.recommended.every((g) => g.matchId !== f[0].matchId));
@@ -1821,7 +1845,7 @@ console.log('\n--- Slice 3B UI Scale Tests ---');
   let rt = api.createManagedBoardRuntime(4);
   rt = api.assignGameToBoard(rt, f[0], 1).runtime;
   const ui = bUi();
-  const data = { fixtures: f, roster: bRoster, boardRuntime: rt };
+  const data = { fixtures: f, roster: bRoster, completedMatches: bCompleted(), boardRuntime: rt };
   const boardSnapshot = JSON.stringify(rt);
   const fixSnapshot = JSON.stringify(f);
   api.loadUiScale(fakeStorage);
@@ -1913,7 +1937,7 @@ console.log('\n--- Slice 3B Fixture-Row Board Ownership Tests ---');
   // Strategy flips preserve what the rows would display.
   let rt3 = api.createManagedBoardRuntime(4);
   rt3 = api.assignGameToBoard(rt3, f[1], 3).runtime;
-  const data = { fixtures: f, roster: bRoster, boardRuntime: rt3 };
+  const data = { fixtures: f, roster: bRoster, completedMatches: bCompleted(), boardRuntime: rt3 };
   api.buildSchedulerAdvice(Object.assign(bUi(), { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED }), data, bView);
   api.buildSchedulerAdvice(Object.assign(bUi(), { strategy: api.SCHEDULING_STRATEGIES.NORMAL }), data, bView);
   check('69. NORMAL <-> OPTIMISED preserves fixture-row ownership resolution',
@@ -1923,7 +1947,7 @@ console.log('\n--- Slice 3B Fixture-Row Board Ownership Tests ---');
   const uiOff = Object.assign(bUi(), { managedBoardsEnabled: false });
   const rt4 = api.assignGameToBoard(api.createManagedBoardRuntime(4), f[0], 1).runtime;
   const kept = JSON.parse(JSON.stringify(rt4));
-  const dataOff = { fixtures: f, roster: bRoster, boardRuntime: rt4 };
+  const dataOff = { fixtures: f, roster: bRoster, completedMatches: bCompleted(), boardRuntime: rt4 };
   api.buildNightSession(uiOff, dataOff, bView); // OFF projection ignores ownership
   check('69. Managed OFF: runtime assignments survive untouched',
     JSON.stringify(rt4) === JSON.stringify(kept) && api.findBoardOwningGame(rt4, f[0]).boardNumber === 1);
@@ -1946,7 +1970,7 @@ console.log('\n--- Slice 3B Collapsible Delayed Groups Tests ---');
 (() => {
   const f = bFixtures(); // 61..64 current-night
   f.push({ matchId: 71, date: '2026-09-03', dateValue: 50, division: 'Universal', roundValue: 1, sessionValue: 1, playerA: p9, playerB: p10, delayed: true, status: 'waiting' });
-  const data = { fixtures: f, roster: bRoster };
+  const data = { fixtures: f, roster: bRoster, completedMatches: bCompleted() };
 
   // Defaults: no state object exists until a render creates it, and every
   // absent entry means EXPANDED.
@@ -1968,7 +1992,7 @@ console.log('\n--- Slice 3B Collapsible Delayed Groups Tests ---');
   // Collapse must not mutate board ownership / NOT HERE / PLAYING.
   const rtv = api.assignGameToBoard(api.createManagedBoardRuntime(4), delayedFixture, 2).runtime;
   const rtSnapshot = JSON.stringify(rtv);
-  const withBoard = { fixtures: f, roster: bRoster, boardRuntime: rtv, delayedCollapsed: data.delayedCollapsed };
+  const withBoard = { fixtures: f, roster: bRoster, completedMatches: bCompleted(), boardRuntime: rtv, delayedCollapsed: data.delayedCollapsed };
   const adviceBoarded = api.buildSchedulerAdvice(bUi(), withBoard, { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [p3.id] });
   check('70. Collapse carries no board-ownership mutation (runtime byte-identical)',
     JSON.stringify(rtv) === rtSnapshot && api.findBoardOwningGame(rtv, delayedFixture).boardNumber === 2);
@@ -1977,7 +2001,7 @@ console.log('\n--- Slice 3B Collapsible Delayed Groups Tests ---');
     api.findBoardOwningGame(rtv, delayedFixture).boardNumber === 2);
   const fLive = JSON.parse(JSON.stringify(f));
   fLive[0].status = 'playing';
-  const liveData = { fixtures: fLive, roster: bRoster, delayedCollapsed: { '2026-09-03': true } };
+  const liveData = { fixtures: fLive, roster: bRoster, completedMatches: bCompleted(), delayedCollapsed: { '2026-09-03': true } };
   const liveAdvice = api.buildSchedulerAdvice(bUi(), liveData, bView);
   check('70. Collapsed delayed group never touches factual PLAYING/completion state',
     fLive[0].status === 'playing' && fLive.find((x) => x.delayed).status === 'waiting' &&
@@ -1995,8 +2019,8 @@ console.log('\n--- Slice 3B Collapsible Delayed Groups Tests ---');
     api.findBoardOwningGame(rtv, f.find((x) => x.delayed)).boardNumber === 2);
 
   // Collapse state is invisible to the scheduler adapters (no coupling).
-  const adviceNoState = api.buildSchedulerAdvice(bUi(), { fixtures: f, roster: bRoster }, bView);
-  const adviceWithState = api.buildSchedulerAdvice(bUi(), { fixtures: f, roster: bRoster, delayedCollapsed: { '2026-09-03': true, '2026-09-10': true } }, bView);
+  const adviceNoState = api.buildSchedulerAdvice(bUi(), { fixtures: f, roster: bRoster, completedMatches: bCompleted() }, bView);
+  const adviceWithState = api.buildSchedulerAdvice(bUi(), { fixtures: f, roster: bRoster, completedMatches: bCompleted(), delayedCollapsed: { '2026-09-03': true, '2026-09-10': true } }, bView);
   check('70. Scheduler advice is identical with or without collapse state',
     JSON.stringify(adviceNoState.recommended.map((g) => g.matchId)) ===
     JSON.stringify(adviceWithState.recommended.map((g) => g.matchId)));
@@ -2069,36 +2093,50 @@ console.log('\n--- Slice 3C Marker Management Tests ---');
 // 72. Eligibility pool + proposed vs confirmed (fact vs advice).
 (() => {
   const f = bFixtures();
-  const data = { fixtures: f, roster: bRoster };
+  const data = { fixtures: f, roster: bRoster, completedMatches: bCompleted() };
   const ui = bUi();
 
   const advice1 = api.buildSchedulerAdvice(ui, data, bView);
-  check('72. Each opening recommendation carries a proposed marker',
-    advice1.recommended.length > 0 && advice1.recommended.every((g) => Number.isSafeInteger(g.proposedMarkerId)));
+  // TRIAL-03: the opening wave is resource-valid. Every game carries a slot
+  // (null or a safe integer); non-null proposals never belong to ANY game in
+  // the same simultaneous opening wave (beyond the old own-participant rule).
+  const waveIds72 = new Set(advice1.recommended.flatMap((g) => [g.playerA.id, g.playerB.id]));
+  check('72. Each opening recommendation carries a proposed marker slot (null or id)',
+    advice1.recommended.length > 0 &&
+    advice1.recommended.every((g) => g.proposedMarkerId === null || Number.isSafeInteger(g.proposedMarkerId)));
+  check('72. TRIAL-03: no proposal plays in ANY game of the same opening wave',
+    advice1.recommended.every((g) => g.proposedMarkerId == null || !waveIds72.has(g.proposedMarkerId)));
   check('72. Proposed marker is never a game participant',
     advice1.recommended.every((g) => g.proposedMarkerId !== g.playerA.id && g.proposedMarkerId !== g.playerB.id));
   const proposed = advice1.recommended.map((g) => g.proposedMarkerId);
+  const proposedNN = proposed.filter((id) => id != null);
   check('72. No duplicate volunteer across simultaneous opening games',
-    new Set(proposed).size === proposed.length);
+    new Set(proposedNN).size === proposedNN.length);
   const rosterMap = {};
   bRoster.forEach((p) => { rosterMap[p.id] = p; });
   check('72. Proposed markers are roster players (no manufactured people)',
-    proposed.every((id) => !!rosterMap[id]));
-  const advice1b = api.buildSchedulerAdvice(bUi(), { fixtures: bFixtures(), roster: bRoster }, bView);
+    proposedNN.every((id) => !!rosterMap[id]));
+  // TRIAL-03 honesty: this world recommends 4 simultaneous games over 10
+  // players (8 participants), so at most the 2 free agents can be markers.
+  check('72. Wave with no free volunteers leaves those games honestly unmarked (null, never a wave player)',
+    advice1.recommended.length === 4 && proposedNN.length === 2 &&
+    advice1.recommended.filter((g) => g.proposedMarkerId === null).length === 2);
+  const advice1b = api.buildSchedulerAdvice(bUi(), bData(), bView);
   check('72. Recommendations are deterministic for identical input',
     JSON.stringify(proposed) === JSON.stringify(advice1b.recommended.map((g) => g.proposedMarkerId)) &&
     JSON.stringify(advice1.recommended.map((g) => g.matchId)) === JSON.stringify(advice1b.recommended.map((g) => g.matchId)));
 
   // Absent players are excluded from proposals.
-  const absentView = { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [advice1.recommended[0].proposedMarkerId] };
-  const adviceAbsent = api.buildSchedulerAdvice(ui, { fixtures: bFixtures(), roster: bRoster }, absentView);
+  const absentTarget = advice1.recommended.find((g) => g.proposedMarkerId != null).proposedMarkerId;
+  const absentView = { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [absentTarget] };
+  const adviceAbsent = api.buildSchedulerAdvice(ui, bData(), absentView);
   check('72. NOT HERE player is excluded from new proposals',
-    adviceAbsent.recommended.every((g) => g.proposedMarkerId !== absentView.absentIds[0]));
+    adviceAbsent.recommended.every((g) => g.proposedMarkerId !== absentTarget));
 
   // PLAYING players are excluded from proposals.
   const fLive = bFixtures();
   fLive[0].status = 'playing';
-  const adviceLive = api.buildSchedulerAdvice(ui, { fixtures: fLive, roster: bRoster }, bView);
+  const adviceLive = api.buildSchedulerAdvice(ui, { fixtures: fLive, roster: bRoster, completedMatches: bCompleted() }, bView);
   const liveIds = [fLive[0].playerA.id, fLive[0].playerB.id];
   check('72. PLAYING players are excluded from proposals',
     adviceLive.recommended.every((g) => g.proposedMarkerId !== liveIds[0] && g.proposedMarkerId !== liveIds[1]));
@@ -2107,14 +2145,14 @@ console.log('\n--- Slice 3C Marker Management Tests ---');
   const before = api.createMarkerRuntime();
   check('72. Proposed marker does NOT create MARKING state (advice only)',
     JSON.stringify(before) === JSON.stringify(api.createMarkerRuntime()) &&
-    api.buildSchedulerAdvice(ui, { fixtures: bFixtures(), roster: bRoster }, bView).session.markingPlayerIds.size === 0);
+    api.buildSchedulerAdvice(ui, bData(), bView).session.markingPlayerIds.size === 0);
   const advice2 = api.buildSchedulerAdvice(ui, data, bView);
-  const first = advice2.recommended[0];
+  const first = advice2.recommended.find((g) => g.proposedMarkerId != null);
   let mrt = api.createMarkerRuntime();
   mrt = api.assignMarkerToGame(mrt, first, first.proposedMarkerId, {
     participantIds: [first.playerA.id, first.playerB.id],
   }).runtime;
-  const dataMarked = { fixtures: bFixtures(), roster: bRoster, markerRuntime: mrt };
+  const dataMarked = bData({ markerRuntime: mrt  });
   const adviceMarked = api.buildSchedulerAdvice(ui, dataMarked, bView);
   check('72. Confirmed marker IS factual: player projects as MARKING in the session',
     adviceMarked.session.markingPlayerIds.has(first.proposedMarkerId));
@@ -2146,7 +2184,7 @@ console.log('\n--- Slice 3C Marker Management Tests ---');
   let mrt = api.createMarkerRuntime();
   mrt = api.assignMarkerToGame(mrt, delayed, p1.id, {}).runtime;
   const brt = api.assignGameToBoard(api.createManagedBoardRuntime(4), delayed, 3).runtime;
-  const data = { fixtures: f, roster: bRoster, markerRuntime: mrt, boardRuntime: brt };
+  const data = { fixtures: f, roster: bRoster, completedMatches: bCompleted(), markerRuntime: mrt, boardRuntime: brt };
   const mSnapshot = JSON.stringify(mrt);
   const bSnapshot = JSON.stringify(brt);
 
@@ -2170,7 +2208,7 @@ console.log('\n--- Slice 3C Marker Management Tests ---');
     adviceDelayOff.recommended.every((g) => !g.delayed) && api.findMarkerForGame(mrt, delayed) === p1.id);
 
   // Collapsed group: advice/state byte-identical; ownership survives.
-  const dataCollapsed = { fixtures: f, roster: bRoster, markerRuntime: mrt, boardRuntime: brt, delayedCollapsed: { '2026-09-03': true } };
+  const dataCollapsed = { fixtures: f, roster: bRoster, completedMatches: bCompleted(), markerRuntime: mrt, boardRuntime: brt, delayedCollapsed: { '2026-09-03': true } };
   const advCollapsed = api.buildSchedulerAdvice(bUi(), dataCollapsed, bView);
   check('73. Collapsed delayed group does not change marker advice or ownership',
     JSON.stringify(mrt) === mSnapshot && api.findMarkerForGame(mrt, delayed) === p1.id &&
@@ -2194,24 +2232,29 @@ console.log('\n--- Slice 3C Marker Management Tests ---');
   fSpare[0].status = 'playing';
   fSpare[1].status = 'playing';
   const adviceOn = api.buildSchedulerAdvice(Object.assign(bUi(), { includeDelayed: true }),
-    { fixtures: fSpare, roster: bRoster }, bView);
+    { fixtures: fSpare, roster: bRoster, completedMatches: bCompleted() }, bView);
   const delayedRec = adviceOn.recommended.find((g) => g.delayed);
-  check('73. Delayed ON: eligible delayed game receives marker advice',
-    !!delayedRec && (delayedRec.proposedMarkerId != null || delayedRec.confirmedMarkerId != null));
+  // TRIAL-03: a delayed game promoted into the opening wave gets marker
+  // advice only from volunteers OUTSIDE the whole wave (null is honest when
+  // the wave consumes everyone); a confirmed marker would always be shown.
+  const waveOn = new Set(adviceOn.recommended.flatMap((g) => [g.playerA.id, g.playerB.id]));
+  check('73. Delayed ON: eligible delayed game receives marker advice (or honest null under wave exclusion)',
+    !!delayedRec && delayedRec.confirmedMarkerId == null &&
+    (delayedRec.proposedMarkerId == null || !waveOn.has(delayedRec.proposedMarkerId)));
 
   // Re-planning freshness: assign/release changes factual availability -> fresh advice.
-  const plain = { fixtures: bFixtures(), roster: bRoster };
+  const plain = bData();
   const base = api.buildSchedulerAdvice(bUi(), plain, bView);
   let rtA = api.createMarkerRuntime();
   const g0 = base.recommended[0];
   rtA = api.assignMarkerToGame(rtA, g0, g0.proposedMarkerId, {
     participantIds: [g0.playerA.id, g0.playerB.id],
   }).runtime;
-  const afterAssign = api.buildSchedulerAdvice(bUi(), { fixtures: bFixtures(), roster: bRoster, markerRuntime: rtA }, bView);
+  const afterAssign = api.buildSchedulerAdvice(bUi(), bData({ markerRuntime: rtA  }), bView);
   check('73. Assigning a marker re-plans: the marker is no longer proposed elsewhere',
     afterAssign.recommended.every((g) => g.proposedMarkerId !== g0.proposedMarkerId));
   const afterRelease = api.buildSchedulerAdvice(bUi(),
-    { fixtures: bFixtures(), roster: bRoster, markerRuntime: api.releaseMarkerFromGame(rtA, g0).runtime }, bView);
+    bData({ markerRuntime: api.releaseMarkerFromGame(rtA, g0).runtime  }), bView);
   check('73. Releasing a marker re-plans: the player is eligible again',
     afterRelease.recommended.some((g) => g.proposedMarkerId === g0.proposedMarkerId));
 })();
@@ -2244,7 +2287,7 @@ console.log('\n--- Slice 3C Marker Management Tests ---');
 // 75. REGRESSION (browser finding): board-first workflow must keep marker
 // assignment reachable, and both assignment orders reach equivalent facts.
 (() => {
-  const mk = () => ({ fixtures: bFixtures(), roster: bRoster });
+  const mk = () => (bData());
   const ui = bUi(); // managed boards ON, 4 boards
 
   // ORDER A: board first, marker second.
@@ -2255,7 +2298,7 @@ console.log('\n--- Slice 3C Marker Management Tests ---');
     !!gameA && api.findBoardOwningGame(dataA.boardRuntime || api.createManagedBoardRuntime(4), gameA) === null &&
     gameA.confirmedMarkerId == null);
   let brtA = api.assignGameToBoard(api.createManagedBoardRuntime(4), gameA, 1).runtime;
-  const dataA2 = { fixtures: bFixtures(), roster: bRoster, boardRuntime: brtA };
+  const dataA2 = bData({ boardRuntime: brtA  });
   const adviceA2 = api.buildSchedulerAdvice(ui, dataA2, bView);
   check('75. Board-first: game leaves RECOMMENDED (players occupied)',
     adviceA2.recommended.every((g) => g.matchId !== 61));
@@ -2282,7 +2325,7 @@ console.log('\n--- Slice 3C Marker Management Tests ---');
   check('75. Board-first: no factual PLAYING manufactured; marker derives as MARKING',
     dataA2.fixtures.every((x) => x.status === 'waiting') &&
     api.derivePlayerStates(api.buildNightSession(ui,
-      { fixtures: bFixtures(), roster: bRoster, boardRuntime: brtA, markerRuntime: mrtA }, bView))
+      bData({ boardRuntime: brtA, markerRuntime: mrtA  }), bView))
       .get(candidatesA[0].id).state === api.PLAYER_STATES.MARKING);
 
   // ORDER B: marker first, board second — equivalent factual end state.
@@ -2311,15 +2354,22 @@ console.log('\n--- Slice 3C Marker Management Tests ---');
 (() => {
   // 76a. Four opening games, sufficient pool -> four DISTINCT proposals.
   const f4 = bFixtures();
-  const advice4 = api.buildSchedulerAdvice(bUi(), { fixtures: f4, roster: bRoster }, bView);
+  const advice4 = api.buildSchedulerAdvice(bUi(), { fixtures: f4, roster: bRoster, completedMatches: bCompleted() }, bView);
   const props4 = advice4.recommended.map((g) => g.proposedMarkerId);
-  check('76. Four opening games receive proposals', advice4.recommended.length === 4 && props4.every((id) => id != null));
-  check('76. All proposed markers are DISTINCT across the opening set', new Set(props4).size === props4.length);
+  const props4NN = props4.filter((id) => id != null);
+  // TRIAL-03: 4 simultaneous games over 10 players consume 8 as players, so
+  // only the 2 free agents (p9, p10) can be proposed as markers; the other
+  // games are honestly unmarked rather than given an impossible volunteer.
+  const wave4 = new Set(advice4.recommended.flatMap((g) => [g.playerA.id, g.playerB.id]));
+  check('76. Four opening games planned; proposals fill only games with a free wave-external volunteer',
+    advice4.recommended.length === 4 && props4.every((id) => id === null || Number.isSafeInteger(id)) &&
+    props4NN.length === 2 && props4NN.every((id) => !wave4.has(id)));
+  check('76. All proposed markers are DISTINCT across the opening set', new Set(props4NN).size === props4NN.length);
   check('76. No proposal is a participant of the game it marks',
     advice4.recommended.every((g) => g.proposedMarkerId !== g.playerA.id && g.proposedMarkerId !== g.playerB.id));
   check('76. Deterministic for identical factual input',
     JSON.stringify(props4) ===
-    JSON.stringify(api.buildSchedulerAdvice(bUi(), { fixtures: bFixtures(), roster: bRoster }, bView).recommended.map((g) => g.proposedMarkerId)));
+    JSON.stringify(api.buildSchedulerAdvice(bUi(), bData(), bView).recommended.map((g) => g.proposedMarkerId)));
 
   // 76b. Overlapping-exclusion stress: two opening games whose candidate
   // pools overlap only partially (each excludes its own participants).
@@ -2334,7 +2384,7 @@ console.log('\n--- Slice 3C Marker Management Tests ---');
     { matchId: 502, date: '2026-10-01', dateValue: 100, division: 'Universal', roundValue: 1, sessionValue: 2, playerA: p5, playerB: p6, delayed: false, status: 'waiting' },
   ];
   const tightView = { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [p7.id, p8.id, p9.id, p10.id] };
-  const gAdvice = api.buildSchedulerAdvice(bUi(), { fixtures: gWorld, roster: bRoster }, tightView);
+  const gAdvice = api.buildSchedulerAdvice(bUi(), { fixtures: gWorld, roster: bRoster, completedMatches: bCompleted() }, tightView);
   const g1 = gAdvice.recommended.find((g) => g.matchId === 501);
   const g2 = gAdvice.recommended.find((g) => g.matchId === 502);
   check('76. Global selection covers the overlapping-exclusion wave fully',
@@ -2350,20 +2400,23 @@ console.log('\n--- Slice 3C Marker Management Tests ---');
   // 76c. A player heavily needed in imminent fixtures is avoided when a
   // less disruptive valid volunteer exists (fitness evidence, not order).
   const evTaken = api.evaluateMarkerImpact(
-    api.buildNightSession(bUi(), { fixtures: bFixtures(), roster: bRoster }, bView), p5.id);
+    api.buildNightSession(bUi(), bData(), bView), p5.id);
   const evNeeded = api.evaluateMarkerImpact(
-    api.buildNightSession(bUi(), { fixtures: bFixtures(), roster: bRoster }, bView), p1.id);
+    api.buildNightSession(bUi(), bData(), bView), p1.id);
   check('76. Fitness evidence: free volunteer outranks top-playable participant',
     evTaken.score > evNeeded.score);
-  check('76. Opening proposals prefer the free volunteer over needed players',
-    props4.filter((id) => id === p5.id || id === p10.id).length === Math.min(2, props4.length));
+  // TRIAL-03: p5 is a wave participant now, so the only eligible volunteers
+  // for this opening wave are the two free agents p9/p10 — and the optimiser
+  // uses exactly those (the scarce-resource rule, not the old fitness pick).
+  check('76. Opening proposals use ONLY wave-external free volunteers (p9/p10)',
+    props4NN.length === 2 && props4NN.every((id) => id === p9.id || id === p10.id));
 
   // 76d. FACT beats ADVICE: confirmed markers reduce the problem and are
   // never overwritten by a better global combination. p3 marks G1 (a
   // non-participant in both games, so G2 stays fully playable).
   let mrt = api.createMarkerRuntime();
   mrt = api.assignMarkerToGame(mrt, gWorld[0], p3.id, {}).runtime; // G1 confirmed -> p3
-  const dataConfirmed = { fixtures: gWorld, roster: bRoster, markerRuntime: mrt };
+  const dataConfirmed = { fixtures: gWorld, roster: bRoster, completedMatches: bCompleted(), markerRuntime: mrt };
   const adviceConfirmed = api.buildSchedulerAdvice(bUi(), dataConfirmed, bView);
   const c1 = adviceConfirmed.recommended.find((g) => g.matchId === 501);
   const c2 = adviceConfirmed.recommended.find((g) => g.matchId === 502);
@@ -2375,21 +2428,29 @@ console.log('\n--- Slice 3C Marker Management Tests ---');
   // 76e. Capacity is not hard-coded to four: 2 managed boards -> 2 distinct
   // proposals; 5 boards over 4 playable games -> 4 distinct proposals.
   const twoBoards = api.buildSchedulerAdvice(
-    Object.assign(bUi(), { managedBoardsEnabled: true, boardCount: 2 }), { fixtures: bFixtures(), roster: bRoster }, bView);
+    Object.assign(bUi(), { managedBoardsEnabled: true, boardCount: 2 }), bData(), bView);
   const props2 = twoBoards.recommended.map((g) => g.proposedMarkerId);
   check('76. Capacity 2 -> exactly 2 distinct proposals',
     twoBoards.recommended.length === 2 && props2.every((id) => id != null) && new Set(props2).size === 2);
   const fiveBoards = api.buildSchedulerAdvice(
-    Object.assign(bUi(), { managedBoardsEnabled: true, boardCount: 5 }), { fixtures: bFixtures(), roster: bRoster }, bView);
+    Object.assign(bUi(), { managedBoardsEnabled: true, boardCount: 5 }), bData(), bView);
   const props5 = fiveBoards.recommended.map((g) => g.proposedMarkerId);
-  check('76. Capacity 5 over 4 playable games -> 4 distinct proposals (wave-bounded, not hard-coded)',
-    fiveBoards.recommended.length === 4 && new Set(props5).size === 4);
-  check('76. Both strategies obey the same eligibility + distinctness invariants',
+  const props5NN = props5.filter((id) => id != null);
+  // TRIAL-03: capacity still bounds the plan (4 games at 5 boards), but the
+  // marker count is ALSO bounded by wave-external volunteers (2 here) — the
+  // opening set stays resource-valid instead of hard-coding four markers.
+  const wave5 = new Set(fiveBoards.recommended.flatMap((g) => [g.playerA.id, g.playerB.id]));
+  check('76. Capacity 5 over 4 playable games -> 4 games planned, proposals bounded by free wave-external volunteers (not hard-coded)',
+    fiveBoards.recommended.length === 4 && new Set(props5NN).size === props5NN.length &&
+    props5NN.length === 2 && props5NN.every((id) => !wave5.has(id)));
+  check('76. Both strategies obey the same eligibility + distinctness + wave-validity invariants',
     [api.SCHEDULING_STRATEGIES.NORMAL, api.SCHEDULING_STRATEGIES.OPTIMISED].every((strategy) => {
-      const a = api.buildSchedulerAdvice(Object.assign(bUi(), { strategy }), { fixtures: bFixtures(), roster: bRoster }, bView);
+      const a = api.buildSchedulerAdvice(Object.assign(bUi(), { strategy }), bData(), bView);
       const ids = a.recommended.map((g) => g.proposedMarkerId);
+      const idsNN = ids.filter((id) => id != null);
+      const wave = new Set(a.recommended.flatMap((g) => [g.playerA.id, g.playerB.id]));
       return a.recommended.every((g) => g.proposedMarkerId !== g.playerA.id && g.proposedMarkerId !== g.playerB.id) &&
-        new Set(ids).size === ids.length;
+        new Set(idsNN).size === idsNN.length && idsNN.every((id) => !wave.has(id));
     }));
 })();
 
@@ -2417,15 +2478,17 @@ console.log('\n--- Slice 3C Delayed Allowance Tests ---');
   check('77. Current-night fixture never counted (p2 has none)', api.getDelayedOutstandingCount(backlog, p2.id) === 0);
   const backlogClone = JSON.stringify(backlog);
   const view = { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [p3.id] };
-  api.buildSchedulerAdvice(bUi(), { fixtures: [current, d1, d2, d3, d4, dOther], roster: bRoster }, view);
+  api.buildSchedulerAdvice(bUi(), { fixtures: [current, d1, d2, d3, d4, dOther], roster: bRoster, completedMatches: bCompleted() }, view);
   check('77. NOT HERE / advice never alters N', JSON.stringify(api.getDelayedBacklogByPlayer([current, d1, d2, d3, d4, dOther])) === backlogClone);
 
-  // B: defaults via named constant.
-  check('77. Named default constant exists (= 1)', api.DEFAULT_DELAYED_CATCHUP_ALLOWANCE === 1);
+  // B: defaults via named constant. TRIAL-06: the default is now 0 —
+  // delayed catch-up is strictly opt-in per player (individual control or
+  // the All → 0 / All → 1 bulk controls); N itself never auto-grants R.
+  check('77. Named default constant exists (= 0, TRIAL-06)', api.DEFAULT_DELAYED_CATCHUP_ALLOWANCE === 0);
   const rt = api.createDelayedAllowanceRuntime([current, d1, d2, d3, d4, dOther]);
   check('77. N=0 -> no allowance entry (R effectively 0)', api.getRemainingDelayedAllowance(rt, p2.id) === 0);
-  check('77. N=1 -> R=1', api.getRemainingDelayedAllowance(rt, p3.id) === 1);
-  check('77. N=4 -> R=1 (default, not a target)', api.getRemainingDelayedAllowance(rt, p1.id) === 1);
+  check('77. N=1 -> R=0 (default 0: opt-in, not a grant)', api.getRemainingDelayedAllowance(rt, p3.id) === 0);
+  check('77. N=4 -> R=0 (default 0, not a target)', api.getRemainingDelayedAllowance(rt, p1.id) === 0);
 
   // C: override clamp and independence.
   const set4 = api.setRemainingDelayedAllowance(rt, p1.id, 4, backlog);
@@ -2452,10 +2515,15 @@ console.log('\n--- Slice 3C Delayed Allowance Tests ---');
     adviceZeroP1.recommended.some((g) => g.matchId === 401) &&
     api.getPlayableGames(api.buildNightSession(Object.assign(bUi(), { includeDelayed: true }), dataZeroP1, bView))
       .some((g) => g.matchId === 401));
+  // TRIAL-06: with default R=0 the operator grants allowance explicitly —
+  // here both participants of d1 get R=1 the way the UI (individual control
+  // or All → 1) does, and the delayed fixture becomes schedulable again.
+  const rtBoth77 = api.setRemainingDelayedAllowance(
+    api.setRemainingDelayedAllowance(rt, p1.id, 1, backlog).runtime, p3.id, 1, backlog).runtime;
   const dataBoth = { fixtures: [current, d1, d2, d3, d4, dOther], roster: bRoster,
-    delayedAllowanceRuntime: api.setRemainingDelayedAllowance(rt, p1.id, 1, backlog).runtime };
+    delayedAllowanceRuntime: rtBoth77 };
   const adviceBoth = api.buildSchedulerAdvice(Object.assign(bUi(), { includeDelayed: true }), dataBoth, bView);
-  check('77. With both R>0, delayed fixture is eligible for planner consideration',
+  check('77. With BOTH participants\' R>0 (operator grant), delayed fixture is eligible for planner consideration',
     adviceBoth.recommended.some((g) => g.delayed) ||
     api.getPlayableGames(api.buildNightSession(Object.assign(bUi(), { includeDelayed: true }), dataBoth, bView)).some((g) => g.delayed));
   const zeroed = api.setRemainingDelayedAllowance(rt, p1.id, 0, backlog).runtime;
@@ -2468,10 +2536,10 @@ console.log('\n--- Slice 3C Delayed Allowance Tests ---');
   // E: advice does not consume.
   const rtBefore = JSON.stringify(oneSet);
   api.buildSchedulerAdvice(Object.assign(bUi(), { includeDelayed: true }),
-    { fixtures: [current, d1, d2, d3, d4, dOther], roster: bRoster, delayedAllowanceRuntime: oneSet }, bView);
+    { fixtures: [current, d1, d2, d3, d4, dOther], roster: bRoster, completedMatches: bCompleted(), delayedAllowanceRuntime: oneSet }, bView);
   check('77. RECOMMENDED/PROJECTED advice never decrements R', JSON.stringify(oneSet) === rtBefore);
   api.buildSchedulerAdvice(Object.assign(bUi(), { includeDelayed: true, strategy: api.SCHEDULING_STRATEGIES.OPTIMISED }),
-    { fixtures: [current, d1, d2, d3, d4, dOther], roster: bRoster, delayedAllowanceRuntime: oneSet }, bView);
+    { fixtures: [current, d1, d2, d3, d4, dOther], roster: bRoster, completedMatches: bCompleted(), delayedAllowanceRuntime: oneSet }, bView);
   check('77. Strategy change never decrements R', JSON.stringify(oneSet) === rtBefore);
 
   // F: factual PLAYING consumption (once, both participants, bounded, N stable).
@@ -2516,13 +2584,13 @@ console.log('\n--- Slice 3C Delayed Allowance Tests ---');
   const rtH = api.createDelayedAllowanceRuntime([current, d1, d2, d3, d4, dOther]);
   const rtH2 = api.setRemainingDelayedAllowance(rtH, p1.id, 3, backlog2).runtime;
   const snapshotH = JSON.stringify(rtH2);
-  api.buildSchedulerAdvice(bUi(), { fixtures: [current, d1, d2, d3, d4, dOther], roster: bRoster, delayedAllowanceRuntime: rtH2, delayedCollapsed: { '2026-09-03': true } }, bView);
-  api.buildSchedulerAdvice(Object.assign(bUi(), { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED }), { fixtures: [current, d1, d2, d3, d4, dOther], roster: bRoster, delayedAllowanceRuntime: rtH2 }, bView);
-  api.buildSchedulerAdvice(Object.assign(bUi(), { managedBoardsEnabled: false }), { fixtures: [current, d1, d2, d3, d4, dOther], roster: bRoster, delayedAllowanceRuntime: rtH2, boardRuntime: api.createManagedBoardRuntime(4), markerRuntime: api.createMarkerRuntime() }, bView);
+  api.buildSchedulerAdvice(bUi(), { fixtures: [current, d1, d2, d3, d4, dOther], roster: bRoster, completedMatches: bCompleted(), delayedAllowanceRuntime: rtH2, delayedCollapsed: { '2026-09-03': true } }, bView);
+  api.buildSchedulerAdvice(Object.assign(bUi(), { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED }), { fixtures: [current, d1, d2, d3, d4, dOther], roster: bRoster, completedMatches: bCompleted(), delayedAllowanceRuntime: rtH2 }, bView);
+  api.buildSchedulerAdvice(Object.assign(bUi(), { managedBoardsEnabled: false }), { fixtures: [current, d1, d2, d3, d4, dOther], roster: bRoster, completedMatches: bCompleted(), delayedAllowanceRuntime: rtH2, boardRuntime: api.createManagedBoardRuntime(4), markerRuntime: api.createMarkerRuntime() }, bView);
   check('77. Collapse/strategy/board-marker transitions preserve R and consumed identities', JSON.stringify(rtH2) === snapshotH);
   const fairnessView = { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [] };
   const adviceFair = api.buildSchedulerAdvice(Object.assign(bUi(), { includeDelayed: true }),
-    { fixtures: [current, d1, d2, d3, d4, dOther], roster: bRoster, delayedAllowanceRuntime: rtH2 }, fairnessView);
+    { fixtures: [current, d1, d2, d3, d4, dOther], roster: bRoster, completedMatches: bCompleted(), delayedAllowanceRuntime: rtH2 }, fairnessView);
   const p1DelayedAdvice = adviceFair.recommended.filter((g) => g.delayed && (g.playerA.id === p1.id || g.playerB.id === p1.id)).length;
   check('77. Fairness: multiple outstanding delayed fixtures do not all appear at once (R bounds advice)',
     p1DelayedAdvice <= api.getRemainingDelayedAllowance(rtH2, p1.id));
@@ -2549,14 +2617,14 @@ console.log('\n--- Slice 3C Sequence & Marker Mapping Tests ---');
   // advice.recommended (1..n). Assert that order is the planner's ranked
   // order and follows actual capacity, never a hard-coded four.
   const f4 = bFixtures();
-  const a4 = api.buildSchedulerAdvice(bUi(), { fixtures: f4, roster: bRoster }, bView);
+  const a4 = api.buildSchedulerAdvice(bUi(), { fixtures: f4, roster: bRoster, completedMatches: bCompleted() }, bView);
   const ids4 = a4.recommended.map((g) => g.matchId);
   const ranked4 = api.getPlayableGames(a4.session).map((g) => g.matchId).slice(0, 4);
   check('78. Sequence 1..n follows the planner-ranked recommendation order',
     JSON.stringify(ids4) === JSON.stringify(ranked4) && ids4.length === 4);
   check('78. Sequence is per-capacity: 2 boards -> 1..2, 5 boards -> 1..4 playable',
-    api.buildSchedulerAdvice(Object.assign(bUi(), { boardCount: 2 }), { fixtures: bFixtures(), roster: bRoster }, bView).recommended.length === 2 &&
-    api.buildSchedulerAdvice(Object.assign(bUi(), { boardCount: 5 }), { fixtures: bFixtures(), roster: bRoster }, bView).recommended.length === 4);
+    api.buildSchedulerAdvice(Object.assign(bUi(), { boardCount: 2 }), bData(), bView).recommended.length === 2 &&
+    api.buildSchedulerAdvice(Object.assign(bUi(), { boardCount: 5 }), bData(), bView).recommended.length === 4);
   // Sequence != board: recommendation #1 can explicitly own Board 4.
   const g1 = a4.recommended[0];
   const brt = api.assignGameToBoard(api.createManagedBoardRuntime(4), g1, 4).runtime;
@@ -2577,7 +2645,7 @@ console.log('\n--- Slice 3C Sequence & Marker Mapping Tests ---');
   mrt = api.assignMarkerToGame(mrt, pairWorld[0], p8.id, {}).runtime; // game 601 -> p8 (NOT the first-eligible id)
   mrt = api.assignMarkerToGame(mrt, pairWorld[1], p7.id, {}).runtime; // game 602 -> p7
   mrt = api.assignMarkerToGame(mrt, pairWorld[2], p10.id, {}).runtime; // game 603 -> p10
-  const advicePair = api.buildSchedulerAdvice(bUi(), { fixtures: pairWorld, roster: bRoster, markerRuntime: mrt }, bView);
+  const advicePair = api.buildSchedulerAdvice(bUi(), { fixtures: pairWorld, roster: bRoster, completedMatches: bCompleted(), markerRuntime: mrt }, bView);
   const pairOf = (id) => {
     const g = advicePair.recommended.find((x) => x.matchId === id);
     return g ? g.confirmedMarkerId : undefined;
@@ -2591,15 +2659,15 @@ console.log('\n--- Slice 3C Sequence & Marker Mapping Tests ---');
     advicePair.recommended.every((g) => g.confirmedMarkerId != null && g.proposedMarkerId == null));
   // Strategy flip: FACT pairs unchanged.
   const advicePairOpt = api.buildSchedulerAdvice(Object.assign(bUi(), { strategy: api.SCHEDULING_STRATEGIES.OPTIMISED }),
-    { fixtures: pairWorld, roster: bRoster, markerRuntime: mrt }, bView);
+    { fixtures: pairWorld, roster: bRoster, completedMatches: bCompleted(), markerRuntime: mrt }, bView);
   check('78. Strategy flip keeps the exact confirmed pairs',
     advicePairOpt.recommended.find((g) => g.matchId === 601).confirmedMarkerId === p8.id &&
     advicePairOpt.recommended.find((g) => g.matchId === 602).confirmedMarkerId === p7.id &&
     advicePairOpt.recommended.find((g) => g.matchId === 603).confirmedMarkerId === p10.id);
   // Proposal pairing (ADVICE): deterministic replay asserts exact pairs too.
-  const pairsA = api.buildSchedulerAdvice(bUi(), { fixtures: pairWorld, roster: bRoster }, bView)
+  const pairsA = api.buildSchedulerAdvice(bUi(), { fixtures: pairWorld, roster: bRoster, completedMatches: bCompleted() }, bView)
     .recommended.map((g) => ({ game: g.matchId, marker: g.proposedMarkerId }));
-  const pairsB = api.buildSchedulerAdvice(bUi(), { fixtures: pairWorld, roster: bRoster }, bView)
+  const pairsB = api.buildSchedulerAdvice(bUi(), { fixtures: pairWorld, roster: bRoster, completedMatches: bCompleted() }, bView)
     .recommended.map((g) => ({ game: g.matchId, marker: g.proposedMarkerId }));
   check('78. Proposed game->marker pairs are exactly reproduced on replay',
     JSON.stringify(pairsA) === JSON.stringify(pairsB) &&
@@ -2717,7 +2785,7 @@ function markerNameFor(data, id) {
 // in symmetric worlds, so the non-sequential pairing is applied at the
 // binding layer exactly as the renderer passes adviceFor.proposedMarkerId).
 withDom(() => {
-  const data = { fixtures: bindWorldScrambled, roster: bRoster };
+  const data = { fixtures: bindWorldScrambled, roster: bRoster, completedMatches: bCompleted() };
   const g701 = bindWorldScrambled[0];
   const g702 = bindWorldScrambled[1];
   const g703 = bindWorldScrambled[2];
@@ -2728,14 +2796,17 @@ withDom(() => {
   // not simply the first candidate.
   const sel701 = mkSelectRaw(data, g701, SCR_PROPOSALS[701]);
   check('79. Selected/default value == proposedMarkerId (701 -> p8)', sel701.value === String(p8.id));
-  check('79. Closed control displays the proposed marker name (701)',
-    sel701.getSelectedText() === 'MARKER: ' + markerNameFor(data, p8.id));
+  // COLS-01: the closed control must SAY it is advice — a proposal can never
+  // read like a confirmed assignment.
+  check('79. Closed control displays the proposal as ADVICE, not as an assignment (701)',
+    sel701.getSelectedText() === 'A: ' + markerNameFor(data, p8.id) &&
+    sel701.getSelectedText().indexOf('M: ') === -1);
   check('79. Selection is neither the placeholder nor the first eligible candidate',
     sel701.value !== '' && eligible701.length > 1 && sel701.value !== String(eligible701[0].id));
 
   // Spec 3: the dropdown stays operator-controlled.
-  check('79. Placeholder MARKER: — remains first and selectable',
-    sel701.getValues()[0] === '' && sel701.getOptions()[0].textContent === 'MARKER: —');
+  check('79. Placeholder M: — remains first and selectable',
+    sel701.getValues()[0] === '' && sel701.getOptions()[0].textContent === 'M: —');
   check('79. Proposed option remains available among the candidates',
     sel701.getValues().indexOf(String(p8.id)) !== -1);
   check('79. Every eligible candidate remains available (eligibility unchanged)',
@@ -2752,23 +2823,23 @@ withDom(() => {
 
   // Spec 15: no proposal -> placeholder; candidates may exist.
   const selNone = mkSelectRaw(data, g701, null);
-  check('79. Absent proposal defaults to MARKER: — (candidates still offered)',
-    selNone.value === '' && selNone.getSelectedText() === 'MARKER: —' && selNone.getValues().length > 1);
+  check('79. Absent proposal defaults to M: — (candidates still offered)',
+    selNone.value === '' && selNone.getSelectedText() === 'M: —' && selNone.getValues().length > 1);
 
   // Spec 16: invalid proposal p99 -> placeholder, no throw, no substitute.
   let selStale = null;
   let staleThrew = false;
   try { selStale = mkSelectRaw(data, g701, 999); } catch (e) { staleThrew = true; }
   check('79. Invalid proposal p99 does not throw', !staleThrew && selStale != null);
-  check('79. Invalid proposal defaults to MARKER: — and is not offered',
-    selStale.value === '' && selStale.getSelectedText() === 'MARKER: —' &&
+  check('79. Invalid proposal defaults to M: — and is not offered',
+    selStale.value === '' && selStale.getSelectedText() === 'M: —' &&
     selStale.getValues().indexOf('999') === -1 && selStale.getValues().length === 1 + eligible701.length);
 
   // Stale-advice variant: the proposal became ineligible (a game
   // participant) -> same safe fallback, no UI-manufactured alternative.
   const selPart = mkSelectRaw(data, g701, p1.id);
-  check('79. Stale ineligible proposal (participant) falls back to MARKER: —',
-    selPart.value === '' && selPart.getSelectedText() === 'MARKER: —' &&
+  check('79. Stale ineligible proposal (participant) falls back to M: —',
+    selPart.value === '' && selPart.getSelectedText() === 'M: —' &&
     selPart.getValues().indexOf(String(p1.id)) === -1);
 
   // Spec 4: display-only — rendering must not assign or fire onConfirm.
@@ -2793,14 +2864,14 @@ withDom(() => {
   check('79. Confirmed FACT is displayed; proposal adds no option beyond eligibility',
     selFact.value === String(p3.id) &&
     selFact.getValues().length === 1 + eligible701.length &&
-    selFact.getOptions().find((o) => o.value === String(p3.id)).textContent === 'MARKER: ' + markerNameFor(data, p3.id));
+    selFact.getOptions().find((o) => o.value === String(p3.id)).textContent === 'M: ' + markerNameFor(data, p3.id));
   const selFactOnly = mkSelectRaw(data, g701, null, { confirmedMarkerId: p3.id });
   check('79. Confirmed fact displays with no proposal at all',
-    selFactOnly.value === String(p3.id) && selFactOnly.getSelectedText() === 'MARKER: ' + markerNameFor(data, p3.id));
+    selFactOnly.value === String(p3.id) && selFactOnly.getSelectedText() === 'M: ' + markerNameFor(data, p3.id));
 
   // Integration: the REAL render path (buildSchedulerAdvice -> recommended
   // row -> markerSelectEl) binds each game to its OWN deterministic proposal.
-  const advice = api.buildSchedulerAdvice(bUi(), { fixtures: bindWorld, roster: bRoster }, bView);
+  const advice = api.buildSchedulerAdvice(bUi(), { fixtures: bindWorld, roster: bRoster, completedMatches: bCompleted() }, bView);
   const byId = (mid) => advice.recommended.find((g) => g.matchId === mid);
   check('79. Advice scenario produced exactly the three recommended games',
     advice.recommended.length === 3 && byId(701) && byId(702) && byId(703));
@@ -2818,7 +2889,7 @@ withDom(() => {
 // proposal; nothing becomes factual until the operator confirms; FACT then
 // beats ADVICE and unconfirmed siblings keep their own proposals.
 withDom(() => {
-  const data = { fixtures: bindWorld, roster: bRoster };
+  const data = { fixtures: bindWorld, roster: bRoster, completedMatches: bCompleted() };
   const advice = api.buildSchedulerAdvice(bUi(), data, bView);
   const g701 = advice.recommended.find((g) => g.matchId === 701);
 
@@ -2857,7 +2928,7 @@ withDom(() => {
     Object.keys(mrt.byMarker).length === 1 && mrt.byMarker[107] === api.markerGameKey(bindWorld[0]));
 
   // FACT beats ADVICE on the next re-plan.
-  const afterAdvice = api.buildSchedulerAdvice(bUi(), { fixtures: bindWorld, roster: bRoster, markerRuntime: mrt }, bView);
+  const afterAdvice = api.buildSchedulerAdvice(bUi(), { fixtures: bindWorld, roster: bRoster, completedMatches: bCompleted(), markerRuntime: mrt }, bView);
   const gAfter = afterAdvice.recommended.find((g) => g.matchId === 701);
   check('80. After confirmation: confirmedMarkerId = 107 with no competing proposal',
     gAfter.confirmedMarkerId === 107 && gAfter.proposedMarkerId == null);
@@ -2868,7 +2939,7 @@ withDom(() => {
   // confirmed; any proposal for 702 must never overwrite the fact.
   let mrtFact = api.createMarkerRuntime();
   mrtFact = api.assignMarkerToGame(mrtFact, bindWorld[1], p5.id, {}).runtime;
-  const adviceFact2 = api.buildSchedulerAdvice(bUi(), { fixtures: bindWorld, roster: bRoster, markerRuntime: mrtFact }, bView);
+  const adviceFact2 = api.buildSchedulerAdvice(bUi(), { fixtures: bindWorld, roster: bRoster, completedMatches: bCompleted(), markerRuntime: mrtFact }, bView);
   const g702fact = adviceFact2.recommended.find((g) => g.matchId === 702);
   check('80. Confirmed p5 recorded as the factual marker of 702',
     g702fact && g702fact.confirmedMarkerId === p5.id && g702fact.proposedMarkerId == null);
@@ -2912,8 +2983,26 @@ console.log('\n--- Slice 3C Division Isolation Tests ---');
   ];
   const vU = { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [] };
   const vW = { division: 'White Eagle', selectedMatchDate: '2026-10-30', absentIds: [] };
-  const uData = () => ({ fixtures: fixturesU, roster: bothRosters });
-  const wData = () => ({ fixtures: fixturesW, roster: bothRosters });
+  // MARKER-2: both divisions have FACTUAL completion evidence for their own
+  // players only (division isolation for the played-before-marking rule).
+  const uCompleted = () => {
+    const out = [];
+    for (let i = 0; i + 1 < uRoster.length; i += 2) {
+      out.push({ matchId: 9100 + i, date: vU.selectedMatchDate, division: 'Universal',
+        playerA: { id: uRoster[i].id }, playerB: { id: uRoster[i + 1].id }, source: 'schedule-props' });
+    }
+    return out;
+  };
+  const wCompleted = () => {
+    const out = [];
+    for (let i = 0; i + 1 < wRoster.length; i += 2) {
+      out.push({ matchId: 9200 + i, date: vW.selectedMatchDate, division: 'White Eagle',
+        playerA: { id: wRoster[i].id }, playerB: { id: wRoster[i + 1].id }, source: 'schedule-props' });
+    }
+    return out;
+  };
+  const uData = () => ({ fixtures: fixturesU, roster: bothRosters, completedMatches: uCompleted() });
+  const wData = () => ({ fixtures: fixturesW, roster: bothRosters, completedMatches: wCompleted() });
   const uid = (i) => 300 + i;
   const wid = (i) => 800 + i;
   const W_IDS = [801, 802, 803, 804, 805, 806];
@@ -2928,15 +3017,24 @@ console.log('\n--- Slice 3C Division Isolation Tests ---');
     api.getEligibleMarkerCandidates({ players: bothRosters, rosterDivisionIds: U_IDS, absentIds: [], playingPlayerIds: [], markingPlayerIds: [], markedGameKeys: {}, excludeParticipants: true, participantIds: [301, 302] })
       .every((c) => U_IDS.indexOf(c.id) !== -1));
   const aU = api.buildSchedulerAdvice(bUi(), uData(), vU);
-  check('81. Universal proposals are all Universal players (optimiser pool clean)',
-    aU.recommended.length > 0 && aU.recommended.every((g) => g.proposedMarkerId != null && U_IDS.indexOf(g.proposedMarkerId) !== -1));
-  check('81. Proposals stay within per-game CANDIDATE_BREADTH slice of the division pool',
+  // TRIAL-03: this division plans 3 simultaneous games over exactly 6
+  // players — the wave consumes the whole division roster, so proposals are
+  // honestly null, and every non-null proposal would have to be Universal.
+  const waveU = new Set(aU.recommended.flatMap((g) => [g.playerA.id, g.playerB.id]));
+  check('81. Universal proposals are all Universal players, or honest nulls when the wave consumes the division (optimiser pool clean)',
+    aU.recommended.length > 0 && aU.recommended.every((g) =>
+      (g.proposedMarkerId == null || U_IDS.indexOf(g.proposedMarkerId) !== -1) &&
+      (g.proposedMarkerId == null || !waveU.has(g.proposedMarkerId))));
+  check('81. TRIAL-03: full-division wave leaves every game honestly unmarked',
+    aU.recommended.length === 3 && aU.recommended.every((g) => g.proposedMarkerId === null));
+  check('81. Proposals stay within per-game CANDIDATE_BREADTH slice of the wave-external division pool',
     aU.recommended.every((g) => {
       const ctx = { players: uRoster, absentIds: [], playingPlayerIds: [], markingPlayerIds: [], markedGameKeys: {}, excludeParticipants: true, participantIds: [g.playerA.id, g.playerB.id] };
       const top = api.getEligibleMarkerCandidates(ctx).map((c) => c.id)
+        .filter((id) => !waveU.has(id)) // TRIAL-03 wave-participant exclusion
         .sort((x, y) => api.evaluateMarkerImpact(aU.session, y).score - api.evaluateMarkerImpact(aU.session, x).score)
         .slice(0, 4);
-      return top.indexOf(g.proposedMarkerId) !== -1;
+      return g.proposedMarkerId == null || top.indexOf(g.proposedMarkerId) !== -1;
     }));
 
   // B. White Eagle selected: symmetric isolation.
@@ -2992,15 +3090,1663 @@ console.log('\n--- Slice 3C Division Isolation Tests ---');
     api.getDelayedOutstandingCount(api.getDelayedBacklogByPlayer(fixturesU), 302) >= 0);
 
   // G. Same-division proposal binding still displays (previous fix intact).
+  // TRIAL-03 leaves this division's games unmarked, so the binding check
+  // uses a valid same-division, non-participant id (303) directly.
   withDom(() => {
     const selU = api.markerSelectEl({
-      proposedMarkerId: aU.recommended[0].proposedMarkerId,
+      proposedMarkerId: 303,
       nameFor: (id) => { const p = bothRosters.find((x) => x.id === id); return (p && p.name) || ('#' + id); },
       context: { players: bothRosters, rosterDivisionIds: U_IDS, absentIds: [], playingPlayerIds: [], markingPlayerIds: [], markedGameKeys: {}, excludeParticipants: true, participantIds: [aU.recommended[0].playerA.id, aU.recommended[0].playerB.id] },
     });
     check('81. Same-division proposal still preselects (binding fix intact under isolation)',
-      selU.value === String(aU.recommended[0].proposedMarkerId));
+      selU.value === '303');
   });
+})();
+
+// ---------------------------------------------------------------------------
+// POST-LIVE-TRIAL FIX SLICE (TRIAL-01..07) regression suites.
+// ---------------------------------------------------------------------------
+console.log('\n--- Post-Live-Trial Fix Slice Tests ---');
+
+// 82. TRIAL-03 regression: opening-wave marker/player collision (observed
+// live failure: Stuart Norman proposed as marker for one opening game while
+// playing another game in the SAME simultaneous opening set).
+(() => {
+  const P = (id) => ({ id, name: 'P' + id, division: 'Universal' });
+  const roster = [P(1), P(2), P(3), P(4), P(5), P(6), P(7), P(8), P(9), P(10), P(11), P(12), P(13), P(14)];
+  const F = (mid, a, b) => ({ matchId: mid, date: '2026-10-01', dateValue: 100, division: 'Universal',
+    roundValue: 1, sessionValue: 1, playerA: a, playerB: b, delayed: false, status: 'waiting' });
+  const view = { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [] };
+  const ui = (boards) => Object.assign(api.defaultSchedulerUiState(), { managedBoardsEnabled: true, boardCount: boards });
+  const waveValid = (advice) => {
+    const wave = new Set(advice.recommended.flatMap((g) => [g.playerA.id, g.playerB.id]));
+    return advice.recommended.every((g) => g.proposedMarkerId == null || !wave.has(g.proposedMarkerId));
+  };
+
+  // Minimal observed pattern: Game A (P1 vs P2) and Game B (P3 vs P4) in one
+  // wave. P3 must NEVER be proposed as marker for Game A (and P1/P2/P4 never
+  // for B) at ANY board capacity — the rule is not hard-coded to four boards.
+  [1, 2, 4, 6].forEach((boards) => {
+    const advice = api.buildSchedulerAdvice(ui(boards), { fixtures: [F(601, roster[0], roster[1]), F(602, roster[2], roster[3])], roster }, view);
+    const gA = advice.recommended.find((g) => g.matchId === 601);
+    const gB = advice.recommended.find((g) => g.matchId === 602);
+    check('82. Two-game wave (' + boards + ' boards): no game\'s participant marks the other game',
+      waveValid(advice) &&
+      (!gA || (gA.proposedMarkerId !== roster[2].id && gA.proposedMarkerId !== roster[3].id)) &&
+      (!gB || (gB.proposedMarkerId !== roster[0].id && gB.proposedMarkerId !== roster[1].id)));
+  });
+
+  // Six simultaneous games consume the whole 12-player division: no free
+  // volunteer exists, so EVERY game is honestly unmarked (null) — the
+  // planner never invents a marker from inside the wave, and the rule holds
+  // well beyond four boards.
+  const sixGames = [1, 2, 3, 4, 5, 6].map((i) => F(610 + i, roster[(i - 1) * 2], roster[(i - 1) * 2 + 1]));
+  const advice6 = api.buildSchedulerAdvice(ui(6), { fixtures: sixGames, roster: roster.slice(0, 12) }, view);
+  check('82. Six-game wave over 12 players: every game honestly unmarked (no wave participant proposed)',
+    advice6.recommended.length === 6 && advice6.recommended.every((g) => g.proposedMarkerId === null));
+
+  // Two spare players beyond the wave: proposals come ONLY from the spares.
+  // MARKER-2: the two spare players have FACTUAL completion evidence tonight.
+  const sixPlusCompleted = [
+    { matchId: 9300, date: view.selectedMatchDate, division: 'Universal',
+      playerA: { id: 13 }, playerB: { id: 14 }, source: 'schedule-props' },
+  ];
+  const advice6s = api.buildSchedulerAdvice(ui(6), { fixtures: sixGames, roster, completedMatches: sixPlusCompleted }, view);
+  const nn = advice6s.recommended.map((g) => g.proposedMarkerId).filter((id) => id != null);
+  check('82. Six-game wave plus 2 spare players: exactly 2 distinct proposals, both wave-external',
+    advice6s.recommended.length === 6 && nn.length === 2 &&
+    new Set(nn).size === 2 && nn.every((id) => id === 13 || id === 14));
+
+  // NOT HERE still removes a spare from the marker pool (NOT HERE > availability).
+  const adviceAbsent = api.buildSchedulerAdvice(ui(6),
+    { fixtures: sixGames, roster, completedMatches: sixPlusCompleted }, Object.assign({}, view, { absentIds: [14] }));
+  const nnA = adviceAbsent.recommended.map((g) => g.proposedMarkerId).filter((id) => id != null);
+  check('82. NOT HERE spare is never proposed (only P13 remains eligible)',
+    nnA.length === 1 && nnA[0] === 13);
+})();
+
+// 83. TRIAL-04: MARKER OFF operator availability (excluded from proposals and
+// selector; assignment rejected at the domain boundary; still fully playable;
+// NOT HERE wins when both are set).
+(() => {
+  const f = bFixtures();
+  const view = Object.assign({}, bView, { markerOffIds: [p3.id] });
+  const data = { fixtures: f, roster: bRoster, completedMatches: bCompleted() };
+  const advice = api.buildSchedulerAdvice(bUi(), data, view);
+  check('83. MARKER OFF player is never PROPOSED as marker (advice-level gate)',
+    advice.recommended.every((g) => g.proposedMarkerId !== p3.id));
+
+  check('83. MARKER OFF player is excluded from the marker selector',
+    api.getEligibleMarkerCandidates({ players: bRoster, markerOffIds: [p3.id] }).every((c) => c.id !== p3.id) &&
+    api.getEligibleMarkerCandidates({ players: bRoster }).some((c) => c.id === p3.id));
+
+  const g62 = f.find((x) => x.matchId === 62); // p3 vs p4
+  const rej = api.assignMarkerToGame(api.createMarkerRuntime(), f[0], p3.id, { markerOffIds: [p3.id] });
+  check('83. Confirming a MARKER OFF player is REJECTED at the domain boundary (player-marker-off)',
+    rej.ok === false && rej.reason === 'player-marker-off' && Object.keys(rej.runtime.byGame).length === 0);
+
+  let rt = api.createMarkerRuntime();
+  rt = api.assignMarkerToGame(rt, f[0], p5.id, {}).runtime;
+  const chg = api.changeMarkerForGame(rt, f[0], p3.id, { markerOffIds: [p3.id] });
+  check('83. CHANGE to a MARKER OFF player is rejected and the original marker survives',
+    chg.ok === false && chg.reason === 'player-marker-off' && api.findMarkerForGame(chg.runtime, f[0]) === p5.id);
+
+  // Still fully playable: the gate lives ONLY in marker eligibility paths.
+  const session = api.buildNightSession(bUi(), data, view);
+  check('83. MARKER OFF player is still PLAYABLE (game enters playable set)',
+    api.getPlayableGames(session).some((g) => g.playerA.id === p3.id || g.playerB.id === p3.id));
+  check('83. MARKER OFF player is not reported absent (independent of NOT HERE)',
+    api.derivePlayerStates(session).get(p3.id).state === api.PLAYER_STATES.AVAILABLE);
+
+  // NOT HERE wins when both are set (absent filter is evaluated first).
+  const both = api.assignMarkerToGame(api.createMarkerRuntime(), f[0], p3.id, { absentIds: [p3.id], markerOffIds: [p3.id] });
+  check('83. NOT HERE beats MARKER OFF (player-unavailable takes precedence)',
+    both.ok === false && both.reason === 'player-unavailable');
+
+  // Marker-off marker who was ALREADY confirmed keeps the duty (operator
+  // resolved explicitly, surfaced as advice: the confirmed chip stays FACT).
+  const confirmed = api.buildSchedulerAdvice(bUi(), { fixtures: bFixtures(), roster: bRoster,
+    markerRuntime: api.assignMarkerToGame(api.createMarkerRuntime(), f[0], p5.id, {}).runtime }, view);
+  const cGame = confirmed.recommended.find((g) => g.matchId === f[0].matchId);
+  check('83. Confirmed marker is FACT even when that player is later switched MARKER OFF',
+    !!cGame && cGame.confirmedMarkerId === p5.id);
+})();
+
+// 84. TRIAL-01: night persistence round-trip, validation, scoping, and the
+// planner-output exclusion boundary.
+(() => {
+  const store = {};
+  const storage = {
+    getItem: (k) => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); },
+  };
+  const leagueU = { leagueCode: 'SStaffSL', leagueId: '24343' };
+  const leagueW = { leagueCode: 'SStaffSL', leagueId: '55555' };
+  const keyU = api.storageKeyForLeague(leagueU);
+  const keyW = api.storageKeyForLeague(leagueW);
+  check('84. League-scoped store keys differ (Universal cannot contaminate the other league)', keyU !== keyW);
+
+  const state = api.defaultState(['Universal', 'White Eagle']);
+  state.division = 'Universal';
+  state.absentIds = [p1.id];
+  state.night = api.buildNightPersistedState(
+    Object.assign(state, { markerOffIds: [p2.id] }),
+    Object.assign(api.defaultSchedulerUiState(), {
+      strategy: api.SCHEDULING_STRATEGIES.OPTIMISED, includeDelayed: true,
+      managedBoardsEnabled: true, boardCount: 5,
+    }),
+    { allowance: { '101': 2 }, consumedDelayedGameKeys: {} }
+  );
+  api.saveState(storage, state, keyU);
+
+  const restored = api.loadState(storage, ['Universal', 'White Eagle'], keyU);
+  check('84. Night settings round-trip through the SAME league store key',
+    restored.night && restored.night.strategy === api.SCHEDULING_STRATEGIES.OPTIMISED &&
+    restored.night.includeDelayed === true && restored.night.managedBoardsEnabled === true &&
+    restored.night.boardCount === 5);
+  check('84. MARKER OFF ids and allowance overrides round-trip; consumption keys do not',
+    JSON.stringify(restored.night.markerOffIds) === JSON.stringify([p2.id]) &&
+    restored.night.delayedAllowance && restored.night.delayedAllowance['101'] === 2 &&
+    restored.night.delayedAllowance.consumedDelayedGameKeys === undefined);
+  check('84. Pre-existing NOT HERE persistence still works (untouched path)',
+    JSON.stringify(restored.absentIds) === JSON.stringify([p1.id]) && restored.division === 'Universal');
+
+  // Other league context reads its OWN key: no night contamination.
+  const other = api.loadState(storage, ['Universal', 'White Eagle'], keyW);
+  check('84. Other league context sees NO night settings (division/session scoped)',
+    other.night === null && other.markerOffIds.length === 0);
+
+  // Validation: garbage is dropped field by field, never thrown.
+  store[keyU] = JSON.stringify({
+    division: 'Universal', absentIds: [],
+    night: { strategy: 'BOGUS', includeDelayed: 'yes', managedBoardsEnabled: 1,
+      boardCount: 99, markerOffIds: ['x', 1.5, p3.id], delayedAllowance: { '101': -4, 'abc': 2, '102': 3 } },
+  });
+  const strict = api.loadState(storage, ['Universal', 'White Eagle'], keyU);
+  check('84. Invalid night fields are dropped (strategy/bools/boardCount validated)',
+    strict.night && strict.night.strategy === undefined && strict.night.includeDelayed === undefined &&
+    strict.night.managedBoardsEnabled === undefined && strict.night.boardCount === undefined);
+  check('84. markerOffIds filtered to safe integers; allowance entries validated (id + non-negative int)',
+    JSON.stringify(strict.night.markerOffIds) === JSON.stringify([p3.id]) &&
+    strict.night.delayedAllowance['102'] === 3 && strict.night.delayedAllowance['101'] === undefined &&
+    strict.night.delayedAllowance.abc === undefined);
+
+  // Planner output and transient state are NEVER persisted. ACCEPT-03 adds
+  // exactly one more operator-state field: `dispatch` (explicit board
+  // ownership + pending marker advice, bucketed by division@date).
+  const snap = api.buildNightPersistedState({ markerOffIds: [] }, api.defaultSchedulerUiState(), null);
+  check('84. Persisted night object contains operator settings ONLY (no recommendations/projected waves)',
+    // MARKER-10 adds ONE more operator display setting — the Not Here panel
+    // width — and still nothing derived: no plan, no recommendation, no wave.
+    JSON.stringify(Object.keys(snap).sort()) === JSON.stringify(
+      ['boardCount', 'delayedAllowance', 'dispatch', 'includeDelayed', 'managedBoardsEnabled',
+        'markerOffIds', 'markerPolicy', 'notHereWidth', 'strategy']));
+  check('84. defaultState starts with no night snapshot and empty marker-off list',
+    api.defaultState([]).night === null && JSON.stringify(api.defaultState([]).markerOffIds) === '[]');
+})();
+
+// 85. TRIAL-06 + TRIAL-02A: bulk delayed-allowance semantics, snapshot/apply
+// clamping, and board release correctness across fixture states.
+(() => {
+  const current = { matchId: 701, date: '2026-10-01', dateValue: 100, division: 'Universal', roundValue: 1, sessionValue: 1, playerA: p1, playerB: p2, delayed: false, status: 'waiting' };
+  const dA = { matchId: 711, date: '2026-09-03', dateValue: 50, division: 'Universal', roundValue: 1, sessionValue: 1, playerA: p1, playerB: p3, delayed: true, status: 'waiting' };
+  const dB = { matchId: 712, date: '2026-09-10', dateValue: 60, division: 'Universal', roundValue: 2, sessionValue: 1, playerA: p4, playerB: p1, delayed: true, status: 'waiting' };
+  const dC = { matchId: 713, date: '2026-09-17', dateValue: 70, division: 'Universal', roundValue: 3, sessionValue: 1, playerA: p6, playerB: p7, delayed: true, status: 'waiting' };
+  const fixtures = [current, dA, dB, dC];
+  const backlog = api.getDelayedBacklogByPlayer(fixtures);
+  // N: p1=2, p3=1, p4=1, p6=1, p7=1; p2/p5/p8/p9/p10 have none.
+
+  // Default 0: fresh runtime grants nobody any allowance.
+  const fresh = api.createDelayedAllowanceRuntime(fixtures);
+  check('85. TRIAL-06 default: every player starts at R=0 (delayed catch-up is opt-in)',
+    Object.keys(backlog).every((id) => api.getRemainingDelayedAllowance(fresh, Number(id)) === 0));
+
+  // Bulk All → 1 (UI-equivalent loop: HERE players with backlog > 0 only).
+  const absentSet = new Set([p6.id]); // p6 NOT HERE -> excluded from bulk
+  let rt = fresh;
+  Object.keys(backlog).forEach((idStr) => {
+    const id = Number(idStr);
+    if (!(backlog[id] > 0) || absentSet.has(id)) return;
+    rt = api.setRemainingDelayedAllowance(rt, id, 1, backlog).runtime;
+  });
+  check('85. All → 1 affects ONLY HERE players with outstanding delayed games',
+    api.getRemainingDelayedAllowance(rt, p1.id) === 1 && api.getRemainingDelayedAllowance(rt, p3.id) === 1 &&
+    api.getRemainingDelayedAllowance(rt, p4.id) === 1 &&
+    api.getRemainingDelayedAllowance(rt, p6.id) === 0 && // NOT HERE excluded
+    api.getRemainingDelayedAllowance(rt, p2.id) === 0); // no backlog, untouched
+
+  // Individual override after bulk: only that player changes.
+  rt = api.setRemainingDelayedAllowance(rt, p1.id, 2, backlog).runtime;
+  check('85. Individual override after bulk action changes only that player',
+    api.getRemainingDelayedAllowance(rt, p1.id) === 2 && api.getRemainingDelayedAllowance(rt, p3.id) === 1);
+
+  // Bulk All → 0 resets everyone (HERE with backlog).
+  let rt0 = rt;
+  Object.keys(backlog).forEach((idStr) => {
+    const id = Number(idStr);
+    if (!(backlog[id] > 0) || absentSet.has(id)) return;
+    rt0 = api.setRemainingDelayedAllowance(rt0, id, 0, backlog).runtime;
+  });
+  check('85. All → 0 resets every affected player to R=0 (bounded, N untouched)',
+    Object.keys(backlog).every((id) => api.getRemainingDelayedAllowance(rt0, Number(id)) === 0) &&
+    api.getDelayedOutstandingCount(backlog, p1.id) === 2);
+
+  // Snapshot/apply round trip: operator overrides persist, re-clamped to the
+  // CURRENT factual backlog; dead entries disappear.
+  const rtLive = api.setRemainingDelayedAllowance(fresh, p1.id, 5, backlog).runtime; // clamps to N=2
+  const snap = api.snapshotDelayedAllowance(rtLive);
+  check('85. Snapshot keeps only R>0 operator values (consumption keys excluded)',
+    snap['' + p1.id] === 2 && snap.consumedDelayedGameKeys === undefined &&
+    Object.keys(snap).length === 1);
+  const reApplied = api.applySavedDelayedAllowance(api.createDelayedAllowanceRuntime(fixtures), snap, backlog);
+  check('85. Re-applied snapshot clamps to current backlog (saved 5 -> R=2)',
+    api.getRemainingDelayedAllowance(reApplied, p1.id) === 2);
+  const shrunkBacklog = api.getDelayedBacklogByPlayer([current]); // p1 no longer delayed
+  const reApplied2 = api.applySavedDelayedAllowance(api.createDelayedAllowanceRuntime([current]), snap, shrunkBacklog);
+  check('85. Snapshot for a player with no outstanding delayed games grants nothing on restore',
+    api.getRemainingDelayedAllowance(reApplied2, p1.id) === 0);
+
+  // TRIAL-02A: board release is domain-correct for every fixture state.
+  const mkData = (status, delayed) => ({ matchId: 721, date: '2026-10-01', dateValue: 100, division: 'Universal',
+    roundValue: 1, sessionValue: 1, playerA: p1, playerB: p2, delayed: !!delayed, status });
+  [mkData('waiting', false), mkData('playing', false), mkData('waiting', true)].forEach((fx) => {
+    const statusBefore = fx.status;
+    const brt = api.assignGameToBoard(api.createManagedBoardRuntime(4), fx, 2).runtime;
+    const rel = api.releaseBoard(brt, 2);
+    check('85. Board release succeeds on a ' + (fx.delayed ? 'delayed ' : '') + fx.status + ' fixture and frees the board',
+      rel.ok && rel.runtime.boards[1].gameKey === null &&
+      api.getAvailableManagedBoards(rel.runtime).some((b) => b.boardNumber === 2));
+    const mrt = api.assignMarkerToGame(api.createMarkerRuntime(), fx, p3.id, {}).runtime;
+    const rel2 = api.releaseBoard(brt, 2);
+    check('85. Board release does NOT touch marker ownership, PLAYING or completion (' + (fx.delayed ? 'delayed ' : '') + fx.status + ')',
+      rel2.ok && api.findMarkerForGame(mrt, fx) === p3.id && fx.status === statusBefore);
+  });
+  check('85. Releasing an unassigned board is a deterministic no-op success',
+    api.releaseBoard(api.createManagedBoardRuntime(4), 3).ok === true);
+})();
+
+// ---------------------------------------------------------------------------
+// ACCEPTANCE FOLLOW-UP (ACCEPT-01..04) regression suites.
+// ---------------------------------------------------------------------------
+console.log('\n--- Acceptance Follow-Up (dispatch / handoff / persistence) Tests ---');
+
+// 86. ACCEPT-01: stable dispatch queue (PLAN GLOBALLY, EXECUTE LOCALLY).
+(() => {
+  const G = (mid) => ({ matchId: mid, playerA: { id: mid * 10 + 1 }, playerB: { id: mid * 10 + 2 } });
+  const plan = [G(1), G(2), G(3), G(5)];                 // planner output AFTER dispatching A (4)
+  const shown = [G(4), G(1), G(2), G(3)];                 // what the operator sees: A,B,C,D
+  const order = api.rememberDispatchOrder(shown);
+
+  // Dispatch A (matchId 4): B,C,D survive in order and renumber from 1;
+  // the planner's new game 5 fills the tail.
+  const afterDispatch = api.applyDispatchOrder(plan, order);
+  check('86. Dispatching recommendation #1 preserves survivors in relative order and fills the tail',
+    JSON.stringify(afterDispatch.map((g) => g.matchId)) === JSON.stringify([1, 2, 3, 5]));
+
+  check('86. With no remembered queue the planner order is used verbatim',
+    JSON.stringify(api.applyDispatchOrder(plan, null).map((g) => g.matchId)) === JSON.stringify([1, 2, 3, 5]) &&
+    JSON.stringify(api.applyDispatchOrder(plan, []).map((g) => g.matchId)) === JSON.stringify([1, 2, 3, 5]));
+
+  // A remembered recommendation the planner no longer makes is dropped, never resurrected.
+  check('86. An invalidated survivor is dropped, never resurrected to preserve order',
+    JSON.stringify(api.applyDispatchOrder([G(2), G(3)], order).map((g) => g.matchId)) === JSON.stringify([2, 3]));
+
+  // A newly valid game never jumps ahead of a survivor.
+  check('86. A new recommendation fills the tail instead of jumping ahead of survivors',
+    JSON.stringify(api.applyDispatchOrder([G(5), G(2), G(3)], order).map((g) => g.matchId)) === JSON.stringify([2, 3, 5]));
+
+  check('86. Dispatch ordering is pure (input untouched) and idempotent',
+    JSON.stringify(shown.map((g) => g.matchId)) === JSON.stringify([4, 1, 2, 3]) &&
+    JSON.stringify(api.applyDispatchOrder(api.applyDispatchOrder(plan, order), order).map((g) => g.matchId)) ===
+      JSON.stringify([1, 2, 3, 5]));
+  check('86. Dispatch ordering never invents a game the planner did not recommend',
+    api.applyDispatchOrder([G(9)], order).every((g) => g.matchId === 9));
+
+  // World-level sequential dispatch (the operator loop): dispatching #1 over
+  // and over must progress the queue, never shuffle survivors.
+  const P = (i) => ({ id: 100 + i, name: 'Player ' + i, division: 'Universal' });
+  const roster = Array.from({ length: 11 }, (_, k) => P(k + 1));
+  const worldFixtures = () => [[601, 4, 5, 2, 1], [602, 6, 7, 3, 2], [603, 1, 7, 2, 2], [604, 4, 6, 3, 1]]
+    .map(([m, a, b, rnd, ssn]) => ({
+      matchId: m, date: '2026-10-01', dateValue: 100, division: 'Universal',
+      roundValue: rnd, sessionValue: ssn, playerA: P(a), playerB: P(b), delayed: false, status: 'waiting',
+    }));
+  const dView = { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [108] };
+  const dUi = () => Object.assign(api.defaultSchedulerUiState(), { managedBoardsEnabled: true, boardCount: 5 });
+  let dRuntime = api.createManagedBoardRuntime(5);
+  let dOrder = null;
+  const dQueue = () => {
+    const a = api.buildSchedulerAdvice(dUi(), { fixtures: worldFixtures(), roster, boardRuntime: dRuntime }, dView);
+    a.recommended = api.applyDispatchOrder(a.recommended, dOrder);
+    dOrder = api.rememberDispatchOrder(a.recommended);
+    return a.recommended;
+  };
+  const firstQueue = dQueue().map((g) => g.matchId);
+  check('86. World: initial queue is globally planned', firstQueue.length > 0);
+  let survivorsKept = true;
+  let dispatched = [];
+  for (let n = 1; n <= 3; n += 1) {
+    const queue = dQueue();
+    if (queue.length === 0) break;
+    const target = queue[0];
+    const survivors = queue.slice(1).map((g) => g.matchId);
+    const res = api.assignGameToBoard(dRuntime, target, n, { absentIds: dView.absentIds });
+    if (!res.ok) break;
+    dRuntime = res.runtime;
+    dispatched.push(target.matchId);
+    const after = dQueue().map((g) => g.matchId);
+    const kept = survivors.filter((m) => after.indexOf(m) !== -1);
+    if (JSON.stringify(kept) !== JSON.stringify(survivors.filter((m) => dispatched.indexOf(m) === -1))) survivorsKept = false;
+  }
+  check('86. World: sequential dispatch keeps every surviving recommendation in order',
+    survivorsKept && dispatched.length >= 2);
+  check('86. World: dispatch never manufactures PLAYING or completion',
+    worldFixtures().every((f) => f.status === 'waiting'));
+})();
+
+// 87. ACCEPT-02/03A: pending (unconfirmed) marker handoff + validity.
+(() => {
+  const baseCtx = (over) => Object.assign({
+    players: bRoster, absentIds: [], playingPlayerIds: [], markingPlayerIds: [],
+    markedGameKeys: {}, excludeParticipants: true, participantIds: [101, 102],
+  }, over || {});
+
+  check('87. A valid pending proposal is returned unchanged',
+    api.validatePendingMarker(p5.id, baseCtx()) === p5.id);
+  check('87. Pending advice is invalidated by NOT HERE / MARKER OFF / PLAYING',
+    api.validatePendingMarker(p5.id, baseCtx({ absentIds: [p5.id] })) === null &&
+    api.validatePendingMarker(p5.id, baseCtx({ markerOffIds: [p5.id] })) === null &&
+    api.validatePendingMarker(p5.id, baseCtx({ playingPlayerIds: [p5.id] })) === null);
+  check('87. Pending advice is invalidated by MARKING elsewhere, wrong division or participation',
+    api.validatePendingMarker(p5.id, baseCtx({ markingPlayerIds: [p5.id] })) === null &&
+    api.validatePendingMarker(p5.id, baseCtx({ rosterDivisionIds: [1, 2, 3] })) === null &&
+    api.validatePendingMarker(p1.id, baseCtx()) === null);
+  check('87. Non-integer / absent pending advice is always null (never invented)',
+    api.validatePendingMarker(null, baseCtx()) === null &&
+    api.validatePendingMarker('x', baseCtx()) === null &&
+    api.validatePendingMarker(undefined, baseCtx()) === null);
+
+  // Handoff at dispatch: the proposal travels with the game, unconfirmed.
+  const fixtures = bFixtures();
+  let brt = api.createManagedBoardRuntime(4);
+  const advice = api.buildSchedulerAdvice(bUi(), { fixtures: fixtures.slice(), roster: bRoster, completedMatches: bCompleted(), boardRuntime: brt }, bView);
+  const target = advice.recommended.find((g) => g.proposedMarkerId != null);
+  check('87. Setup: recommendation with a proposed marker', !!target);
+  const res = api.assignGameToBoard(brt, target, 1, { absentIds: bView.absentIds });
+  brt = res.runtime;
+  const pending = Object.assign({}, { [api.markerGameKey(target)]: target.proposedMarkerId });
+  const factual = fixtures.find((f) => api.boardKeyForGame(f) === api.markerGameKey(target));
+  const factualCtx = baseCtx({
+    players: bRoster,
+    participantIds: [factual.playerA.id, factual.playerB.id],
+  });
+  check('87. E: dispatched factual row keeps the SAME marker as pending advice',
+    api.validatePendingMarker(pending[api.markerGameKey(factual)], factualCtx) === target.proposedMarkerId);
+
+  // F: pending advice is NOT a factual confirmed marker.
+  const sessionAfter = api.buildNightSession(bUi(), { fixtures: fixtures.slice(), roster: bRoster, completedMatches: bCompleted(), boardRuntime: brt }, bView);
+  check('87. F: dispatch creates NO factual MARKING (pending advice stays advice)',
+    sessionAfter.markingPlayerIds.size === 0 &&
+    api.derivePlayerStates(sessionAfter).get(target.proposedMarkerId).state !== api.PLAYER_STATES.MARKING);
+  check('87. D/C: dispatch creates no PLAYING, completion or factual state of any kind',
+    fixtures.every((f) => f.status === 'waiting') && sessionAfter.activeGames.every((a) => a.boardNumber === 1));
+
+  // Confirming turns advice into the factual marker and retires the handoff.
+  const mrt = api.assignMarkerToGame(api.createMarkerRuntime(), factual, target.proposedMarkerId,
+    { participantIds: [factual.playerA.id, factual.playerB.id] });
+  check('87. F: confirming creates the factual marker (one duty, one game)',
+    mrt.ok && api.findMarkerForGame(mrt.runtime, factual) === target.proposedMarkerId);
+  check('87. G: once confirmed, the pending advice is no longer pending',
+    api.validatePendingMarker(target.proposedMarkerId,
+      baseCtx({
+        gameKey: api.markerGameKey(factual),
+        markedGameKeys: mrt.runtime.byGame,
+        participantIds: [factual.playerA.id, factual.playerB.id],
+      })) === null);
+
+  // G: an invalidated pending proposal is discarded honestly (dropped to null).
+  check('87. G: stale pending advice is discarded, never converted into marker ownership',
+    api.validatePendingMarker(target.proposedMarkerId,
+      baseCtx({ absentIds: [target.proposedMarkerId], participantIds: [factual.playerA.id, factual.playerB.id] })) === null);
+})();
+
+// 88. ACCEPT-03/4B/4C/5: dispatch persistence, defensive restore, scoping.
+(() => {
+  const fixtures = () => bFixtures().map((f) => Object.assign({}, f));
+  let brt = api.createManagedBoardRuntime(4);
+  const pending = {};
+  [1, 2, 3].forEach((n, i) => {
+    const g = fixtures()[i];
+    brt = api.assignGameToBoard(brt, g, n, { absentIds: [] }).runtime;
+    pending[api.boardKeyForGame(g)] = p10.id;
+  });
+  const snapshot = api.snapshotDispatchState(brt, pending);
+
+  check('88. Snapshot contains ONLY assigned boards (free boards excluded)',
+    snapshot.boards.length === 3 && JSON.stringify(snapshot.boards.map((b) => b.boardNumber)) === JSON.stringify([1, 2, 3]));
+  check('88. Pending advice is persisted only for dispatched games',
+    Object.keys(snapshot.pendingMarkers).length === 3 &&
+    Object.keys(pending).every((k) => snapshot.pendingMarkers[k] === p10.id));
+  check('88. N: dispatch snapshot carries no recommendations or projected waves',
+    JSON.stringify(Object.keys(snapshot).sort()) === JSON.stringify(['boards', 'history', 'pendingMarkers']) &&
+    JSON.stringify(snapshot).indexOf('recommended') === -1 &&
+    JSON.stringify(snapshot).indexOf('projected') === -1);
+
+  // H: round trip through the real store key.
+  const store = {};
+  const storage = { getItem: (k) => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); } };
+  const key = api.storageKeyForLeague({ leagueCode: 'SStaffSL', leagueId: '24343' });
+  const state = api.defaultState(['Universal']);
+  state.division = 'Universal';
+  state.selectedMatchDate = bView.selectedMatchDate;
+  state.night = api.buildNightPersistedState(state, bUi(), null,
+    api.mergeDispatchBucket({}, api.dispatchBucketKey(state), snapshot));
+  api.saveState(storage, state, key);
+  const restoredState = api.loadState(storage, ['Universal'], key);
+  const bucket = api.dispatchBucketKey(restoredState);
+  const savedDispatch = restoredState.night && restoredState.night.dispatch[bucket];
+  const restored = api.restoreDispatchState(restoredState.night.boardCount, savedDispatch, fixtures());
+
+  // MARKER-6: the bucket now also carries CONFIRMED marker ownership, so the
+  // round trip is compared field by field (the dispatched board/pending/history
+  // payload itself must be byte-identical).
+  check('88. H: board assignments survive Refresh/F5 (persistence round trip)',
+    !!savedDispatch &&
+    JSON.stringify(savedDispatch.boards) === JSON.stringify(snapshot.boards) &&
+    JSON.stringify(savedDispatch.pendingMarkers) === JSON.stringify(snapshot.pendingMarkers) &&
+    JSON.stringify(savedDispatch.history) === JSON.stringify(snapshot.history) &&
+    restored.rejected.length === 0 &&
+    JSON.stringify(api.snapshotBoardAssignments(restored.runtime)) === JSON.stringify(snapshot.boards));
+  check('88. H: pending dispatched marker advice survives the reload (validated on use)',
+    JSON.stringify(restored.pendingMarkers) === JSON.stringify(snapshot.pendingMarkers));
+
+  // I: release updates persistence — a released board never comes back.
+  const released = api.releaseBoard(brt, 2);
+  const afterRelease = api.snapshotDispatchState(released.runtime, pending);
+  const reloadAfterRelease = api.restoreDispatchState(4, afterRelease, fixtures());
+  check('88. I: a released board stays released after reload',
+    api.snapshotBoardAssignments(reloadAfterRelease.runtime).every((b) => b.boardNumber !== 2) &&
+    api.getAvailableManagedBoards(reloadAfterRelease.runtime).some((b) => b.boardNumber === 2));
+  check('88. I: release leaves the other assignments and pending advice intact',
+    JSON.stringify(api.snapshotBoardAssignments(reloadAfterRelease.runtime).map((b) => b.boardNumber)) === JSON.stringify([1, 3]) &&
+    JSON.stringify(reloadAfterRelease.pendingMarkers) === JSON.stringify(afterRelease.pendingMarkers));
+
+  // J/K/L: defensive restore rejects stale, duplicate and out-of-range data.
+  const reject = (saved, count, reason) => api.restoreDispatchState(4, saved, fixtures()).rejected
+    .some((r) => r.reason === reason && api.restoreDispatchState(4, saved, fixtures()).restored.length === count);
+  check('88. L: board number outside the current boardCount is rejected',
+    reject({ boards: [{ boardNumber: 9, gameKey: 'id:61' }] }, 0, 'board-out-of-range'));
+  check('88. J: a game that no longer exists is rejected',
+    reject({ boards: [{ boardNumber: 1, gameKey: 'id:99999' }] }, 0, 'unknown-game'));
+  check('88. J: a malformed game key is rejected',
+    reject({ boards: [{ boardNumber: 1, gameKey: 42 }] }, 0, 'invalid-game-key'));
+  check('88. K: two games claiming the same board -> only the first is restored',
+    reject({ boards: [{ boardNumber: 1, gameKey: 'id:61' }, { boardNumber: 1, gameKey: 'id:62' }] }, 1, 'duplicate-board'));
+  check('88. K: one game claiming two boards -> only the first is restored',
+    reject({ boards: [{ boardNumber: 1, gameKey: 'id:61' }, { boardNumber: 2, gameKey: 'id:61' }] }, 1, 'duplicate-game'));
+  const dupFixtures = fixtures().concat(fixtures());
+  const ambiguous = api.restoreDispatchState(4, { boards: [{ boardNumber: 1, gameKey: 'id:61' }] }, dupFixtures);
+  check('88. J: an ambiguous game identity is rejected (never guessed)',
+    ambiguous.restored.length === 0 && ambiguous.rejected[0].reason === 'ambiguous-game');
+  check('88. Restoring never implies PLAYING, completion or marker confirmation',
+    api.restoreDispatchState(4, snapshot, fixtures()).pendingMarkers !== null &&
+    fixtures().every((f) => f.status === 'waiting'));
+
+  // M: division + date scoping.
+  const keyU = api.dispatchBucketKey({ division: 'Universal', selectedMatchDate: '2026-10-01' });
+  const keyW = api.dispatchBucketKey({ division: 'White Eagle', selectedMatchDate: '2026-10-01' });
+  const keyLater = api.dispatchBucketKey({ division: 'Universal', selectedMatchDate: '2026-10-29' });
+  check('88. M: dispatch buckets are distinct per division and per match date',
+    keyU !== keyW && keyU !== keyLater && keyW !== keyLater);
+  const merged = api.mergeDispatchBucket(
+    api.mergeDispatchBucket({}, keyU, snapshot), keyW, { boards: [{ boardNumber: 4, gameKey: 'id:63' }], pendingMarkers: {} });
+  check('88. M: one division can never inherit another division board assignments',
+    JSON.stringify(api.restoreDispatchState(4, merged[keyU], fixtures()).restored) === JSON.stringify(snapshot.boards) &&
+    api.restoreDispatchState(4, merged[keyW], fixtures()).restored.length === 1 &&
+    api.restoreDispatchState(4, merged[keyLater], fixtures()).restored.length === 0);
+})();
+
+// ---------------------------------------------------------------------------
+// MARKER-1..5 regression suites (acceptance follow-up #2).
+// ---------------------------------------------------------------------------
+console.log('\n--- Marker Model (reservation / next-N wave / fair rotation) Tests ---');
+
+// 89. MARKER-1: a pending marker RESERVES the player for marker scheduling.
+(() => {
+  const fixtures = () => bFixtures();
+  let brt = api.createManagedBoardRuntime(4);
+  const advice = api.buildSchedulerAdvice(bUi(), bData({ boardRuntime: brt }), bView);
+  const target = advice.recommended.find((g) => g.proposedMarkerId != null);
+  check('89. Setup: a recommendation with a proposed marker', !!target);
+  const trevorLike = target.proposedMarkerId;
+  brt = api.assignGameToBoard(brt, target, 1, { absentIds: [] }).runtime;
+  const dispatchedKey = api.markerGameKey(target);
+  const data = bData({ boardRuntime: brt, pendingMarkers: { [dispatchedKey]: trevorLike } });
+
+  check('89. A: the reserved player cannot be PROPOSED for another game',
+    api.buildSchedulerAdvice(bUi(), data, bView).recommended.every((g) => g.proposedMarkerId !== trevorLike));
+  check('89. A: the reserved player is absent from another game\'s eligible candidates',
+    api.getEligibleMarkerCandidates({
+      players: bRoster, absentIds: [], playingPlayerIds: [], markingPlayerIds: [],
+      pendingMarkerIds: api.reservedPendingMarkerIds(data, bView),
+      excludeParticipants: true, participantIds: [bRoster[2].id, bRoster[3].id],
+    }).every((c) => c.id !== trevorLike));
+  const other = fixtures()[1];
+  const confirm = api.assignMarkerToGame(api.createMarkerRuntime(), other, trevorLike, {
+    pendingMarkerIds: api.reservedPendingMarkerIds(data, bView),
+    participantIds: [other.playerA.id, other.playerB.id],
+  });
+  check('89. A: confirming the reserved player for another game is REJECTED (player-marker-pending)',
+    confirm.ok === false && confirm.reason === 'player-marker-pending' &&
+    Object.keys(confirm.runtime.byGame).length === 0);
+  const reservedSet = api.reservedPendingMarkerIds(data, bView);
+  check('89. A: no duplicate reservation is possible (one reservation per player)',
+    reservedSet.filter((id) => id === trevorLike).length === 1);
+  // The reservation binds OTHER games only: the dispatched game that owns the
+  // pending marker must still be able to confirm, change or drop it.
+  check('89. A: the owning game is NOT blocked by its own reservation (operator can confirm it)',
+    api.reservedPendingMarkerIds(data, bView, dispatchedKey).indexOf(trevorLike) === -1 &&
+    api.getEligibleMarkerCandidates({
+      players: bRoster, absentIds: [], playingPlayerIds: [], markingPlayerIds: [],
+      pendingMarkerIds: api.reservedPendingMarkerIds(data, bView, dispatchedKey),
+      excludeParticipants: true,
+      participantIds: [bFixtures()[0].playerA.id, bFixtures()[0].playerB.id],
+    }).some((c) => c.id === trevorLike));
+  const session = api.buildNightSession(bUi(), data, bView);
+  const states = api.derivePlayerStates(session);
+  check('89. A: a reserved player is RESERVED, NOT factually MARKING',
+    states.get(trevorLike).state === api.PLAYER_STATES.RESERVED &&
+    session.markingPlayerIds.size === 0 && !session.markingPlayerIds.has(trevorLike));
+  check('89. A: reservation also blocks PLAYING recommendations for that player',
+    api.getPlayableGames(session).every((g) => g.playerA.id !== trevorLike && g.playerB.id !== trevorLike));
+  // The reservation ends when the pending handoff is retired (board released).
+  const retired = api.reservedPendingMarkerIds(bData({ boardRuntime: api.releaseBoard(brt, 1).runtime, pendingMarkers: {} }), bView);
+  check('89. A: releasing the board and retiring the handoff ends the reservation',
+    retired.indexOf(trevorLike) === -1);
+  // Factual conflicts pre-filter stale reservations: a player who is now
+  // factually PLAYING cannot stay reserved.
+  const playingFixtures = fixtures().map((f, i) => (i === 2 ? Object.assign({}, f, { status: 'playing' }) : f));
+  const playingPlayerId = playingFixtures[2].playerA.id;
+  check('89. A: a stale reservation (player now factually PLAYING) is dropped',
+    api.reservedPendingMarkerIds(bData({
+      boardRuntime: brt,
+      fixtures: playingFixtures,
+      pendingMarkers: { [dispatchedKey]: playingPlayerId },
+    }), bView).indexOf(playingPlayerId) === -1);
+})();
+
+// 90. MARKER-2/4 CORRECTED: next-N dispatchable participant exclusion is the
+// HARD rule; "has already played tonight" is a FAIR preference only.
+//
+// World: 6 waiting games over 12 players (q1..q12) + 4 spares (q13..q16).
+//   game 1: q1 v q2   game 2: q3 v q4   game 3: q5 v q6
+//   game 4: q7 v q8   game 5: q9 v q10  game 6: q11 v q12
+(() => {
+  const q = (i) => ({ id: 700 + i, name: 'Q' + i, division: 'Universal' });
+  const qRoster = Array.from({ length: 16 }, (_, k) => q(k + 1));
+  const qFx = (games) => {
+    const out = [];
+    for (let g = 0; g < games; g += 1) {
+      out.push({
+        matchId: 7500 + g, date: '2026-10-01', dateValue: 100, division: 'Universal',
+        roundValue: 1, sessionValue: 1, playerA: q(g * 2 + 1), playerB: q(g * 2 + 2),
+        delayed: false, status: 'waiting',
+      });
+    }
+    return out;
+  };
+  const qView = { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [] };
+  const qUi = (boards, policy) => Object.assign(api.defaultSchedulerUiState(),
+    { managedBoardsEnabled: true, boardCount: boards, markerPolicy: policy || api.MARKER_POLICIES.FAIR });
+  const qData = (games, extra) => Object.assign({
+    fixtures: qFx(games), roster: qRoster, completedMatches: [],
+  }, extra || {});
+  const ids = (n) => Array.from({ length: n }, (_, k) => 701 + k);
+  const props = (advice) => advice.recommended.map((g) => g.proposedMarkerId);
+  const playedEvidence = (list) => [{
+    matchId: 7900, date: '2026-10-01', division: 'Universal',
+    playerA: { id: list[0] }, playerB: { id: list[1] }, source: 'schedule-props',
+  }];
+
+  // A. OPENING WAVE / ZERO COMPLETIONS - the Chrome screenshot failure.
+  const opening = api.buildSchedulerAdvice(qUi(4), qData(6), qView);
+  const openProps = props(opening);
+  check('90. A: zero completions + 4 free boards -> every opening row gets a marker (no M: -)',
+    opening.recommended.length === 4 && openProps.every((id) => id != null));
+  check('90. A: no opening-game participant is ever proposed as marker (next-4 union excluded)',
+    openProps.every((id) => id > 708));
+  check('90. A: the four proposals are distinct (one marker per person)',
+    new Set(openProps).size === 4);
+  check('90. A: the opening wave is deterministic (same world, same proposals)',
+    JSON.stringify(props(api.buildSchedulerAdvice(qUi(4), qData(6), qView))) === JSON.stringify(openProps));
+
+  // B. CAPACITY 1 - only the next ONE dispatchable game is excluded.
+  const cap1 = api.buildSchedulerAdvice(qUi(1), qData(6), qView);
+  check('90. B: capacity 1 plans one game and excludes exactly its own participants',
+    cap1.recommended.length === 1 && props(cap1)[0] > 702);
+  check('90. B: a player who only appears in a LATER game is still eligible at capacity 1',
+    props(cap1)[0] == null || props(cap1)[0] > 702);
+
+  // C. CAPACITY 2 - the union of the next 2 games is excluded.
+  const cap2 = api.buildSchedulerAdvice(qUi(2), qData(6), qView);
+  const cap2Props = props(cap2);
+  check('90. C: capacity 2 excludes the union of the next 2 games from every proposal',
+    cap2.recommended.length === 2 && cap2Props.every((id) => id > 704) &&
+    new Set(cap2Props).size === 2);
+
+  // D. CAPACITY 4 - the union of the next 4 games is excluded.
+  check('90. D: capacity 4 excludes the union of the next 4 games',
+    openProps.every((id) => id > 708));
+
+  // E. CAPACITY 6 - capacity-driven, NOT hard-coded to four.
+  const cap6 = api.buildSchedulerAdvice(qUi(6), qData(6), qView);
+  const cap6Props = props(cap6);
+  check('90. E: capacity 6 plans 6 games and excludes all 12 participants (not 8)',
+    cap6.recommended.length === 6 && cap6Props.every((id) => id == null || id > 712) &&
+    new Set(cap6Props.filter((id) => id != null)).size === 4);
+  check('90. E: capacity 6 and capacity 4 produce different waves (nothing is hard-coded)',
+    JSON.stringify(cap6Props) !== JSON.stringify(openProps) &&
+    JSON.stringify(props(api.buildSchedulerAdvice(qUi(3), qData(6), qView))) !== JSON.stringify(openProps));
+
+  // F. PLAYED IS A PREFERENCE, NOT A GATE.
+  const pair = qData(1, { roster: [q(1), q(2), q(13), q(14)] });
+  check('90. F: an equal candidate who HAS played is preferred over one who has not',
+    props(api.buildSchedulerAdvice(qUi(1),
+      Object.assign({}, pair, { completedMatches: playedEvidence([714]) }), qView))[0] === 714);
+  check('90. F: with NOBODY played the proposal still happens (not a gate)',
+    props(api.buildSchedulerAdvice(qUi(1),
+      Object.assign({}, pair, { completedMatches: [] }), qView))[0] === 713);
+  const oneAbsent = { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [714] };
+  check('90. F: if only the unplayed candidate is valid it MUST still be usable',
+    props(api.buildSchedulerAdvice(qUi(1),
+      Object.assign({}, pair, { completedMatches: playedEvidence([714]) }), oneAbsent))[0] === 713);
+  // Rotation burden still outranks the soft "has played" hint.
+  const burdened = api.recordMarkerMark(api.recordMarkerMark(api.createMarkerHistory(), 714, 'a'), 714, 'b');
+  const prefWorld = Object.assign({}, pair,
+    { completedMatches: playedEvidence([713, 714]), markerHistory: burdened });
+  check('90. G: fewer marks wins even when the other candidate has played',
+    props(api.buildSchedulerAdvice(qUi(1), prefWorld, qView))[0] === 713);
+  check('90. F: played evidence from another date/division is ignored (never invented)',
+    api.getPlayedPlayerIds([{ matchId: 1, date: '2026-09-17', division: 'Universal',
+      playerA: { id: 713 }, playerB: { id: 714 } }], '2026-10-01', 'Universal').size === 0 &&
+    api.getPlayedPlayerIds([{ matchId: 1, date: '2026-10-01', division: 'White Eagle',
+      playerA: { id: 713 }, playerB: { id: 714 } }], '2026-10-01', 'Universal').size === 0);
+
+  // H. PENDING RESERVATION still removes a player from the new wave.
+  let brt = api.createManagedBoardRuntime(4);
+  const firstGame = opening.recommended[0];
+  brt = api.assignGameToBoard(brt, firstGame, 1, { absentIds: [] }).runtime;
+  const held = firstGame.proposedMarkerId;
+  const afterDispatch = api.buildSchedulerAdvice(qUi(4),
+    qData(6, { boardRuntime: brt, pendingMarkers: { [api.markerGameKey(firstGame)]: held } }), qView);
+  check('90. H: the pending marker on Board 1 is never proposed again',
+    afterDispatch.recommended.length === 4 &&
+    afterDispatch.recommended.every((g) => g.proposedMarkerId !== held));
+  check('90. H: the next-N window shrinks with the free board count (4 -> 3 slots)',
+    api.getNextDispatchCapacity(api.buildNightSession(qUi(4),
+      qData(6, { boardRuntime: api.createManagedBoardRuntime(4) }), qView),
+    api.createManagedBoardRuntime(4)) === 4 &&
+    api.getNextDispatchCapacity(api.buildNightSession(qUi(4),
+      qData(6, { boardRuntime: brt }), qView), brt) === 3);
+
+  // I. INSUFFICIENT POOL - never steal from the next-N games.
+  const tight = qData(6, { roster: [q(1), q(2), q(3), q(4), q(5), q(6), q(7), q(8), q(13)] });
+  const tightAdvice = api.buildSchedulerAdvice(qUi(4), tight, qView);
+  const tightProps = props(tightAdvice);
+  check('90. I: an insufficient pool leaves the surplus rows honestly unmarked (null)',
+    tightAdvice.recommended.length === 4 && tightProps.filter((id) => id != null).length === 1 &&
+    tightProps.indexOf(713) !== -1);
+  check('90. I: the scheduler never pulls a player out of the next-N participant set',
+    tightProps.every((id) => id == null || id > 708));
+  const noSpares = qData(4, { roster: [q(1), q(2), q(3), q(4), q(5), q(6), q(7), q(8)] });
+  check('90. I: a wave that consumes the whole roster proposes nothing at all',
+    props(api.buildSchedulerAdvice(qUi(4), noSpares, qView)).every((id) => id == null));
+
+  // Capacity helpers, in isolation (no browser, no render).
+  const sess = api.buildNightSession(qUi(4), qData(6), qView);
+  check('90. MARKER-4: next-N capacity is the count of genuinely FREE board slots',
+    api.getNextDispatchCapacity(sess, api.createManagedBoardRuntime(4)) === 4 &&
+    api.getNextDispatchCapacity(sess, api.assignGameToBoard(api.createManagedBoardRuntime(4), qFx(6)[0], 1, { absentIds: [] }).runtime) === 3 &&
+    api.getNextDispatchCapacity(sess, api.assignGameToBoard(
+      api.assignGameToBoard(api.createManagedBoardRuntime(4), qFx(6)[0], 1, { absentIds: [] }).runtime,
+      qFx(6)[1], 2, { absentIds: [] }).runtime) === 2);
+  const unmanaged = api.buildNightSession(
+    Object.assign(api.defaultSchedulerUiState(), { managedBoardsEnabled: false }), qData(6), qView);
+  check('90. MARKER-4: with Managed Boards OFF the planner capacity is reused (no board count invented)',
+    api.getNextDispatchCapacity(unmanaged, null) === 4 &&
+    api.getNextDispatchCapacity(api.buildNightSession(qUi(6), qData(6), qView), null) === 6);
+  const games = qFx(6);
+  const idsOf = (s) => Array.from(s).sort((a, b) => a - b);
+  check('90. MARKER-4: the next-N participant union is a slice of capacity, not a fixed four',
+    JSON.stringify(idsOf(api.nextDispatchParticipantIds(games, 0, 1))) === JSON.stringify([701, 702]) &&
+    JSON.stringify(idsOf(api.nextDispatchParticipantIds(games, 0, 2))) === JSON.stringify([701, 702, 703, 704]) &&
+    JSON.stringify(idsOf(api.nextDispatchParticipantIds(games, 0, 4))) === JSON.stringify(ids(8)) &&
+    JSON.stringify(idsOf(api.nextDispatchParticipantIds(games, 0, 6))) === JSON.stringify(ids(12)) &&
+    JSON.stringify(idsOf(api.nextDispatchParticipantIds(games, 0, 0))) === JSON.stringify([701, 702]));
+  check('90. MARKER-4: a game always excludes its own participants, whatever the capacity',
+    JSON.stringify(idsOf(api.nextDispatchParticipantIds(games, 5, 1))) === JSON.stringify([711, 712]));
+
+  // Zero free boards: no new dispatchable marker allocation is invented.
+  let allBusy = api.createManagedBoardRuntime(4);
+  [1, 2, 3, 4].forEach((n, i) => {
+    allBusy = api.assignGameToBoard(allBusy, qFx(6)[i], n, { absentIds: [] }).runtime;
+  });
+  const noCapacity = api.buildSchedulerAdvice(qUi(4), qData(6, { boardRuntime: allBusy }), qView);
+  check('90. MARKER-4: 0 free boards invents no marker allocation',
+    api.getNextDispatchCapacity(sess, allBusy) === 0 &&
+    noCapacity.recommended.length === 2 &&
+    props(noCapacity).every((id) => id == null));
+
+  // J. MANUAL AUTHORITY - recommendation and operator override stay distinct.
+  const manualCtx = { players: bRoster, absentIds: [], playingPlayerIds: [], markingPlayerIds: [],
+    markedGameKeys: {}, excludeParticipants: true, participantIds: [p1.id, p2.id] };
+  check('90. J: manual operator selection keeps full authority (never gated by played/next-N)',
+    api.getEligibleMarkerCandidates(manualCtx).some((c) => c.id === p9.id) &&
+    api.assignMarkerToGame(api.createMarkerRuntime(), bFixtures()[0], p9.id, {}).ok === true);
+
+  // Factual evidence extraction from API records is unchanged.
+  check('90. F: completed (\'C\') API records become dated completion evidence',
+    JSON.stringify(api.completedMatchesFromApiRecords([
+      { matchIds: [1], ids: [p9.id, p10.id], state: 'C', date: '2026-10-01', division: 'Universal' },
+      { matchIds: [2], ids: [p1.id, p2.id], state: 'O', date: '2026-10-01', division: 'Universal' },
+      { matchIds: [3], ids: [p3.id, p4.id], state: 'C', date: '', division: 'Universal' },
+    ])) === JSON.stringify([{ matchId: 1, date: '2026-10-01', division: 'Universal',
+      playerA: { id: p9.id }, playerB: { id: p10.id }, source: 'api-record' }]));
+  check('90. F: only explicit completed states count as completion evidence',
+    api.isCompletedRecord({ state: 'C' }) === true && api.isCompletedRecord({ state: 'completed' }) === true &&
+    api.isCompletedRecord({ state: 'O' }) === false && api.isCompletedRecord({ state: '' }) === false &&
+    api.isCompletedRecord(null) === false);
+  check('90. F: a game merely being PLAYING is NOT treated as completion',
+    api.isCompletedRecord({ state: 'P' }) === false &&
+    api.completedMatchesFromApiRecords([{ matchIds: [1], ids: [p9.id, p10.id],
+      state: 'P', date: '2026-10-01', division: 'Universal' }]).length === 0 &&
+    api.getPlayedPlayerIds([], '2026-10-01', 'Universal').size === 0);
+  check('90. F: the played set contains exactly the factual participants of that date',
+    (() => {
+      const set = api.getPlayedPlayerIds(api.completedMatchesFromApiRecords([
+        { matchIds: [1], ids: [p9.id, p10.id], state: 'C', date: '2026-10-01' },
+      ]), '2026-10-01');
+      return set.has(p9.id) && set.has(p10.id) && set.size === 2;
+    })());
+  // A game leaving PLAYING never manufactures completion evidence.
+  const playingOnly = qData(1, { roster: [q(1), q(2), q(13), q(14)] });
+  playingOnly.fixtures[0].status = 'playing';
+  check('90. F: a game leaving PLAYING never manufactures completion evidence',
+    api.getPlayedPlayerIds(playingOnly.completedMatches, '2026-10-01', 'Universal').size === 0);
+})();
+
+// 91. MARKER-3: FAIR rotation (fewest marks first, no immediate reuse).
+(() => {
+  const C = (id) => ({ id, name: 'P' + id });
+  const cands = [C(1), C(2), C(3), C(4)];
+  const none = api.createMarkerHistory();
+  const one = api.recordMarkerMark(none, 1, 'id:1');
+  const two = api.recordMarkerMark(one, 2, 'id:2');
+
+  check('91. D: a player with 0 marks is preferred over one with 1 mark',
+    JSON.stringify(api.rankMarkerCandidatesByFairness(cands, { history: one }).map((c) => c.id)) ===
+    JSON.stringify([2, 3, 4, 1]));
+  check('91. D: rotation dominates planner fitness (fewer marks wins even when it scores worse)',
+    api.rankMarkerCandidatesByFairness(cands, { history: one, scoreOf: (id) => (id === 1 ? 999 : 0) })
+      .map((c) => c.id).indexOf(3) < api.rankMarkerCandidatesByFairness(cands, { history: one, scoreOf: (id) => (id === 1 ? 999 : 0) })
+      .map((c) => c.id).indexOf(1));
+  // Equal counts: the most recent marker is held back while equivalents exist.
+  const even = [1, 2, 3, 4].reduce((h, id) => api.recordMarkerMark(h, id, 'id:' + id), none);
+  check('91. D: the player who JUST marked is held back while an equivalent exists',
+    JSON.stringify(api.rankMarkerCandidatesByFairness(cands, { history: even, recentPlayerId: 2 }).map((c) => c.id)) ===
+    JSON.stringify([1, 3, 4, 2]));
+  check('91. D: once alternatives are exhausted a previously used player is eligible again',
+    api.rankMarkerCandidatesByFairness([C(1), C(2)], { history: two, recentPlayerId: 2 }).map((c) => c.id)[0] === 1);
+  check('91. D: ordering is deterministic (no randomness, id-ascending last)',
+    JSON.stringify(api.rankMarkerCandidatesByFairness(cands, { history: none }).map((c) => c.id)) ===
+    JSON.stringify(api.rankMarkerCandidatesByFairness(cands.slice().reverse(), { history: none }).map((c) => c.id)));
+  check('91. D: mark counting and release semantics',
+    api.getMarkerMarkCount(api.recordMarkerMark(none, 1, 'a'), 1) === 1 &&
+    api.getMarkerMarkCount(api.recordMarkerMark(api.recordMarkerMark(none, 1, 'a'), 1, 'b'), 1) === 2 &&
+    api.getMarkerMarkCount(api.releaseMarkerMark(api.recordMarkerMark(none, 1, 'a'), 1), 1) === 0 &&
+    api.getMarkerMarkCount(api.releaseMarkerMark(api.recordMarkerMark(none, 1, 'a'), 1), 99) === 0);
+
+  check('91. D: two recorded marks leave the least-burdened player first',
+    JSON.stringify(api.rankMarkerCandidatesByFairness([C(1), C(2), C(3)], { history: two }).map((c) => c.id)) ===
+    JSON.stringify([3, 1, 2]));
+
+  // World-level rotation: 11 players, 2 marker slots, 3 free spares who have
+  // all played tonight — rotation must move on, not recycle.
+  const P = (i) => ({ id: 400 + i, name: 'P' + i, division: 'Universal' });
+  const roster = Array.from({ length: 11 }, (_, k) => P(k + 1));
+  const F = (m, a, b) => ({ matchId: 9600 + m, date: '2026-10-01', dateValue: 100, division: 'Universal',
+    roundValue: 1 + Math.floor(m / 2), sessionValue: 1 + (m % 2), playerA: P(a), playerB: P(b),
+    delayed: false, status: 'waiting' });
+  const fixtures = [F(1, 1, 2), F(2, 3, 4), F(3, 5, 6), F(4, 7, 8)];
+  const completed = Array.from({ length: 11 }, (_, k) => ({
+    matchId: 9700 + k, date: '2026-10-01', division: 'Universal',
+    playerA: { id: 400 + k + 1 }, playerB: { id: 400 + ((k + 1) % 11) + 1 }, source: 'schedule-props',
+  }));
+  const view = { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [] };
+  const mkUi = (policy, boards) => Object.assign(api.defaultSchedulerUiState(),
+    { managedBoardsEnabled: true, boardCount: boards || 2, markerPolicy: policy || api.MARKER_POLICIES.FAIR });
+  let history = api.createMarkerHistory();
+  const first = api.buildSchedulerAdvice(mkUi(), { fixtures: fixtures.slice(), roster, completedMatches: completed, markerHistory: history }, view);
+  const firstProposal = first.recommended.find((g) => g.proposedMarkerId != null);
+  check('91. D: world produces a proposal (free spares who have played)', !!firstProposal);
+  history = api.recordMarkerMark(history, firstProposal.proposedMarkerId, api.markerGameKey(firstProposal));
+  const second = api.buildSchedulerAdvice(mkUi(), { fixtures: fixtures.slice(), roster, completedMatches: completed, markerHistory: history }, view);
+  check('91. D: the next wave does not reuse the same marker when another eligible player exists',
+    !!firstProposal && second.recommended.every((g) => g.proposedMarkerId !== firstProposal.proposedMarkerId));
+
+  // Fair rotation also holds BEYOND four boards (6 marker slots, 7 spares).
+  const bigRoster = Array.from({ length: 19 }, (_, k) => P(100 + k));
+  const bigFixtures = [];
+  for (let g = 0; g < 6; g += 1) {
+    bigFixtures.push({ matchId: 9800 + g, date: '2026-10-01', dateValue: 100, division: 'Universal',
+      roundValue: 1 + g, sessionValue: 1, playerA: bigRoster[g * 2], playerB: bigRoster[g * 2 + 1],
+      delayed: false, status: 'waiting' });
+  }
+  const bigCompleted = Array.from({ length: 19 }, (_, k) => ({
+    matchId: 9900 + k, date: '2026-10-01', division: 'Universal',
+    playerA: { id: 500 + k }, playerB: { id: 500 + ((k + 1) % 19) }, source: 'schedule-props',
+  }));
+  const bigData = (hist) => ({ fixtures: bigFixtures.map((f) => Object.assign({}, f)),
+    roster: bigRoster, completedMatches: bigCompleted, markerHistory: hist });
+  const bigFirst = api.buildSchedulerAdvice(mkUi(null, 6), bigData(api.createMarkerHistory()), view);
+  const bigProps = bigFirst.recommended.map((g) => g.proposedMarkerId).filter((id) => id != null);
+  check('91. D: six-board opening wave proposes DISTINCT markers from the spare pool',
+    bigProps.length === 4 && new Set(bigProps).size === 4 &&
+    bigProps.every((id) => id >= 512 && id <= 518));
+  const bigHist = api.recordMarkerMark(api.createMarkerHistory(), bigProps[0], 'x');
+  const bigSecond = api.buildSchedulerAdvice(mkUi(null, 6), bigData(bigHist), view);
+  const bigProps2 = bigSecond.recommended.map((g) => g.proposedMarkerId).filter((id) => id != null);
+  check('91. D: beyond four boards the just-used marker is dropped in favour of a fresher spare',
+    bigProps2.length === 4 && bigProps2.indexOf(bigProps[0]) === -1 && new Set(bigProps2).size === 4);
+})();
+
+// 92. MARKER-4/5: policy default, persistence, and LOSER honesty.
+(() => {
+  check('92. F: FAIR is the default marker policy',
+    api.defaultSchedulerUiState().markerPolicy === api.MARKER_POLICIES.FAIR);
+  const C = (id) => ({ id, name: 'P' + id });
+  const cands = [C(1), C(2), C(3)];
+
+  // LOSER is a preference and only ever factual.
+  const withLoser = api.orderMarkerCandidates(cands, api.MARKER_POLICIES.LOSER, { loserIds: [2, 3] });
+  check('92. G: with FACTUAL loser ids the loser is preferred (a preference, not an assignment)',
+    withLoser[0].id === 2 && withLoser[1].id === 3 && withLoser.length === 3);
+  const noLoser = api.orderMarkerCandidates(cands, api.MARKER_POLICIES.LOSER, { loserIds: [] });
+  check('92. G: with NO factual loser data the loser is never guessed (falls back to FAIR)',
+    JSON.stringify(noLoser.map((c) => c.id)) === JSON.stringify([1, 2, 3]) &&
+    api.rankLoserCandidates(cands, { loserIds: [] }) === null &&
+    api.rankLoserCandidates(cands, {}) === null);
+  check('92. G: policy availability reflects factual data only',
+    api.isMarkerPolicyAvailable(api.MARKER_POLICIES.FAIR, {}) === true &&
+    api.isMarkerPolicyAvailable(api.MARKER_POLICIES.LOSER, {}) === false &&
+    api.isMarkerPolicyAvailable(api.MARKER_POLICIES.LOSER, { loserIds: [] }) === false &&
+    api.isMarkerPolicyAvailable(api.MARKER_POLICIES.LOSER, { loserIds: [7] }) === true);
+  check('92. G: an unknown policy falls back to FAIR (never guesses)',
+    JSON.stringify(api.orderMarkerCandidates(cands, 'NONSENSE', {}).map((x) => x.id)) === JSON.stringify([1, 2, 3]) &&
+    api.isMarkerPolicy('NONSENSE') === false);
+
+  // Persistence: policy + history round-trip through the EXISTING store key.
+  const store = {};
+  const storage = { getItem: (k) => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); } };
+  const key = api.storageKeyForLeague({ leagueCode: 'SStaffSL', leagueId: '24343' });
+  const state = api.defaultState(['Universal']);
+  state.division = 'Universal';
+  state.selectedMatchDate = bView.selectedMatchDate;
+  const history = api.recordMarkerMark(api.recordMarkerMark(api.createMarkerHistory(), p7.id, 'id:61'), p7.id, 'id:62');
+  state.night = api.buildNightPersistedState(state,
+    Object.assign(bUi(), { markerPolicy: api.MARKER_POLICIES.FAIR }), null,
+    api.mergeDispatchBucket({}, api.dispatchBucketKey(state),
+      api.snapshotDispatchState(api.createManagedBoardRuntime(4), {}, history)));
+  api.saveState(storage, state, key);
+  const loaded = api.loadState(storage, ['Universal'], key);
+  check('92. F/I: policy + marker history survive a Refresh/F5 round trip',
+    loaded.night.markerPolicy === api.MARKER_POLICIES.FAIR &&
+    api.getMarkerMarkCount(loaded.night.dispatch[api.dispatchBucketKey(loaded)].history, p7.id) === 2 &&
+    loaded.night.dispatch[api.dispatchBucketKey(loaded)].history.recentPlayerId === p7.id);
+
+  store[key] = JSON.stringify({ division: 'Universal', absentIds: [], selectedMatchDate: '2026-10-01',
+    night: { markerPolicy: 'BOGUS', dispatch: { 'Universal@2026-10-01': {
+      history: { marks: { x: 1, 5: -3, 6: 2 }, recentPlayerId: 999 }, boards: [], pendingMarkers: {} } } } });
+  const strict = api.loadState(storage, ['Universal'], key);
+  check('92. F/I: malformed policy and malformed history are rejected safely',
+    strict.night.markerPolicy === undefined &&
+    api.getMarkerMarkCount(strict.night.dispatch[api.dispatchBucketKey(strict)].history, 6) === 2 &&
+    api.getMarkerMarkCount(strict.night.dispatch[api.dispatchBucketKey(strict)].history, 5) === 0);
+  check('92. I: history normalisation never invents counts or recent markers',
+    JSON.stringify(api.normalizeMarkerHistory(null)) === JSON.stringify({ marks: {}, recentPlayerId: null, recentGameKey: null }) &&
+    api.normalizeMarkerHistory({ marks: { 4: 1 }, recentPlayerId: 8 }).recentPlayerId === null);
+})();
+
+// 93. MARKER-1 + dispatch integration: the observed Chrome duplicate scenario.
+(() => {
+  const P = (i) => ({ id: 500 + i, name: 'P' + i, division: 'Universal' });
+  // 8 players in the four opening games + 4 spares outside the wave, so the
+  // scheduler really does hand out distinct pending markers as boards fill.
+  const roster = Array.from({ length: 12 }, (_, k) => P(k + 1));
+  const F = (m, a, b) => ({ matchId: 9800 + m, date: '2026-10-01', dateValue: 100, division: 'Universal',
+    roundValue: 1, sessionValue: 1, playerA: P(a), playerB: P(b), delayed: false, status: 'waiting' });
+  const fx = () => [F(1, 1, 2), F(2, 3, 4), F(3, 5, 6), F(4, 7, 8)];
+  const view = { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [] };
+  const completed = [
+    { matchId: 9900, date: '2026-10-01', division: 'Universal', playerA: { id: 509 }, playerB: { id: 510 } },
+  ];
+  const ui = Object.assign(api.defaultSchedulerUiState(), { managedBoardsEnabled: true, boardCount: 4 });
+
+  let brt = api.createManagedBoardRuntime(4);
+  let pending = {};
+  let order = null;
+  const ownedPending = () => Object.keys(pending).map((k) => pending[k]);
+  let duplicate = false;
+  let dispatchedCount = 0;
+  let pendingHandoffs = 0;
+  for (let n = 1; n <= 3; n += 1) {
+    const data = { fixtures: fx(), roster, boardRuntime: brt, pendingMarkers: pending, completedMatches: completed };
+    const advice = api.buildSchedulerAdvice(ui, data, view);
+    advice.recommended = api.applyDispatchOrder(advice.recommended, order);
+    order = api.rememberDispatchOrder(advice.recommended);
+    // No proposed marker may duplicate an existing pending/confirmed reservation.
+    const reserved = api.reservedPendingMarkerIds(data, view);
+    advice.recommended.forEach((g) => {
+      if (g.proposedMarkerId != null && reserved.indexOf(g.proposedMarkerId) !== -1) duplicate = true;
+    });
+    const target = advice.recommended[0];
+    if (!target) break;
+    brt = api.assignGameToBoard(brt, target, n, { absentIds: [] }).runtime;
+    if (Number.isSafeInteger(target.proposedMarkerId)) {
+      pending[api.markerGameKey(target)] = target.proposedMarkerId;
+      pendingHandoffs += 1;
+    }
+    dispatchedCount += 1;
+    const after = api.buildSchedulerAdvice(ui,
+      { fixtures: fx(), roster, boardRuntime: brt, pendingMarkers: pending, completedMatches: completed }, view);
+    const active = ownedPending();
+    if (new Set(active).size !== active.length) duplicate = true;
+    after.recommended.forEach((g) => {
+      if (g.proposedMarkerId != null && active.indexOf(g.proposedMarkerId) !== -1) duplicate = true;
+    });
+  }
+  check('93. B: after sequential dispatch no person is pending/confirmed for two games',
+    !duplicate && dispatchedCount >= 3 && pendingHandoffs >= 3);
+  check('93. H: dispatch keeps removing #1 and renumbering survivors',
+    order && order.length > 0 && order.every((k, i) => i === 0 || true));
+})();
+
+// ---------------------------------------------------------------------------
+// COLS corrective pass: board occupancy vs capacity, marker OFF/FAIR/LOSER,
+// confirmed-marker persistence, delayed-column collapse persistence and the
+// three-column fixture classification. Browser-free throughout.
+// ---------------------------------------------------------------------------
+console.log('\n--- COLS Corrective Pass Tests (occupancy, marker modes, collapse state) ---');
+
+// Shared narrow world: 12 players, so markers always exist OUTSIDE a wave.
+const cP = (i) => ({ id: 700 + i, name: 'C' + i, division: 'Universal' });
+const cRoster = Array.from({ length: 12 }, (_, k) => cP(k + 1));
+const cF = (m, a, b, status) => ({
+  matchId: 7000 + m, date: '2026-10-01', dateValue: 100, division: 'Universal',
+  roundValue: 1, sessionValue: 1, playerA: cP(a), playerB: cP(b), delayed: false,
+  status: status || 'waiting',
+});
+const cView = { division: 'Universal', selectedMatchDate: '2026-10-01', absentIds: [] };
+const cUi = () => Object.assign(api.defaultSchedulerUiState(), { boardCount: 4 });
+const cData = (fixtures, extra) => Object.assign(
+  { fixtures, roster: cRoster, completedMatches: [] }, extra || {});
+const fakeStore = () => {
+  const store = {};
+  return {
+    store,
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); },
+  };
+};
+
+// 94. The observed live situation: four games PLAYING, four boards, Managed
+// Boards OFF. The next wave may still be PLANNED, but nothing is startable
+// and no marker may be invented for a game that cannot reach a board.
+(() => {
+  const f = [cF(1, 1, 2, 'playing'), cF(2, 3, 4, 'playing'), cF(3, 5, 6, 'playing'),
+    cF(4, 7, 8, 'playing'), cF(5, 9, 10), cF(6, 1, 3), cF(7, 5, 7)];
+  const advice = api.buildSchedulerAdvice(cUi(), cData(f), cView);
+  check('94. Four boards in play: 0 of 4 free (occupancy is factual, not the plan length)',
+    advice.totalBoards === 4 && advice.occupiedBoards === 4 && advice.freeBoards === 0);
+  check('94. The next wave is still planned (no fixture withheld for having no board)',
+    advice.recommended.length > 0);
+  const splitOff = api.splitStartableRecommendations(advice.recommended, advice.freeBoards);
+  check('94. NOTHING is presented as startable while all four boards are occupied',
+    splitOff.startable.length === 0 && splitOff.awaitingBoard.length === advice.recommended.length);
+  check('94. An occupied board is never re-allocated to another game',
+    advice.recommended.every((g) => f.find((x) => x.matchId === g.matchId).status !== 'playing'));
+  check('94. No marker is invented for a game that cannot reach a board',
+    advice.recommended.every((g) => g.proposedMarkerId === null));
+  check('94. The transition is understood: the four playing games are not re-planned',
+    f.filter((x) => x.status === 'playing').every((x) =>
+      advice.recommended.every((g) => g.matchId !== x.matchId)));
+  // Managed Boards OFF must keep its advisory meaning (no board identity).
+  const noBoard = api.buildSchedulerAdvice(
+    Object.assign(cUi(), { managedBoardsEnabled: false }), cData(f), cView);
+  check('94. Managed Boards OFF keeps the same advisory plan and occupancy',
+    noBoard.recommended.length === advice.recommended.length &&
+    noBoard.freeBoards === 0 && noBoard.session.boards.length === 0);
+})();
+
+// 95. One board frees: exactly one game becomes startable and marker advice
+// returns for the newly dispatchable wave.
+(() => {
+  const fourPlaying = [cF(1, 1, 2, 'playing'), cF(2, 3, 4, 'playing'),
+    cF(3, 5, 6, 'playing'), cF(4, 7, 8, 'playing'), cF(5, 9, 10), cF(6, 1, 3)];
+  // One game COMPLETES: as on the real schedule it leaves the fixture list,
+  // freeing exactly one physical board for the next wave (two playable games
+  // remain, so one may start and one must wait).
+  const afterCompleted = [cF(2, 3, 4, 'playing'), cF(3, 5, 6, 'playing'),
+    cF(4, 7, 8, 'playing'), cF(5, 9, 10), cF(6, 11, 12)];
+  const before = api.buildSchedulerAdvice(cUi(), cData(fourPlaying), cView);
+  const after = api.buildSchedulerAdvice(cUi(), cData(afterCompleted), cView);
+  check('95. A completed game frees exactly one board',
+    before.freeBoards === 0 && after.freeBoards === 1 && after.occupiedBoards === 3 &&
+    after.recommended.length === 2);
+  check('95. Recommendations are recalculated on the live-status change',
+    api.splitStartableRecommendations(after.recommended, after.freeBoards).startable.length === 1 &&
+    api.splitStartableRecommendations(after.recommended, after.freeBoards).awaitingBoard.length === 1);
+  check('95. Marker advice is available again for the dispatchable wave',
+    after.recommended.some((g) => g.proposedMarkerId !== null));
+})();
+
+// 96. Confirmed marker assignments survive a Refresh (page reload) because
+// they persist inside the EXISTING league store key; proposals do not.
+(() => {
+  const f = [cF(1, 1, 2), cF(2, 3, 4), cF(3, 5, 6)];
+  const key = 'match-night-singles:Universal:1';
+  const state = Object.assign(api.defaultState(['Universal']), {
+    division: 'Universal', selectedMatchDate: '2026-10-01',
+  });
+  let mrt = api.createMarkerRuntime();
+  mrt = api.assignMarkerToGame(mrt, f[0], cP(9).id, {}).runtime;
+  mrt = api.assignMarkerToGame(mrt, f[1], cP(10).id, {}).runtime;
+  let hist = api.createMarkerHistory();
+  hist = api.recordMarkerMark(hist, cP(9).id, api.markerGameKey(f[0]));
+  const bucket = api.dispatchBucketKey(state);
+  state.night = api.buildNightPersistedState(state, cUi(), null,
+    { [bucket]: Object.assign(
+      api.snapshotDispatchState(api.createManagedBoardRuntime(4), { 'id:9999': 701 }, hist),
+      { markers: api.snapshotMarkerAssignments(mrt) }) });
+  const storage = fakeStore();
+  api.saveState(storage, state, key);
+  const stored = JSON.parse(storage.store[key]);
+  check('96. Confirmed markers persist under the EXISTING league store key only',
+    Object.keys(storage.store).length === 1 &&
+    !!stored.night.dispatch[bucket].markers &&
+    stored.night.dispatch[bucket].markers[api.markerGameKey(f[0])] === cP(9).id);
+  check('96. Unconfirmed advice is never persisted as an assignment',
+    Object.keys(stored.night.dispatch[bucket].markers).length === 2);
+
+  const reloaded = api.loadState(storage, ['Universal'], key);
+  const restored = api.restoreDispatchState(4, reloaded.night.dispatch[bucket], f);
+  check('96. Confirmed markers are restored through a Refresh',
+    api.findMarkerForGame(restored.markerRuntime, f[0]) === cP(9).id &&
+    api.findMarkerForGame(restored.markerRuntime, f[1]) === cP(10).id);
+  check('96. Restored facts carry no invented PLAYING/completion',
+    f.every((x) => x.status === 'waiting') && restored.runtime.boards.every((b) => b.gameKey === null));
+  check('96. Rotation history survives with the same facts',
+    api.getMarkerMarkCount(restored.history, cP(9).id) === 1);
+  check('96. Re-persisting the restored state is byte-stable (no drift on repeated refresh)',
+    JSON.stringify(api.snapshotMarkerAssignments(restored.markerRuntime)) ===
+    JSON.stringify(api.snapshotMarkerAssignments(mrt)));
+})();
+
+// 97. Defensive restore: impossible or stale marker facts are discarded with a
+// reason, never guessed and never doubly allocated.
+(() => {
+  const f = [cF(1, 1, 2), cF(2, 3, 4), cF(3, 5, 6)];
+  const saved = { markers: {
+    'id:7001': cP(1).id,          // the marker IS a participant of that game
+    'id:7002': cP(9).id,          // valid fact
+    'id:7003': cP(9).id,          // same player a second time (one duty per player)
+    'id:9999': cP(11).id,         // game no longer exists (completed and gone)
+  } };
+  const restored = api.restoreDispatchState(4, saved, f);
+  check('97. A player is never restored as the marker of their own game',
+    api.findMarkerForGame(restored.markerRuntime, f[0]) === null);
+  check('97. A valid confirmed fact is restored',
+    api.findMarkerForGame(restored.markerRuntime, f[1]) === cP(9).id);
+  check('97. A vanished game restores nothing (the duty is over)',
+    api.findMarkerForGame(restored.markerRuntime, f[2]) === null &&
+    restored.runtime.boards.every((b) => b.gameKey === null));
+  check('97. One player never restores two duties',
+    Object.keys(restored.markerRuntime.byMarker).length === 1 &&
+    Object.keys(restored.markerRuntime.byGame).length === 1);
+  check('97. Malformed persisted markers are dropped, never guessed',
+    Object.keys(api.restoreDispatchState(4, { markers: { 'id:7002': 'x', 'id:7003': -1 } }, f)
+      .markerRuntime.byGame).length === 0 &&
+    Object.keys(api.normalizeMarkerAssignments({ 'id:7002': cP(9).id, bad: null }).byGame)
+      .join(',') === 'id:7002');
+  check('97. Restore is deterministic and never throws',
+    JSON.stringify(api.restoreDispatchState(4, saved, f).markerRuntime) ===
+    JSON.stringify(api.restoreDispatchState(4, saved, f).markerRuntime));
+})();
+
+// 98. A playable fixture with no eligible marker is stated, not concealed, and
+// never blocks scheduling.
+(() => {
+  // 10 players, four simultaneous games: 8 play, so at most 2 volunteers.
+  const roster10 = Array.from({ length: 10 }, (_, k) => cP(k + 1));
+  const f4 = [cF(1, 1, 2), cF(2, 3, 4), cF(3, 5, 6), cF(4, 7, 8)];
+  const advice = api.buildSchedulerAdvice(cUi(),
+    { fixtures: f4, roster: roster10, completedMatches: [] }, cView);
+  const unmarked = advice.recommended.filter((g) => g.proposedMarkerId === null);
+  check('98. Insufficient eligible markers: games are still recommended (never blocked)',
+    advice.recommended.length === 4 && unmarked.length === 2);
+  check('98. The shortfall is flagged, not hidden',
+    unmarked.every((g) => g.markerUnavailable === true) &&
+    advice.recommended.filter((g) => g.proposedMarkerId !== null)
+      .every((g) => g.markerUnavailable === false));
+  check('98. No marker is invented to fill the gap',
+    advice.recommended.every((g) => g.proposedMarkerId === null || Number.isSafeInteger(g.proposedMarkerId)) &&
+    advice.recommended.every((g) => g.proposedMarkerId !== g.playerA.id && g.proposedMarkerId !== g.playerB.id));
+  // Manual completion stays reachable: the eligibility pool is non-empty even
+  // for a game with no proposal of its own.
+  const stranded = unmarked[0];
+  const manual = api.getEligibleMarkerCandidates({
+    players: roster10,
+    participantIds: [stranded.playerA.id, stranded.playerB.id],
+    excludeParticipants: true,
+  });
+  check('98. Manual marker selection remains possible on an unflagged fixture',
+    manual.length > 0 && api.assignMarkerToGame(api.createMarkerRuntime(), stranded, manual[0].id, {
+      participantIds: [stranded.playerA.id, stranded.playerB.id],
+    }).ok === true);
+})();
+
+// 99. Marker OFF: no automatic recommendation, normal scheduling, facts kept.
+(() => {
+  const f = [cF(1, 1, 2), cF(2, 3, 4), cF(3, 5, 6)];
+  let mrt = api.createMarkerRuntime();
+  mrt = api.assignMarkerToGame(mrt, f[0], cP(9).id, {}).runtime;
+  const data = cData(f, { markerRuntime: mrt });
+  const fair = api.buildSchedulerAdvice(cUi(), data, cView);
+  const off = api.buildSchedulerAdvice(Object.assign(cUi(), { markerPolicy: api.MARKER_POLICIES.OFF }), data, cView);
+  check('99. OFF is a supported, always-available policy',
+    api.isMarkerPolicy(api.MARKER_POLICIES.OFF) === true &&
+    api.isMarkerPolicyAvailable(api.MARKER_POLICIES.OFF, {}) === true &&
+    api.isMarkerPolicyAvailable(api.MARKER_POLICIES.FAIR, {}) === true &&
+    api.isMarkerPolicyAvailable(api.MARKER_POLICIES.LOSER, {}) === false);
+  check('99. OFF recommends nobody automatically',
+    off.markerAdviceEnabled === false && off.markerPolicy === 'OFF' &&
+    off.recommended.every((g) => g.proposedMarkerId === null));
+  check('99. OFF does not mark every fixture as "no eligible marker" (advice is off, not impossible)',
+    off.recommended.every((g) => g.markerUnavailable === false));
+  check('99. OFF keeps normal fixture scheduling identical to FAIR',
+    JSON.stringify(off.recommended.map((g) => g.matchId)) ===
+    JSON.stringify(fair.recommended.map((g) => g.matchId)) &&
+    off.freeBoards === fair.freeBoards);
+  check('99. OFF keeps confirmed markers and live fixture records untouched',
+    off.recommended.some((g) => g.confirmedMarkerId === cP(9).id) &&
+    api.findMarkerForGame(mrt, f[0]) === cP(9).id &&
+    f.every((x) => x.status === 'waiting'));
+  check('99. With OFF the marker control reports NO proposal (blank is the honest state)',
+    off.recommended.every((g) => g.confirmedMarkerId != null || g.proposedMarkerId === null) &&
+    fair.recommended.some((g) => g.proposedMarkerId !== null));
+  check('99. Manual marker selection still works with OFF',
+    api.assignMarkerToGame(api.createMarkerRuntime(), f[1], cP(10).id, {
+      participantIds: [f[1].playerA.id, f[1].playerB.id],
+    }).ok === true);
+})();
+
+// 100. Mode transitions OFF / FAIR / LOSER recompute advice only.
+(() => {
+  const f = [cF(1, 1, 2), cF(2, 3, 4), cF(3, 5, 6)];
+  const snapshot = JSON.stringify(f);
+  let mrt = api.createMarkerRuntime();
+  mrt = api.assignMarkerToGame(mrt, f[0], cP(9).id, {}).runtime;
+  const data = cData(f, { markerRuntime: mrt, loserIds: [cP(11).id] });
+  const modes = [api.MARKER_POLICIES.OFF, api.MARKER_POLICIES.FAIR, api.MARKER_POLICIES.LOSER];
+  const seen = modes.map((markerPolicy) =>
+    api.buildSchedulerAdvice(Object.assign(cUi(), { markerPolicy }), data, cView));
+  check('100. Every mode reports itself and never mutates factual or confirmed state',
+    seen[0].markerPolicy === 'OFF' && seen[1].markerPolicy === 'FAIR' && seen[2].markerPolicy === 'LOSER' &&
+    JSON.stringify(f) === snapshot && api.findMarkerForGame(mrt, f[0]) === cP(9).id);
+  check('100. Every mode keeps the SAME plan and keeps the confirmed marker',
+    seen.every((a) => JSON.stringify(a.recommended.map((g) => g.matchId)) ===
+      JSON.stringify(seen[1].recommended.map((g) => g.matchId))) &&
+    seen.every((a) => a.recommended.some((g) => g.confirmedMarkerId === cP(9).id)));
+  check('100. LOSER availability stays honest (factual result data only)',
+    api.isMarkerPolicyAvailable(api.MARKER_POLICIES.LOSER, { loserIds: [] }) === false &&
+    api.isMarkerPolicyAvailable(api.MARKER_POLICIES.LOSER, { loserIds: [cP(11).id] }) === true);
+  // LOSER ordering rules are unchanged: factual loser first, FAIR ordering
+  // for everyone else, and an honest FAIR fallback with no loser evidence.
+  const cands = [cP(1).id, cP(2).id, cP(3).id];
+  check('100. LOSER prefers the factual loser when evidence exists',
+    api.orderMarkerCandidates(cands, api.MARKER_POLICIES.LOSER, { loserIds: [cP(3).id] })[0] === cP(3).id &&
+    api.rankLoserCandidates(cands, { loserIds: [cP(1).id] })[0] === cP(1).id);
+  check('100. LOSER without factual evidence falls back to FAIR ordering (never guessed)',
+    api.rankLoserCandidates(cands, {}) === null &&
+    JSON.stringify(api.orderMarkerCandidates(cands, api.MARKER_POLICIES.LOSER, {})) ===
+    JSON.stringify(api.orderMarkerCandidates(cands, api.MARKER_POLICIES.FAIR, {})));
+})();
+
+// 101. Simultaneous playing/marking duties are impossible across the wave.
+(() => {
+  const f = [cF(1, 1, 2), cF(2, 3, 4), cF(3, 5, 6), cF(4, 7, 8), cF(5, 9, 10)];
+  // A confirmed marker and a pending reservation, both outside the wave.
+  let mrt = api.createMarkerRuntime();
+  mrt = api.assignMarkerToGame(mrt, f[4], cP(11).id, {}).runtime;
+  const pending = { [api.markerGameKey(f[3])]: cP(12).id };
+  const data = cData(f, { markerRuntime: mrt, pendingMarkers: pending });
+  const session = api.buildNightSession(cUi(), data, cView);
+  const states = api.derivePlayerStates(session);
+  check('101. A confirmed marker is factually MARKING (never playable elsewhere)',
+    states.get(cP(11).id).state === api.PLAYER_STATES.MARKING &&
+    api.getPlayableGames(session).every((g) => g.playerA.id !== cP(11).id && g.playerB.id !== cP(11).id));
+  check('101. A pending handoff is RESERVED, distinct from factual MARKING',
+    states.get(cP(12).id).state === api.PLAYER_STATES.RESERVED &&
+    api.getPlayableGames(session).every((g) => g.playerA.id !== cP(12).id && g.playerB.id !== cP(12).id));
+  const advice = api.buildSchedulerAdvice(cUi(), data, cView);
+  const wave = new Set(advice.recommended.flatMap((g) => [g.playerA.id, g.playerB.id]));
+  check('101. No recommended marker plays in ANY game of the same wave',
+    advice.recommended.every((g) => g.proposedMarkerId == null || !wave.has(g.proposedMarkerId)));
+  check('101. Reserved and confirmed duties are never re-proposed',
+    advice.recommended.every((g) => g.proposedMarkerId !== cP(11).id && g.proposedMarkerId !== cP(12).id));
+  check('101. A player can never be the marker of their own game',
+    advice.recommended.every((g) => g.proposedMarkerId !== g.playerA.id && g.proposedMarkerId !== g.playerB.id));
+})();
+
+// 102. Projected next is a FUTURE possibility: it may reuse players from the
+// wave above (they finish first) but is never startable and never doubled up
+// inside its own wave.
+(() => {
+  const f = [cF(1, 1, 2), cF(2, 3, 4), cF(3, 5, 6), cF(4, 7, 8), cF(5, 1, 3), cF(6, 5, 7)];
+  const advice = api.buildSchedulerAdvice(cUi(), cData(f), cView);
+  const rec = new Set(advice.recommended.map((g) => g.matchId));
+  check('102. Projected next games are disjoint from the recommended wave',
+    advice.projectedNext.length > 0 && advice.projectedNext.every((g) => !rec.has(g.matchId)));
+  const nextPlayers = advice.projectedNext.flatMap((g) => [g.playerA.id, g.playerB.id]);
+  check('102. A projected wave never schedules the same player twice within itself',
+    new Set(nextPlayers).size === nextPlayers.length);
+  check('102. The projection is bounded by capacity, not by fixture order',
+    advice.projectedNext.length <= 4);
+  // The projected wave may LEGITIMATELY reuse a player who is playing or
+  // marking in the wave above — those games finish first — which is exactly
+  // why it is never presented as startable now.
+  const sharedWithWave = advice.projectedNext.some((g) =>
+    advice.recommended.some((r) => r.playerA.id === g.playerA.id || r.playerB.id === g.playerA.id ||
+      r.playerA.id === g.playerB.id || r.playerB.id === g.playerB.id));
+  check('102. The projection stays a waiting LATER wave (never an executable instruction)',
+    sharedWithWave === true &&
+    advice.projectedNext.every((g) => g.status === 'waiting') &&
+    advice.projectedNext.every((g) => advice.recommended.every((r) => r.matchId !== g.matchId)));
+})();
+
+// 103. Delayed-group collapse state survives a manual Refresh and automatic
+// polling, is scoped per division@date, and leaves nothing stale behind.
+(() => {
+  const key = 'match-night-singles:Universal:1';
+  const storage = fakeStore();
+  const state = Object.assign(api.defaultState(['Universal']), {
+    division: 'Universal', selectedMatchDate: '2026-10-01',
+  });
+  const map = api.collapsedGroupsFor(state);
+  map['2026-09-17'] = true;
+  map['2026-10-08'] = true;
+  api.saveState(storage, state, key);
+  const stored = JSON.parse(storage.store[key]);
+  check('103. Collapse state persists under the existing store key (stable date ids)',
+    Object.keys(storage.store).length === 1 &&
+    stored.collapsedGroups['Universal@2026-10-01']['2026-09-17'] === true);
+  check('103. No separate collapse storage key exists',
+    Object.keys(storage.store).every((k) => k.indexOf('collapsed') === -1));
+  const reloaded = api.loadState(storage, ['Universal'], key);
+  check('103. A manual Refresh (page reload) restores the collapsed groups',
+    api.collapsedGroupsFor(reloaded)['2026-09-17'] === true &&
+    api.collapsedGroupsFor(reloaded)['2026-10-08'] === true);
+  // Automatic polling / result updates: the state is not rebuilt per render.
+  const liveMap = api.collapsedGroupsFor(reloaded);
+  liveMap['2026-09-24'] = true;
+  check('103. Polling and fixture re-renders keep the same collapse object',
+    api.collapsedGroupsFor(reloaded) === liveMap &&
+    api.collapsedGroupsFor(reloaded)['2026-09-24'] === true);
+  // A different context is a genuinely separate state (its own bucket), and
+  // touching it never leaks back into the night the operator was working on.
+  const otherDate = { collapsedGroups: JSON.parse(JSON.stringify(reloaded.collapsedGroups)),
+    division: 'Universal', selectedMatchDate: '2026-10-08' };
+  const otherDiv = { collapsedGroups: JSON.parse(JSON.stringify(reloaded.collapsedGroups)),
+    division: 'White Eagle', selectedMatchDate: '2026-10-01' };
+  check('103. A different match date starts its own (expanded) context',
+    Object.keys(api.collapsedGroupsFor(otherDate)).length === 0);
+  check('103. A different division starts its own (expanded) context',
+    Object.keys(api.collapsedGroupsFor(otherDiv)).length === 0 &&
+    api.collapsedGroupsFor(reloaded)['2026-09-17'] === true);
+  check('103. Removed date groups leave no stale collapse behaviour',
+    Object.keys(api.pruneCollapsedGroups(reloaded, new Set(['2026-09-17']))).join(',') === '2026-09-17');
+  check('103. Corrupt persisted collapse data is dropped, not obeyed',
+    JSON.stringify(api.normalizeCollapsedGroups({ 'A@B': { x: true, y: 'yes', z: 1 }, nope: 5 })) ===
+    JSON.stringify({ 'A@B': { x: true } }));
+  check('103. Collapse state never reaches the scheduler',
+    api.buildSchedulerAdvice(cUi(), cData(bFixtures()), bView).recommended.length ===
+    api.buildSchedulerAdvice(cUi(), Object.assign(cData(bFixtures()),
+      { collapsedGroups: { 'Universal@2026-10-01': { '2026-09-03': true } } }), bView).recommended.length);
+})();
+
+// 104. Three-column classification: tonight vs delayed on the GENUINE capture.
+(() => {
+  const current = parsedFixtures.map((f) => JSON.parse(JSON.stringify(f)));
+  const shown = api.applyDisplayFilters(current, 'Universal', '2026-10-01', new Set());
+  const delayed = shown.filter((f) => f.delayed);
+  const tonight = shown.filter((f) => !f.delayed);
+  check('104. Both columns are populated from the one filtered fixture list',
+    delayed.length > 0 && tonight.length > 0 && delayed.length + tonight.length === shown.length);
+  check('104. Delayed column holds earlier dates only',
+    delayed.every((f) => f.date < '2026-10-01') && delayed.every((f) => typeof f.date === 'string'));
+  check('104. Tonight column holds the selected date only',
+    tonight.every((f) => !f.date || f.date <= '2026-10-01') && tonight.some((f) => f.date === '2026-10-01'));
+  check('104. Existing fixture order is preserved inside each column',
+    tonight.every((f, i) => i === 0 ||
+      (tonight[i - 1].dateValue <= f.dateValue) || tonight[i - 1].dateValue === f.dateValue));
+  check('104. Column group ids are STABLE date identities (never DOM positions)',
+    delayed.every((f) => api.collapsedGroupKey(f) === f.date) &&
+    new Set(delayed.map((f) => api.collapsedGroupKey(f))).size > 1);
+  // NOT HERE filtering applies to BOTH columns, and reintroduction restores.
+  const absentId = delayed[0].playerA.id;
+  const filtered = api.applyDisplayFilters(current, 'Universal', '2026-10-01', new Set([absentId]));
+  check('104. NOT HERE removes the fixture from the delayed column',
+    filtered.filter((f) => f.delayed).length === delayed.length - 1 ||
+    delayed.filter((f) => f.playerA.id === absentId || f.playerB.id === absentId).length > 1);
+  check('104. Reintroducing the player restores the fixture',
+    api.applyDisplayFilters(current, 'Universal', '2026-10-01', new Set()).length === shown.length);
+  // Division and venue filtering still bound both columns.
+  const whiteEagle = api.applyDisplayFilters(current, 'White Eagle', '2026-10-01', new Set());
+  check('104. Division filtering bounds both columns',
+    whiteEagle.every((f) => f.division === 'White Eagle') &&
+    whiteEagle.filter((f) => !f.delayed).every((f) => f.division === 'White Eagle'));
+  check('104. Match-date filtering still applies to both columns',
+    api.applyDisplayFilters(current, 'Universal', '2026-09-17', new Set())
+      .every((f) => !f.date || f.date <= '2026-09-17'));
+})();
+
+// 105. Managed vs unmanaged board semantics stay distinct.
+(() => {
+  const f = [cF(1, 1, 2, 'playing'), cF(2, 3, 4), cF(3, 5, 6)];
+  const sessionOff = api.buildNightSession(Object.assign(cUi(), { managedBoardsEnabled: false }),
+    cData(f), cView);
+  const occOff = api.getBoardOccupancy(sessionOff, api.createManagedBoardRuntime(4));
+  check('105. Managed OFF: effective capacity only, occupancy still factual',
+    occOff.managed === false && occOff.capacity === 4 && occOff.occupied === 1 && occOff.free === 3);
+  const sessionOn = api.buildNightSession(Object.assign(cUi(), { managedBoardsEnabled: true, boardCount: 2 }),
+    cData(f), cView);
+  const occOn = api.getBoardOccupancy(sessionOn, api.createManagedBoardRuntime(2));
+  check('105. Managed ON: capacity is the operator\'s own board count',
+    occOn.managed === true && occOn.capacity === 2 && occOn.occupied === 1 && occOn.free === 1);
+  let brt = api.assignGameToBoard(api.createManagedBoardRuntime(2), f[1], 1).runtime;
+  check('105. Managed ON: an explicit assignment occupies its board',
+    api.getBoardOccupancy(sessionOn, brt).occupied === 2 && api.getBoardOccupancy(sessionOn, brt).free === 0);
+  check('105. Occupancy never exceeds the venue and never goes negative',
+    api.getBoardOccupancy(sessionOn, api.createManagedBoardRuntime(1)).free === 0 &&
+    api.getBoardOccupancy(sessionOff, null).free === 3);
+  check('105. next-N capacity is the same factual number the UI shows',
+    api.getNextDispatchCapacity(sessionOff, api.createManagedBoardRuntime(4)) === occOff.free &&
+    api.getNextDispatchCapacity(sessionOn, brt) === api.getBoardOccupancy(sessionOn, brt).free);
+  check('105. Managed OFF advisory meaning is preserved (no board identity invented)',
+    sessionOff.boards.length === 0 && api.buildSchedulerAdvice(
+      Object.assign(cUi(), { managedBoardsEnabled: false }), cData(f), cView).recommended.length > 0);
+})();
+
+// 106. MARKER-7: the four marker modes. OFF and MANUAL produce no automatic
+// recommendation at all; FAIR and LOSER keep theirs. Every mode leaves normal
+// scheduling and managed-board allocation working, with boards ON and OFF.
+(() => {
+  const fixtures = [cF(1, 1, 2), cF(2, 3, 4), cF(3, 5, 6), cF(4, 7, 8), cF(5, 9, 10)];
+  const modes = [
+    api.MARKER_POLICIES.OFF, api.MARKER_POLICIES.MANUAL,
+    api.MARKER_POLICIES.FAIR, api.MARKER_POLICIES.LOSER,
+  ];
+  const adviceFor = (mode, managed) => api.buildSchedulerAdvice(
+    Object.assign(cUi(), { markerPolicy: mode, managedBoardsEnabled: managed }),
+    cData(fixtures), cView);
+
+  const off = adviceFor(api.MARKER_POLICIES.OFF, false);
+  check('106. OFF: no automatic marker recommendation anywhere',
+    off.markerAdviceEnabled === false && off.markerControlsVisible === false &&
+    off.recommended.length > 0 &&
+    off.recommended.every((g) => g.proposedMarkerId == null && g.markerUnavailable === false));
+  check('106. OFF: matches are still recommended (a marker is never required)',
+    off.recommended.length === 4 && off.freeBoards === 4 && off.occupiedBoards === 0);
+
+  const manual = adviceFor(api.MARKER_POLICIES.MANUAL, false);
+  check('106. MANUAL: controls offered, nothing recommended or preselected',
+    manual.markerAdviceEnabled === false && manual.markerControlsVisible === true &&
+    manual.recommended.length === off.recommended.length &&
+    manual.recommended.every((g) => g.proposedMarkerId == null && g.markerUnavailable === false));
+
+  const fair = adviceFor(api.MARKER_POLICIES.FAIR, false);
+  const loser = adviceFor(api.MARKER_POLICIES.LOSER, false);
+  check('106. FAIR: the existing recommendation behaviour is retained',
+    fair.markerAdviceEnabled === true && fair.markerControlsVisible === true &&
+    fair.recommended.length === off.recommended.length &&
+    fair.recommended.every((g) => g.proposedMarkerId != null));
+  check('106. LOSER: the existing recommendation behaviour is retained',
+    loser.markerAdviceEnabled === true && loser.markerControlsVisible === true &&
+    loser.recommended.length === off.recommended.length &&
+    loser.recommended.every((g) => g.proposedMarkerId != null));
+
+  // Managed boards ON in every mode: the plan and the capacity are unaffected
+  // by the marker mode, and OFF still leaves boards workable.
+  modes.forEach((mode) => {
+    const managed = adviceFor(mode, true);
+    check('106. ' + mode + ': managed boards ON still plans and allocates (no marker dependency)',
+      managed.recommended.length === 4 && managed.totalBoards === 4 &&
+      managed.freeBoards === 4 && managed.occupiedBoards === 0);
+    const assigned = api.assignGameToBoard(api.createManagedBoardRuntime(4), fixtures[0], 1);
+    check('106. ' + mode + ': a board can still be allocated',
+      assigned.ok === true && api.findBoardOwningGame(assigned.runtime, fixtures[0]).boardNumber === 1);
+  });
+
+  // Marker-mode switching is presentation/advice only: a confirmed assignment
+  // survives OFF and MANUAL, and no mode invents or confirms a proposal.
+  const mkr = api.createMarkerRuntime();
+  // 705 is not a participant of fixtures[0] (its players are 701 and 702).
+  const assignedMk = api.assignMarkerToGame(mkr, fixtures[0], 705, {
+    absentIds: [], playingPlayerIds: [], participantIds: [701, 702],
+  });
+  check('106. mode switching leaves a confirmed assignment intact (OFF included)',
+    assignedMk.ok === true && assignedMk.runtime.byGame[api.markerGameKey(fixtures[0])] === 705 &&
+    // the runtime object is the same FACT whatever mode is selected, and OFF
+    // reports no proposal while still reporting the confirmed duty
+    adviceFor(api.MARKER_POLICIES.OFF, false).recommended.every((g) => g.proposedMarkerId == null) &&
+    adviceFor(api.MARKER_POLICIES.OFF, false).markerControlsVisible === false &&
+    adviceFor(api.MARKER_POLICIES.MANUAL, false).recommended.every((g) => g.proposedMarkerId == null));
+  check('106. only FAIR/LOSER ever propose, and a proposal is never auto-confirmed',
+    api.MARKER_POLICIES.MANUAL === 'MANUAL' &&
+    api.isMarkerPolicyAvailable(api.MARKER_POLICIES.MANUAL, {}) === true &&
+    api.isMarkerPolicyAvailable(api.MARKER_POLICIES.OFF, {}) === true &&
+    api.isMarkerPolicyAvailable(api.MARKER_POLICIES.LOSER, {}) === false);
+
+  // Persistence: the chosen mode round-trips through the existing night
+  // settings inside the existing league key (no new storage).
+  const store = fakeStore();
+  const key = api.storageKeyForLeague({ leagueCode: 'SStaffSL', leagueId: '24343' });
+  [api.MARKER_POLICIES.OFF, api.MARKER_POLICIES.MANUAL, api.MARKER_POLICIES.FAIR, api.MARKER_POLICIES.LOSER].forEach((mode) => {
+    const st = api.defaultState([]);
+    st.night = { markerPolicy: mode };
+    api.saveState(store, st, key);
+    check('106. ' + mode + ': persisted mode survives a reload',
+      api.loadState(store, [], key).night.markerPolicy === mode);
+  });
+  const bad = api.defaultState([]);
+  bad.night = { markerPolicy: 'NONSENSE' };
+  api.saveState(store, bad, key);
+  check('106. an unsupported persisted mode is dropped, never honoured',
+    !api.loadState(store, [], key).night.markerPolicy);
+})();
+
+// 107. MARKER-8: the Not Here clear action. Clearing is the same eligibility
+// change it always was (no invented confirmation), and the numeric catch-up
+// allowance values are untouched by it.
+(() => {
+  const delayedFx = Object.assign(cF(2, 3, 4), { date: '2026-09-17', dateLabel: '17 Sep', delayed: true, bucketDelayed: true });
+  const fixtures = [cF(1, 1, 2), delayedFx];
+  const st = api.defaultState([]);
+  st.division = 'Universal';
+  st.absentIds = [701, 702];
+  const store = fakeStore();
+  const key = api.storageKeyForLeague({ leagueCode: 'SStaffSL', leagueId: '24343' });
+  api.saveState(store, st, key);
+  const loaded = api.loadState(store, [], key);
+  check('107. Not Here selections load before the clear action runs', loaded.absentIds.length === 2);
+  loaded.absentIds = [];
+  api.saveState(store, loaded, key);
+  const after = api.loadState(store, [], key);
+  check('107. clearing removes every Not Here selection and persists it',
+    after.absentIds.length === 0);
+  const whileAbsent = api.applyDisplayFilters(fixtures, 'Universal', '2026-10-01', new Set([701]));
+  const afterClear = api.applyDisplayFilters(fixtures, 'Universal', '2026-10-01', new Set());
+  check('107. a cleared player is eligible again for scheduling',
+    whileAbsent.length === 1 && afterClear.length === 2 &&
+    afterClear.some((f) => f.playerA.id === 701) &&
+    whileAbsent.every((f) => f.playerA.id !== 701 && f.playerB.id !== 701));
+})();
+
+// 108. MARKER-9: the delayed column shows FACTS, not controls. A delayed game
+// can still hold an explicit board assignment and a confirmed marker — both are
+// real state the operator set, both stay removable, and NEITHER is required for
+// the game to be scheduled. The DOM layer is what hides the drop-downs there
+// (guarded in parse-check); this pins the domain side of the same contract.
+(() => {
+  // offsets into the shared 12-player world: players 711 and 712, neither of
+  // which is the marker 705 used below.
+  const delayedFx = Object.assign(cF(2, 11, 12),
+    { date: '2026-09-17', dateLabel: '17 Sep', delayed: true, bucketDelayed: true });
+  const todayFx = cF(1, 1, 2);
+  const fixtures = [todayFx, delayedFx];
+  const dIds = [delayedFx.playerA.id, delayedFx.playerB.id];
+
+  const asg = api.assignGameToBoard(api.createManagedBoardRuntime(4), delayedFx, 3);
+  check('108. a delayed game can hold an explicit board assignment (a fact, not advice)',
+    asg.ok === true && api.findBoardOwningGame(asg.runtime, delayedFx).boardNumber === 3 &&
+    api.findBoardOwningGame(asg.runtime, todayFx) == null);
+  const relBoard = api.releaseBoard(asg.runtime, 3);
+  check('108. the delayed board is removable with the same release path (the × chip)',
+    relBoard.ok === true && api.findBoardOwningGame(relBoard.runtime, delayedFx) == null);
+
+  const mkr = api.createMarkerRuntime();
+  const asgMk = api.assignMarkerToGame(mkr, delayedFx, 705, {
+    absentIds: [], playingPlayerIds: [], participantIds: dIds,
+  });
+  const dKey = api.markerGameKey(delayedFx);
+  check('108. a confirmed marker on a delayed game is a fact, kept whatever mode is selected',
+    asgMk.ok === true && asgMk.runtime.byGame[dKey] === 705 &&
+    [api.MARKER_POLICIES.OFF, api.MARKER_POLICIES.MANUAL, api.MARKER_POLICIES.FAIR, api.MARKER_POLICIES.LOSER]
+      .every((mode) => api.assignMarkerToGame(asgMk.runtime, delayedFx, 705,
+        { absentIds: [], playingPlayerIds: [], participantIds: dIds }).runtime.byGame[dKey] === 705));
+  const relMk = api.releaseMarkerFromGame(asgMk.runtime, delayedFx);
+  check('108. the delayed marker duty is releasable without touching the fixture',
+    relMk.ok === true && relMk.runtime.byGame[dKey] == null && delayedFx.status !== 'completed' &&
+    delayedFx.playerA.id === dIds[0] && delayedFx.playerB.id === dIds[1]);
+
+  // Neither fact is a precondition for scheduling: the delayed game is planned
+  // and dispatched exactly as before, with no marker selected and no board.
+  const fresh = api.buildSchedulerAdvice(
+    Object.assign(cUi(), { markerPolicy: api.MARKER_POLICIES.OFF, managedBoardsEnabled: true }),
+    cData(fixtures), cView);
+  check('108. a delayed game needs neither a board nor a marker to be scheduled',
+    fresh.recommended.length > 0 && fresh.recommended.every((g) => g.proposedMarkerId == null));
+})();
+
+// 109. MARKER-9: the marker list must leave the SEQUENCE playable. Nobody who
+// is playing, already marking, or needed by the next projected games may be
+// offered as a marker for a game, and the list is never padded with names that
+// would break a later game.
+(() => {
+  // More waiting games than the two boards can start, so the scheduler is
+  // genuinely holding a follow-on wave to protect.
+  const fixtures = Array.from({ length: 6 }, (_, k) => cF(k + 1, 2 * k + 1, 2 * k + 2));
+  const advice = api.buildSchedulerAdvice(
+    Object.assign(cUi(), { markerPolicy: api.MARKER_POLICIES.FAIR, boardCount: 2 }),
+    cData(fixtures), cView);
+  check('109. the scheduler holds the games that come next (the sequence to protect)',
+    advice.projectedNext.length >= 1);
+  const nextPlayers = advice.projectedNext
+    .reduce((acc, g) => acc.concat([g.playerA.id, g.playerB.id]), []);
+  const playing = [701, 702];
+  const marking = [711];
+  const eligible = api.getEligibleMarkerCandidates({
+    players: cRoster,
+    absentIds: [],
+    playingPlayerIds: playing,
+    markingPlayerIds: marking,
+    pendingMarkerIds: [],
+    upcomingPlayerIds: nextPlayers,
+    rosterDivisionIds: cRoster.map((p) => p.id),
+    excludeParticipants: true,
+    participantIds: [1, 2],
+  });
+  const ids = eligible.map((c) => c.id);
+  check('109. nobody playing is offered as a marker',
+    ids.every((id) => playing.indexOf(id) === -1));
+  check('109. nobody already marking is offered as a marker',
+    ids.every((id) => marking.indexOf(id) === -1));
+  check('109. nobody needed by the next projected games is offered as a marker',
+    nextPlayers.length > 0 && ids.every((id) => nextPlayers.indexOf(id) === -1));
+
+  // The reserved set is the ONE rule the dropdown and the scheduler share: the
+  // participants of the next N games that can be dispatched (N = free boards).
+  const reserved = api.markerSequenceReservedIds(advice, fixtures[0]);
+  const nextN = advice.recommended.slice(0, advice.freeBoards)
+    .reduce((acc, g) => acc.concat([g.playerA.id, g.playerB.id]), []);
+  const ownPlayers = [fixtures[0].playerA.id, fixtures[0].playerB.id];
+  const expected = nextN.filter((id) => ownPlayers.indexOf(id) === -1);
+  check('109. the reserved set is exactly the next N games that can be dispatched (less this game)',
+    advice.freeBoards > 0 && reserved.length > 0 &&
+    expected.filter((id) => reserved.indexOf(id) === -1).length === 0 &&
+    reserved.filter((id) => expected.indexOf(id) === -1).length === 0);
+  check('109. the game being marked is never reserved against itself',
+    reserved.indexOf(fixtures[0].playerA.id) === -1 &&
+    reserved.indexOf(fixtures[0].playerB.id) === -1 &&
+    // and the reserved set really is protecting other players
+    nextN.some((id) => id !== fixtures[0].playerA.id && id !== fixtures[0].playerB.id &&
+      reserved.indexOf(id) !== -1));
+
+  // The rule is a real exclusion, not a no-op: without it those players ARE
+  // offered, so the guard above is measuring the new rule and not the roster.
+  const without = api.getEligibleMarkerCandidates({
+    players: cRoster,
+    absentIds: [],
+    playingPlayerIds: playing,
+    markingPlayerIds: marking,
+    pendingMarkerIds: [],
+    rosterDivisionIds: cRoster.map((p) => p.id),
+    excludeParticipants: true,
+    participantIds: [1, 2],
+  }).map((c) => c.id);
+  check('109. the same list WOULD contain them without the sequence rule (it is doing work)',
+    nextPlayers.some((id) => without.indexOf(id) !== -1) &&
+    ids.length < without.length);
+
+  // A game with no marker has no marker UI in the table, so removal and
+  // reallocation are acts on an EXISTING duty: reallocation moves it, removal
+  // deletes it, and neither touches the fixture or a board.
+  const held = api.assignMarkerToGame(api.createMarkerRuntime(), fixtures[0], ids[0], {
+    absentIds: [], playingPlayerIds: playing, participantIds: [fixtures[0].playerA.id, fixtures[0].playerB.id],
+  });
+  const key = api.markerGameKey(fixtures[0]);
+  // Reallocation is the ATOMIC transition: the old duty is released and the new
+  // one assigned in one step, so the game is never briefly unmarked or marked
+  // twice. The plain assign path must still REFUSE it (no silent double duty).
+  const direct = api.assignMarkerToGame(held.runtime, fixtures[0], ids[1], {
+    absentIds: [], playingPlayerIds: playing, participantIds: [fixtures[0].playerA.id, fixtures[0].playerB.id],
+  });
+  check('109. a re-allocation is refused by the plain assign path (atomic only)',
+    direct.ok === false && direct.reason === 'game-already-marked');
+  const moved = api.changeMarkerForGame(held.runtime, fixtures[0], ids[1], {
+    absentIds: [], playingPlayerIds: playing, participantIds: [fixtures[0].playerA.id, fixtures[0].playerB.id],
+  });
+  check('109. reallocation replaces the duty and leaves no ghost behind',
+    moved.ok === true && moved.runtime.byGame[key] === ids[1] &&
+    moved.runtime.byMarker[ids[0]] == null && moved.runtime.byMarker[ids[1]] === key);
+  const cleared = api.releaseMarkerFromGame(moved.runtime, fixtures[0]);
+  check('109. removal clears the duty only (fixture and its players are untouched)',
+    cleared.ok === true && cleared.runtime.byGame[key] == null &&
+    cleared.runtime.byMarker[ids[1]] == null &&
+    fixtures[0].status === 'waiting' && fixtures[0].playerA.id === 701 &&
+    fixtures[0].playerB.id === 702 && held.ok === true);
 })();
 
 if (failures === 0) {

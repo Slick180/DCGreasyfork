@@ -32,6 +32,88 @@ localStorage (match-night-singles:<code>:<id>) ◀▶ division + absent IDs
                                                   ──render──▶ compact Match Night view
 ```
 
+## Tonight / Delayed classification (COLS-09)
+
+A fixture's EFFECTIVE date is the date DartConnect places it under (the
+containing group's date; every item in a group carries the same `sched_date`,
+verified against the captured league page, so a rescheduled match simply moves
+group). That date is compared with the operator's selected match date:
+
+| effective date | classification | where it appears |
+| --- | --- | --- |
+| = selected match date | current | TONIGHT |
+| < selected match date | delayed backlog | DELAYED |
+| > selected match date | future | neither panel (and never scheduled) |
+
+`applyMatchDateClassification` applies this rule once per render and per live
+poll, before the panels are split and before the scheduler session is built, so
+both read exactly the same flag. DartConnect's own pending/future bucket is kept
+per fixture as `bucketDelayed` and is used only as the fallback when there is no
+match date to compare (no selection, or a dateless fixture). The Delayed ON/OFF
+scheduling option is unchanged: it still controls delayed-game eligibility.
+
+## Delayed panel: live-match awareness (DELAY-LIVE)
+
+- A DELAYED fixture is marked PLAYING by the existing live poll (the same
+  ID/pair matching used everywhere else) and is highlighted with the existing
+  green PLAYING row style.
+- A delayed date group containing a live match is expanded automatically and
+  its heading shows a compact `● PLAYING n` count.
+- The operator's saved collapse preference is NEVER overwritten: expansion is a
+  derived state (`delayedGroupCollapsed`), so the group returns to exactly the
+  saved choice when the match finishes.
+- A live group is not a collapse toggle while it is live, so polling cannot
+  produce a collapse/expand flicker.
+- A live delayed match is never automatically given a board or a marker; it
+  occupies a physical board factually (board occupancy), which is what bounds
+  free capacity. Its players are unavailable for conflicting match or marker
+  recommendations.
+
+## Recommendation row layout (COLS-08)
+
+Recommendation and Projected Next rows are one explicit CSS grid with a fixed
+cell for every column (sequence | board | player | vs | player | marker |
+status). Every cell exists on every row, so columns align between rows and no
+control can ever be painted over a player name at 1366x768. The board column is
+present in both managed-board modes (it occupies no gutter when boards are
+unmanaged); the optional status column is a pane-level decision so all rows
+reserve the same width. Names ellipsise safely with the complete name on hover.
+
+## Marker modes and the game table (MARKER-9 / COLS-10)
+
+- Four mutually exclusive marker modes: **OFF | MANUAL | FAIR | LOSER**. OFF
+  removes every marker element (control, chip, advice, message) and returns its
+  width to the names; MANUAL offers the selector but never recommends or
+  preselects; FAIR and LOSER keep their existing algorithms and overrides.
+- The marker **dialog lives in the RECOMMENDED pane** — that is where a game is
+  allocated to a marker, in every mode. The game table below shows a marker
+  control **only** for a game that has actually been allocated one (a pending
+  handoff from the board/top allocation, or a confirmed duty), and never
+  proposes one on its own.
+- A row that holds a marker can be **reallocated** (choose another name — the
+  atomic `changeMarkerForGame`) or **removed** (choose `M: —`) in place. Both
+  release the duty only: board ownership, PLAYING and the fixture are untouched.
+- The candidate list only offers players whose marking leaves the sequence
+  playable: nobody playing, nobody already marking, and nobody needed by the
+  next N games that can be dispatched (N = free boards) — the same union the
+  scheduler's own marker search uses, so list and advice can never disagree.
+- Each fixture row is ONE line in three fixed bands — `[board] [game] [marker]`
+  — with the bands reserved per COLUMN (52px board, 176px marker), so the `vs`
+  sits at the same x on every row and a control can never steal width from a
+  name. Labels are abbreviated there (Board = `B`, Marker = `M`, Advise = `A`);
+  the control's tooltip still spells each state out in full.
+- A live row states PLAYING by fill, an inset accent bar and its tooltip plus
+  the delayed group bar's `● PLAYING n` count — no extra line is spent on it.
+
+## Not Here panel: adjustable, not a fly-out (MARKER-10)
+
+The right-hand NOT HERE panel is resized by dragging the divider between it and
+the fixture columns (or with the arrow keys on it; double-click, Enter or a
+click on the rail collapses it to a 54px labelled rail, handing its width to
+the DELAYED column). The chosen width is stored in the same per-league night
+ state as the zoom and board count, so it survives Refresh and polling, and an
+ unrelated save can never drop it.
+
 ## Key design decisions
 
 - Player IDs (from schedule links) are the internal identity, not names.
