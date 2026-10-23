@@ -11,38 +11,39 @@
     "execution":  {
                       "state":  "IDLE",
                       "work_package":  null,
-                      "agent":  "Codex",
-                      "model":  "GPT-5",
-                      "role":  "verification",
+                      "agent":  "Freebuff (Buffy)",
+                      "model":  "unknown",
+                      "role":  "implementation",
                       "started":  null,
-                      "note":  "Feature branch protected on GitHub and redundant pre-migration backup removed; no development work is running."
+                      "note":  "Live-night commitment correction (LIVE-01/STABLE-01) implemented, tested and committed as 6f237b6; no development work is running."
                   },
-    "current_work_package":  "Match Night corrective passes protected in local commit 0c2381d: accepted scheduling, marker-mode, recommendation-layout, Tonight/Delayed, delayed-live and adjustable Not Here corrections",
+    "current_work_package":  "Live-night commitment integrity: PLAYING retained until recorded completion, live-only matches committed, completion releases players/markers/boards, stable game identity with duty retention instead of silent release (commit 6f237b6)",
     "accepted_branch":  "feature/scheduler-slice1-domain-model",
     "accepted_checkpoint":  {
-                                "commit":  "0c2381dca481b3a345bf35d23a314f268f40d7a3",
-                                "short":  "0c2381d",
-                                "date":  "2026-10-16",
-                                "note":  "Accepted Match Night implementation and README documentation protected on origin/feature/scheduler-slice1-domain-model; not merged or published to GreasyFork."
+                                "commit":  "6f237b68e44a6ce371a32208fbc22191854e392b",
+                                "short":  "6f237b6",
+                                "date":  "2026-10-23",
+                                "note":  "Live-night duplicate-allocation and lost-marker correction on origin/feature/scheduler-slice1-domain-model; self-tested, awaiting the next venue night. Not merged or published to GreasyFork."
                             },
-    "updated":  "2026-10-16",
+    "updated":  "2026-10-23",
     "provenance":  {
-                       "agent":  "Codex",
-                       "model":  "GPT-5",
-                       "role":  "verification"
+                       "agent":  "Freebuff (Buffy)",
+                       "model":  "unknown",
+                       "role":  "implementation"
                    },
     "verification":  {
                          "authority":  "none",
                          "mode":  "tests",
-                         "commit":  "0c2381dca481b3a345bf35d23a314f268f40d7a3",
+                         "commit":  "6f237b68e44a6ce371a32208fbc22191854e392b",
                          "result":  "SELF-TESTED",
-                         "timestamp":  "2026-10-16T13:52:26+01:00",
-                         "evidence":  "Codex re-ran node test/parse-check.cjs and node test/scheduler-check.cjs before commit; both exited 0 and the scheduler suite reported ALL SCHEDULER & OPTIMISER TESTS PASS (0 failures). Previously recorded real-browser verification in Chromium at 1366x768 remains implementer-run evidence. No independent verification.",
+                         "timestamp":  "2026-10-23T09:16:42+01:00",
+                         "evidence":  "node test/parse-check.cjs (312 checks) and node test/scheduler-check.cjs (694 checks) both exited 0 with ALL PASS after the correction, including 12 new live-night scenarios and the live-poll retention/completion-release checks. A local Chromium harness confirmed the retained-duty affordance renders, keeps its marker out of the plan and releases on click. The live DartConnect service is unreachable from this environment, so live-feed behaviour is exercised through genuine-shaped records on a scripted transport, not the live service. No independent verification.",
                          "independent":  false
                      },
     "outstanding":  [
                         "Complete scheduler slice 1 domain model",
                         "Confirm the intended meaning of 'the next N projected games' for the marker list (implemented as the next N dispatchable games, N = free boards, matching the scheduler's own MARKER-4 rule)",
+                        "Confirm LIVE-01/STABLE-01 on a real venue night: no person allocated to play or mark while already committed, and assigned markers visible and occupied for the life of their game",
                         "Publish V1.1.0 to GreasyFork (git tag v1.1.0 exists locally; userscript distribution not published per README)"
                     ],
     "blockers":  [
@@ -54,7 +55,7 @@
     "integrations":  [
 
                      ],
-    "next_package":  "Continue scheduler slice 1 domain model; retain the protected corrective-pass checkpoint until any venue review feedback is explicit",
+    "next_package":  "Run the corrected build at the next venue night and reconcile any live-feed behaviour that differs from the scripted evidence (unconfirmed PLAYING retention, live-only commitments, completion release)",
     "history":  [
                     {
                         "date":  "2026-09-26",
@@ -188,6 +189,19 @@
                         "outcome":  "COMPLETE",
                         "verification":  "Pushed feature/scheduler-slice1-domain-model to GitHub origin without force; fetched and verified remote tip 8f2aba8eac81c3bede2616bb17a14c5227a651a5, ten commits ahead of origin/main, containing 0c2381d and 8f2aba8. Reconfirmed archived refs were reachable and prior comparison found no unique project asset, then removed only the exact archived backup and updated archive/portfolio records.",
                         "source":  "repository-evidence"
+                    },
+                    {
+                        "date":  "2026-10-23",
+                        "work_package":  "LIVE-01/STABLE-01 live-night commitment integrity: duplicate allocations, lost marker duties and stuck occupancy after the 22 Oct venue night",
+                        "phase":  "V1.1.0 release candidate plus scheduler slice 1",
+                        "agent":  "Freebuff (Buffy)",
+                        "model":  "unknown",
+                        "role":  "implementation",
+                        "from_checkpoint":  "8f2aba8eac81c3bede2616bb17a14c5227a651a5",
+                        "to_checkpoint":  "6f237b68e44a6ce371a32208fbc22191854e392b",
+                        "outcome":  "IMPLEMENTED",
+                        "verification":  "Traced the reported defects to two code paths: a successful-but-empty live response cleared PLAYING (freeing both players mid-match and re-offering the same game), and restoreDispatchState silently discarded a marker duty whose game key did not resolve to exactly one current fixture. Corrected both: PLAYING is retained until recorded completion, live records with no fixture row commit their resolved players, completion releases players/marker/board and persists it, game identity carries the fixture date and saved duties carry their own pair so a restore re-finds a re-keyed match, and an unresolvable duty is retained and shown for explicit release. node test/parse-check.cjs (312 checks) and node test/scheduler-check.cjs (694 checks) both exited 0; 12 new live-night scenarios added; local Chromium harness confirmed the retained-duty affordance and its one-click release.",
+                        "source":  "project-report"
                     }
                 ]
 }
