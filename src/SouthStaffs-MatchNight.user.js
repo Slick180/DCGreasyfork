@@ -371,7 +371,29 @@
               if (Array.isArray(b.boards)) {
                 entry.boards = b.boards
                   .filter((x) => x && Number.isSafeInteger(x.boardNumber) && typeof x.gameKey === 'string' && x.gameKey)
-                  .map((x) => ({ boardNumber: x.boardNumber, gameKey: x.gameKey }));
+                  .map((x) => {
+                    // STABLE-01: keep the optional match identity, validated
+                    // field by field (anything malformed is simply absent).
+                    const out = { boardNumber: x.boardNumber, gameKey: x.gameKey };
+                    if (Number.isSafeInteger(x.a) && Number.isSafeInteger(x.b)) {
+                      out.a = x.a;
+                      out.b = x.b;
+                      if (typeof x.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(x.date)) out.date = x.date;
+                    }
+                    return out;
+                  });
+              }
+              // STABLE-01: stored match identities for confirmed marker duties.
+              if (b.markerIdentity && typeof b.markerIdentity === 'object' && !Array.isArray(b.markerIdentity)) {
+                const mi = {};
+                Object.keys(b.markerIdentity).forEach((k) => {
+                  const v = b.markerIdentity[k];
+                  if (!k || !v || typeof v !== 'object') return;
+                  if (!Number.isSafeInteger(v.a) || !Number.isSafeInteger(v.b)) return;
+                  mi[k] = { a: v.a, b: v.b,
+                    date: typeof v.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v.date) ? v.date : null };
+                });
+                entry.markerIdentity = mi;
               }
               if (b.pendingMarkers && typeof b.pendingMarkers === 'object' && !Array.isArray(b.pendingMarkers)) {
                 const pm = {};
@@ -571,7 +593,11 @@
 
   /** Full display pipeline: division -> date upper bound -> Not Here removal. */
   function applyDisplayFilters(fixtures, division, dateIso, absentIds) {
-    return visibleFixtures(withinSelectedDate(fixtures, dateIso), division, absentIds);
+    return visibleFixtures(withinSelectedDate(fixtures, dateIso), division, absentIds)
+      // LIVE-01: a factually COMPLETED game is no longer outstanding, so it
+      // leaves the fixture list exactly as it does on the next page parse.
+      // It is never re-presented as a game that can be started again.
+      .filter((f) => f && f.status !== 'completed');
   }
 
   /* ============================== 5. data-page extraction ============================== */
@@ -1220,6 +1246,10 @@
     // itself, no manual Refresh needed.
     const updated = info.updated ? ' · updated' : '';
     const playing = info.playing || 0;
+    // LIVE-01: a PLAYING game the last live response did NOT list is retained
+    // (absence is not completion), and the uncertainty is stated rather than
+    // hidden — the operator decides when that board is really free.
+    const unconfirmed = info.unconfirmed ? ' · ' + info.unconfirmed + ' unconfirmed' : '';
     if (info.failed || (info.error && !info.rowsFound)) {
       currentLiveTitle = 'Match Center check failed (' + (info.error || 'unknown') + '). Showing schedule data only; PLAYING is last-known.';
       return 'Live: Connection error · ' + playing + ' playing (last known)' + checked;
@@ -1227,12 +1257,136 @@
     if (info.fallback) {
       currentLiveTitle = 'Live endpoint failed; schedule fallback in use. Source: ' + (info.source || 'none') + ' · HTTP ' + info.requestStatus +
         (info.updated ? ' · PLAYING set changed at last check' : '');
-      return 'Live: Connected (schedule fallback) · ' + playing + ' playing' + checked + updated;
+      return 'Live: Connected (schedule fallback) · ' + playing + ' playing' + unconfirmed + checked + updated;
     }
     currentLiveTitle = 'Source: ' + (info.source || 'none') + ' · HTTP ' + info.requestStatus +
       ' · rows ' + info.rowsFound + ' · ambiguous ' + (info.ambiguous ? info.ambiguous.length : 0) +
-      (info.updated ? ' · PLAYING set changed at last check' : '');
-    return 'Live: Connected · ' + playing + ' playing' + checked + updated;
+      (info.updated ? ' · PLAYING set changed at last check' : '') +
+      (info.unconfirmed ? ' · ' + info.unconfirmed + ' playing game(s) not listed by the live feed are RETAINED ' +
+        'until completion is established (release their board when the game really ends)' : '');
+    return 'Live: Connected · ' + playing + ' playing' + unconfirmed + checked + updated;
+  }
+
+  /* ------------------- LIVE-01: live-only match commitments ------------------- */
+
+  /**
+   * How many consecutive polls a live commitment survives after the live feed
+   * stops listing it, while its completion is still unproven. Short grace so
+   * a momentary feed blip cannot hand a mid-match player to the scheduler,
+   * and a genuine finish frees them as soon as a completed record arrives.
+   */
+  const LIVE_COMMITMENT_GRACE_POLLS = 2;
+
+  /**
+   * LIVE-01: matches that are LIVE on DartConnect but have NO fixture row.
+   *
+   * A match that has started can leave the pending/future schedule groups,
+   * leaving no fixture to mark PLAYING. The live feed still knows those two
+   * people are mid-match, so they are projected as commitments: identity is
+   * resolved by numeric player id first and by exact full name second, and
+   * an ambiguous or unknown name is DROPPED rather than guessed (never
+   * conflate two people with similar names). Pure.
+   */
+  function liveCommitmentsFromRecords(records, marked, roster, division, completedMatches) {
+    const list = Array.isArray(records) ? records : [];
+    const markedRecords = new Set();
+    if (marked && typeof marked.forEach === 'function') {
+      marked.forEach((rec) => markedRecords.add(rec));
+    }
+    const people = filterRosterForDivision(roster, division);
+    const byId = new Map();
+    const byName = new Map();
+    people.forEach((p) => {
+      if (!p || !Number.isSafeInteger(p.id)) return;
+      byId.set(p.id, p);
+      const key = normName(p.name);
+      if (key && !byName.has(key)) byName.set(key, p);
+      else if (key) byName.set(key, null); // two people share this name: never guess
+    });
+    const pick = (id, name) => {
+      if (Number.isSafeInteger(id) && byId.has(id)) return byId.get(id);
+      const key = normName(name);
+      return key && byName.has(key) ? byName.get(key) : null;
+    };
+    const out = [];
+    list.forEach((rec) => {
+      if (!rec || markedRecords.has(rec)) return;
+      if (isCompletedRecord(rec)) return;
+      const a = pick(rec.ids && rec.ids[0], rec.names && rec.names[0]);
+      const b = pick(rec.ids && rec.ids[1], rec.names && rec.names[1]);
+      // One resolved identity is enough to keep that person occupied; with
+      // neither there is nothing factual to commit.
+      if (!a && !b) return;
+      const id = rec.matchIds && rec.matchIds.length ? rec.matchIds[0] : null;
+      const matchId = id != null ? id : 'live:' + (rec.ref || ((a ? a.id : '?') + '-' + (b ? b.id : '?')));
+      if (completedMatches && completedMatches.some((m) => m && m.matchId != null && m.matchId === matchId)) return;
+      out.push({
+        matchId,
+        playerA: { id: a ? a.id : null, name: (a && a.name) || (rec.names && rec.names[0]) || '' },
+        playerB: { id: b ? b.id : null, name: (b && b.name) || (rec.names && rec.names[1]) || '' },
+        boardNumber: null,
+        markerId: null,
+        isExtra: true,
+        source: 'live-only',
+      });
+    });
+    return out;
+  }
+
+  /** LIVE-01: merge this poll's live commitments with the still-unproven
+   *  previous ones (bounded grace), keyed by match id. Pure. */
+  function mergeLiveCommitments(previous, fresh, completedMatches) {
+    const done = Array.isArray(completedMatches) ? completedMatches : [];
+    const out = [];
+    const seen = new Set();
+    (Array.isArray(fresh) ? fresh : []).forEach((c) => {
+      if (!c || c.matchId == null || seen.has(c.matchId)) return;
+      seen.add(c.matchId);
+      out.push(Object.assign({}, c, { misses: 0 }));
+    });
+    (Array.isArray(previous) ? previous : []).forEach((c) => {
+      if (!c || c.matchId == null || seen.has(c.matchId)) return;
+      if (done.some((m) => m && m.matchId != null && m.matchId === c.matchId)) return;
+      const misses = (Number.isSafeInteger(c.misses) ? c.misses : 0) + 1;
+      if (misses > LIVE_COMMITMENT_GRACE_POLLS) return;
+      seen.add(c.matchId);
+      out.push(Object.assign({}, c, { misses }));
+    });
+    return out;
+  }
+
+  /**
+   * LIVE-01: a factually COMPLETED game ends its commitments. The marker duty
+   * is over (the marker is free for the next duty), the physical board is free
+   * again, any live-only commitment for the same match is dropped, and the
+   * release is persisted so a Refresh cannot resurrect it. Only recorded
+   * completion gets here — never an absence from the live feed.
+   */
+  function releaseCompletedCommitments(ctx, fixture) {
+    if (!ctx || !ctx.data || !fixture) return;
+    const key = boardKeyForGame(fixture);
+    if (ctx.data.markerRuntime) {
+      const duty = findMarkerForGame(ctx.data.markerRuntime, fixture);
+      if (duty != null) {
+        const rel = releaseMarkerFromGame(ctx.data.markerRuntime, fixture);
+        if (rel.ok) {
+          ctx.data.markerRuntime = rel.runtime;
+          ctx.data.markerHistory = releaseMarkerMark(ctx.data.markerHistory, duty);
+        }
+      }
+    }
+    if (ctx.data.boardRuntime) {
+      const owned = findBoardOwningGame(ctx.data.boardRuntime, fixture);
+      if (owned) {
+        const relBoard = releaseBoard(ctx.data.boardRuntime, owned.boardNumber);
+        if (relBoard.ok) ctx.data.boardRuntime = relBoard.runtime;
+      }
+    }
+    if (Array.isArray(ctx.data.liveCommitments)) {
+      ctx.data.liveCommitments = ctx.data.liveCommitments.filter((c) =>
+        c && c.matchId !== fixture.matchId && c.matchId !== key);
+    }
+    if (typeof activePersistDispatch === 'function') activePersistDispatch();
   }
 
   function refreshLive(ctx) {
@@ -1251,6 +1405,8 @@
     const playingKeysBefore = new Set(
       (ctx.data.fixtures || []).filter((f) => f.status === 'playing').map(liveGameKey)
     );
+    const commitmentsBefore = new Set((Array.isArray(ctx.data.liveCommitments) ? ctx.data.liveCommitments : [])
+      .map((c) => c && c.matchId));
     const candidates = (ctx.data.fixtures || []).filter((f) =>
       f.division === ctx.state.division &&
       (!f.date || !ctx.state.selectedMatchDate || f.date <= ctx.state.selectedMatchDate));
@@ -1278,24 +1434,50 @@
         '| received', info.recordsReceived, '| by status', JSON.stringify(info.statusCounts),
         '| live', info.consideredLive, '| marked', result.marked.size,
         '| rejected', tallyReasons(info.rejected));
-      if (result.ok && result.source === 'api-live') {
-        // Authoritative live response: absence of a record clears PLAYING.
-        ctx.data.fixtures.forEach((f) => { if (f.status === 'playing') f.status = 'waiting'; });
-        result.marked.forEach((rec, fixture) => {
-          fixture.status = 'playing';
-          log('PLAYING:', fixture.playerA.name, 'vs', fixture.playerB.name, rec.ref || '');
-        });
-      } else if (result.ok) {
-        // Non-authoritative fallback (schedule/completed data or DOM
-        // scrape): positive evidence may add PLAYING, but absence proves
-        // nothing, so never clear here. Completed (C) records can never
-        // match as live — they are filtered before matching.
-        result.marked.forEach((rec, fixture) => {
-          if (fixture.status !== 'playing') {
-            fixture.status = 'playing';
-            log('PLAYING (fallback):', fixture.playerA.name, 'vs', fixture.playerB.name, rec.ref || '');
+      // LIVE-01: factual completion evidence for this poll — what was already
+      // known plus what this response just published. ONLY this releases a
+      // playing game's people.
+      const completedEvidence = (ctx.data.completedMatches || [])
+        .concat(Array.isArray(result.completed) ? result.completed : []);
+      if (result.ok) {
+        ctx.data.fixtures.forEach((f) => {
+          if (f.status !== 'playing') return;
+          if (isFixtureCompleted(f, completedEvidence)) {
+            // Completion is FACT: the game is over, its players and marker
+            // are released, and it can never be recommended again.
+            f.status = 'completed';
+            log('COMPLETED:', f.playerA && f.playerA.name, 'vs', f.playerB && f.playerB.name);
+            releaseCompletedCommitments(ctx, f);
           }
+          // Otherwise PLAYING is STICKY. Absence from a live response is not
+          // completion: DartConnect also drops matches between legs or after
+          // a re-key, and clearing the flag freed both players for a second
+          // game while they were still at the board.
         });
+        if (result.source === 'api-live') {
+          result.marked.forEach((rec, fixture) => {
+            if (fixture.status === 'completed') return;
+            if (fixture.status !== 'playing') {
+              fixture.status = 'playing';
+              log('PLAYING:', fixture.playerA.name, 'vs', fixture.playerB.name, rec.ref || '');
+            }
+          });
+        } else {
+          // Non-authoritative fallback (schedule/completed data or DOM
+          // scrape): positive evidence may add PLAYING; nothing here clears.
+          result.marked.forEach((rec, fixture) => {
+            if (fixture.status !== 'playing' && fixture.status !== 'completed') {
+              fixture.status = 'playing';
+              log('PLAYING (fallback):', fixture.playerA.name, 'vs', fixture.playerB.name, rec.ref || '');
+            }
+          });
+        }
+        // LIVE-01: live matches WITHOUT a fixture row are commitments too.
+        ctx.data.liveCommitments = mergeLiveCommitments(
+          ctx.data.liveCommitments,
+          liveCommitmentsFromRecords(result.liveRecords, result.marked, ctx.data.roster,
+            ctx.state.division, completedEvidence),
+          completedEvidence);
       } else {
         // Transport failure on every source: UNKNOWN state, not proof the
         // match stopped. Preserve PLAYING exactly as-is.
@@ -1306,8 +1488,22 @@
       const playingKeysAfter = new Set(
         ctx.data.fixtures.filter((f) => f.status === 'playing').map(liveGameKey)
       );
+      const commitmentsAfter = new Set((Array.isArray(ctx.data.liveCommitments) ? ctx.data.liveCommitments : [])
+        .map((c) => c && c.matchId));
       info.updated = playingKeysAfter.size !== playingKeysBefore.size ||
-        Array.from(playingKeysAfter).some((k) => !playingKeysBefore.has(k));
+        Array.from(playingKeysAfter).some((k) => !playingKeysBefore.has(k)) ||
+        commitmentsAfter.size !== commitmentsBefore.size ||
+        Array.from(commitmentsAfter).some((k) => !commitmentsBefore.has(k));
+      info.liveOnly = commitmentsAfter.size;
+      // LIVE-01: PLAYING games this authoritative response did NOT list. They
+      // stay PLAYING (and their people stay occupied) until completion.
+      const markedNow = new Set();
+      if (result.marked && typeof result.marked.forEach === 'function') {
+        result.marked.forEach((rec, fixture) => markedNow.add(fixture));
+      }
+      info.unconfirmed = (result.ok && result.source === 'api-live')
+        ? ctx.data.fixtures.filter((f) => f.status === 'playing' && !markedNow.has(f)).length
+        : 0;
       // ACCEPT-01: a factual DartConnect PLAYING change is a genuine re-plan —
       // the remembered dispatch queue must not override it.
       if (info.updated && ctx.data) ctx.data.dispatchOrder = null;
@@ -1372,7 +1568,7 @@
       marked: new Map(), ambiguous: [], unmatched: [], rejected: [],
       endpointUsed: '', responseShape: '', recordsReceived: 0, consideredLive: 0,
       statusCounts: {}, attempts: [],
-      normalized: [], error: null, liveOk: false,
+      normalized: [], liveRecords: [], error: null, liveOk: false,
     };
     function apply(records, stats, source, status, shape) {
       summary.ok = true;
@@ -1385,6 +1581,9 @@
       summary.consideredLive = records.length;
       summary.parsed = records.length;
       summary.normalized = records.map(safeRecord);
+      // LIVE-01: the identified records themselves, so a live match with no
+      // fixture row can still hold its two people as occupied.
+      summary.liveRecords = records;
       const diagnosed = diagnoseLiveMatch(allFixtures, fixtures, records, state);
       summary.marked = diagnosed.marked;
       summary.ambiguous = diagnosed.ambiguous;
@@ -2760,11 +2959,70 @@
     return String((player && player.name) || '?').toLowerCase();
   }
 
-  /** Stable game key for any fixture/live row, id-less included. Pure. */
+  /** ISO date component of a fixture's identity ('' when unknown). Pure. */
+  function gameDateToken(game) {
+    return game && typeof game.date === 'string' ? game.date.slice(0, 10) : '';
+  }
+
+  /** Stable game key for any fixture/live row, id-less included. Pure.
+   *
+   * STABLE-01: the key must identify the SAME match for the whole lifecycle
+   * (waiting -> playing -> completed). The schedule id is authoritative when
+   * present. The id-less fallback carries the fixture DATE as well as the
+   * pair, because the same two players can meet again on another date and
+   * must never collapse onto one key (a duty would then attach to the wrong
+   * game, or be discarded as ambiguous).
+   */
   function boardKeyForGame(game) {
     if (!game) return null;
     if (game.matchId != null) return 'id:' + game.matchId;
-    return 'pair:' + boardPlayerToken(game.playerA) + ':' + boardPlayerToken(game.playerB);
+    const date = gameDateToken(game);
+    return 'pair:' + (date ? date + ':' : '') + boardPlayerToken(game.playerA) + ':' + boardPlayerToken(game.playerB);
+  }
+
+  /**
+   * STABLE-01: self-describing identity for a stored commitment. The KEY is
+   * the fast path; the player pair + date let restore find the same match
+   * again when DartConnect re-published it under its other key form (an
+   * id-less row that gained an id, or an id row that lost one). Never throws.
+   * Pure.
+   */
+  function gameIdentityFor(game) {
+    if (!game) return null;
+    const a = game.playerA && Number.isSafeInteger(game.playerA.id) ? game.playerA.id : null;
+    const b = game.playerB && Number.isSafeInteger(game.playerB.id) ? game.playerB.id : null;
+    return { key: boardKeyForGame(game), a, b, date: gameDateToken(game) || null };
+  }
+
+  /** Do two player ids form this fixture's pair (either orientation)? Pure. */
+  function fixtureHasPair(fixture, a, b) {
+    if (!fixture || !fixture.playerA || !fixture.playerB) return false;
+    if (!Number.isSafeInteger(a) || !Number.isSafeInteger(b)) return false;
+    const pa = fixture.playerA.id;
+    const pb = fixture.playerB.id;
+    return (pa === a && pb === b) || (pa === b && pb === a);
+  }
+
+  /**
+   * STABLE-01: resolve a stored commitment to exactly ONE current fixture.
+   * Tries the stored key first, then the stored pair + date identity. When
+   * several fixtures still match, the factually PLAYING / board-owned row
+   * wins (that is the match still running); otherwise the first is chosen
+   * deterministically so a duty is never discarded as "ambiguous". Pure.
+   */
+  function resolveStoredGame(fixtures, stored) {
+    const fx = Array.isArray(fixtures) ? fixtures : [];
+    const key = stored && typeof stored.key === 'string' ? stored.key : null;
+    const direct = key ? fx.filter((f) => boardKeyForGame(f) === key) : [];
+    if (direct.length === 1) return direct[0];
+    const pool = direct.length > 1 ? direct : fx.filter((f) =>
+      fixtureHasPair(f, stored && stored.a, stored && stored.b) &&
+      (!stored.date || !gameDateToken(f) || gameDateToken(f) === stored.date));
+    if (pool.length === 0) return null;
+    if (pool.length === 1) return pool[0];
+    const playing = pool.filter((f) => f.status === 'playing');
+    if (playing.length === 1) return playing[0];
+    return pool[0];
   }
 
   /**
@@ -2908,11 +3166,38 @@
   }
 
   /** ACCEPT-03: operator board ownership snapshot (boardNumber + game key). Pure. */
-  function snapshotBoardAssignments(runtime) {
+  function snapshotBoardAssignments(runtime, fixtures) {
     if (!runtime || !Array.isArray(runtime.boards)) return [];
+    const fx = Array.isArray(fixtures) ? fixtures : [];
     return runtime.boards
       .filter((b) => b && b.gameKey !== null)
-      .map((b) => ({ boardNumber: b.boardNumber, gameKey: b.gameKey }));
+      .map((b) => {
+        // STABLE-01: carry the match's own identity alongside the key so a
+        // board is never freed merely because DartConnect re-published the
+        // same match under its other key form.
+        const game = fx.find((f) => boardKeyForGame(f) === b.gameKey);
+        const id = gameIdentityFor(game);
+        return id && id.a != null && id.b != null
+          ? { boardNumber: b.boardNumber, gameKey: b.gameKey, a: id.a, b: id.b, date: id.date }
+          : { boardNumber: b.boardNumber, gameKey: b.gameKey };
+      });
+  }
+
+  /**
+   * STABLE-01: identity of every CONFIRMED marker duty, so restore can find
+   * the same match again after a key-form change. The marker map itself keeps
+   * its original `key -> playerId` shape. Pure.
+   */
+  function snapshotMarkerIdentity(runtime, fixtures) {
+    const out = {};
+    const fx = Array.isArray(fixtures) ? fixtures : [];
+    if (!runtime || !runtime.byGame) return out;
+    Object.keys(runtime.byGame).forEach((key) => {
+      const game = fx.find((f) => boardKeyForGame(f) === key);
+      const id = gameIdentityFor(game);
+      if (id && id.a != null && id.b != null) out[key] = { a: id.a, b: id.b, date: id.date };
+    });
+    return out;
   }
 
   /**
@@ -2921,8 +3206,8 @@
    * for those dispatched games only. Never contains planner output,
    * PROJECTED waves, PLAYING or confirmed marker ownership. Pure.
    */
-  function snapshotDispatchState(runtime, pendingMarkers, history) {
-    const boards = snapshotBoardAssignments(runtime);
+  function snapshotDispatchState(runtime, pendingMarkers, history, fixtures) {
+    const boards = snapshotBoardAssignments(runtime, fixtures);
     const owned = new Set(boards.map((b) => b.gameKey));
     const pendingMarkersOut = {};
     const src = (pendingMarkers && typeof pendingMarkers === 'object') ? pendingMarkers : {};
@@ -2963,14 +3248,22 @@
       if (typeof key !== 'string' || !key) return fail('invalid-game-key');
       if (usedBoards.has(bn)) return fail('duplicate-board');
       if (usedKeys.has(key)) return fail('duplicate-game');
-      const matches = fx.filter((f) => boardKeyForGame(f) === key);
-      if (matches.length === 0) return fail('unknown-game');
-      if (matches.length > 1) return fail('ambiguous-game');
+      // STABLE-01: resolve the stored key, then fall back to the match's own
+      // pair + date identity. A board is never freed because DartConnect
+      // re-published the same match under its other key form.
+      const game = resolveStoredGame(fx, { key, a: entry && entry.a, b: entry && entry.b, date: entry && entry.date });
+      if (!game) return fail('unknown-game');
+      const key2 = boardKeyForGame(game);
+      if (!key2) return fail('unknown-game');
+      if (usedKeys.has(key2)) return fail('duplicate-game');
       usedBoards.add(bn);
-      usedKeys.add(key);
-      rows.find((b) => b.boardNumber === bn).gameKey = key;
-      restored.push({ boardNumber: bn, gameKey: key });
-      if (Number.isSafeInteger(pending[key])) pendingMarkers[key] = pending[key];
+      usedKeys.add(key2);
+      rows.find((b) => b.boardNumber === bn).gameKey = key2;
+      restored.push({ boardNumber: bn, gameKey: key2 });
+      // A pending handoff is only ever carried across for the key it was
+      // stored under; the re-keyed form is accepted too.
+      if (Number.isSafeInteger(pending[key])) pendingMarkers[key2] = pending[key];
+      else if (Number.isSafeInteger(pending[key2])) pendingMarkers[key2] = pending[key2];
     });
     // MARKER-6/COLS-01: CONFIRMED marker ownership is operator FACT the night
     // manager established deliberately, so it is restored with the same
@@ -2982,20 +3275,39 @@
     // changed (the conflict is surfaced, never silently repaired).
     const savedMarkers = (saved && saved.markers && typeof saved.markers === 'object' && !Array.isArray(saved.markers))
       ? saved.markers : {};
+    const savedIdentity = (saved && saved.markerIdentity && typeof saved.markerIdentity === 'object'
+      && !Array.isArray(saved.markerIdentity)) ? saved.markerIdentity : {};
     const markerRuntime = createMarkerRuntime();
+    // STABLE-01: a duty is NEVER silently released. When its key does not
+    // resolve, the stored match identity is tried; if the match genuinely
+    // cannot be found in the fixture list the duty is RETAINED (the marker is
+    // still standing at a board that DartConnect has stopped listing) and
+    // reported as an orphan so the operator can release it explicitly.
+    const orphans = [];
     Object.keys(savedMarkers).sort().forEach((key) => {
       const id = savedMarkers[key];
       if (!key || !Number.isSafeInteger(id) || id < 1) return;
-      const matches = fx.filter((f) => boardKeyForGame(f) === key);
-      if (matches.length !== 1) return;
       if (Object.prototype.hasOwnProperty.call(markerRuntime.byMarker, id)) return;
-      const g = matches[0];
-      if ((g.playerA && g.playerA.id === id) || (g.playerB && g.playerB.id === id)) return;
+      const identity = savedIdentity[key] || null;
+      const g = resolveStoredGame(fx, { key, a: identity && identity.a, b: identity && identity.b,
+        date: identity && identity.date });
+      if (g) {
+        if ((g.playerA && g.playerA.id === id) || (g.playerB && g.playerB.id === id)) return;
+        const key2 = boardKeyForGame(g);
+        if (!key2 || Object.prototype.hasOwnProperty.call(markerRuntime.byGame, key2)) return;
+        markerRuntime.byGame[key2] = id;
+        markerRuntime.byMarker[id] = key2;
+        return;
+      }
+      // Unresolved: the fixture is gone from the list (typically a match that
+      // DartConnect now lists only as live). Keep the commitment — a marker
+      // mid-game must not become available for another duty — and surface it.
       markerRuntime.byGame[key] = id;
       markerRuntime.byMarker[id] = key;
+      orphans.push({ key, markerId: id });
     });
     return { runtime: { boards: rows }, pendingMarkers, markerRuntime,
-      history: normalizeMarkerHistory((saved && saved.history) || null), restored, rejected };
+      history: normalizeMarkerHistory((saved && saved.history) || null), restored, rejected, orphans };
   }
 
   /** ACCEPT-03: dispatch state is scoped to the current division + match date. Pure. */
@@ -3296,6 +3608,43 @@
    * competitor ids are usable; anything else is dropped rather than guessed.
    * Pure.
    */
+  /**
+   * LIVE-01: is this fixture factually COMPLETED, on the evidence available?
+   *
+   * Only recorded completion counts: a schedule item published as 'C' or an
+   * API record in a completed state. A match simply disappearing from the
+   * live feed proves nothing (the feed drops matches that are between legs,
+   * re-keyed, or briefly unlisted), so absence is NEVER completion. The match
+   * id is the strong signal; the player pair is accepted only together with
+   * the same fixture date, because the same two players meet again on other
+   * nights. Pure.
+   */
+  function isFixtureCompleted(fixture, completedMatches) {
+    if (!fixture) return false;
+    const list = Array.isArray(completedMatches) ? completedMatches : [];
+    const fxDate = gameDateToken(fixture);
+    return list.some((m) => {
+      if (!m) return false;
+      if (fixture.matchId != null && m.matchId != null && m.matchId === fixture.matchId) return true;
+      const a = m.playerA && m.playerA.id;
+      const b = m.playerB && m.playerB.id;
+      if (!Number.isSafeInteger(a) || !Number.isSafeInteger(b)) return false;
+      if (!fixtureHasPair(fixture, a, b)) return false;
+      const mDate = typeof m.date === 'string' ? m.date.slice(0, 10) : '';
+      return !!(fxDate && mDate && fxDate === mDate);
+    });
+  }
+
+  /** Match ids / pairs of every factually completed game, for the planner. Pure. */
+  function completedGameTokens(completedMatches) {
+    const ids = new Set();
+    (Array.isArray(completedMatches) ? completedMatches : []).forEach((m) => {
+      if (!m) return;
+      if (m.matchId != null) ids.add(m.matchId);
+    });
+    return ids;
+  }
+
   function completedMatchesFromApiRecords(records) {
     return (Array.isArray(records) ? records : [])
       .filter((r) => r && isCompletedRecord(r) && typeof r.date === 'string' && r.date &&
@@ -3735,6 +4084,43 @@
   }
 
   /**
+   * STABLE-01: release a duty by its GAME KEY, for a duty whose fixture can no
+   * longer be resolved (the schedule stopped listing that match). Releasing
+   * means only "this player is no longer assigned to mark that game". Pure.
+   */
+  function releaseMarkerByKey(runtime, key) {
+    if (!runtime || !runtime.byGame || !runtime.byMarker) return { ok: false, runtime, reason: 'no-runtime' };
+    if (typeof key !== 'string' || !key) return { ok: false, runtime, reason: 'invalid-game' };
+    if (!Object.prototype.hasOwnProperty.call(runtime.byGame, key)) {
+      return { ok: true, runtime, reason: 'not-marked' };
+    }
+    const id = runtime.byGame[key];
+    const byGame = Object.assign({}, runtime.byGame);
+    const byMarker = Object.assign({}, runtime.byMarker);
+    delete byGame[key];
+    if (byMarker[id] === key) delete byMarker[id];
+    return { ok: true, runtime: { byGame, byMarker }, reason: null };
+  }
+
+  /**
+   * STABLE-01: confirmed duties whose match is no longer in the fixture list.
+   * They stay OCCUPIED (never silently released mid-game) and are surfaced so
+   * the operator can end them explicitly. Pure.
+   */
+  function orphanMarkerDuties(runtime, fixtures) {
+    const out = [];
+    if (!runtime || !runtime.byGame) return out;
+    const keys = new Set((Array.isArray(fixtures) ? fixtures : []).map((f) => boardKeyForGame(f)));
+    Object.keys(runtime.byGame).forEach((key) => {
+      const id = runtime.byGame[key];
+      if (!Number.isSafeInteger(id)) return;
+      if (keys.has(key)) return;
+      out.push({ key, markerId: id });
+    });
+    return out;
+  }
+
+  /**
    * Factual conflicts for compact presentation. An assignment is preserved
    * when the operator later marks its marker NOT HERE; it is surfaced here
    * and resolved only by explicit operator action — never silently.
@@ -4120,6 +4506,22 @@
         markerId: (data.markerRuntime && findMarkerForGame(data.markerRuntime, f)) || null,
         isExtra: false,
       }));
+    // LIVE-01: matches the live feed reports but the fixture list no longer
+    // contains. They are factual commitments just like a listed PLAYING
+    // fixture: their people are occupied and can never be recommended for
+    // another game while they are still at the board.
+    (Array.isArray(data.liveCommitments) ? data.liveCommitments : []).forEach((c) => {
+      if (!c || c.matchId == null) return;
+      if (activeGames.some((ag) => ag.matchId === c.matchId)) return;
+      activeGames.push({
+        matchId: c.matchId,
+        playerA: c.playerA || null,
+        playerB: c.playerB || null,
+        boardNumber: c.boardNumber != null ? c.boardNumber : null,
+        markerId: null,
+        isExtra: true,
+      });
+    });
     if (ui.managedBoardsEnabled && data.boardRuntime && Array.isArray(data.boardRuntime.boards)) {
       data.boardRuntime.boards.forEach((b) => {
         if (b.gameKey === null) return;
@@ -4152,7 +4554,10 @@
       // full eligibility re-check happens at display time.
       reservedMarkerIds: reservedPendingMarkerIds(data, state),
       activeGames,
-      completedMatchIds: [],
+      // LIVE-01: a factually COMPLETED game leaves the programme and releases
+      // its people, even while the fixture row is still in memory. Completion
+      // is only ever recorded evidence, never inferred from PLAYING.
+      completedMatchIds: Array.from(completedGameTokens(data.completedMatches)),
       // Confirmed markers are FACT: each owning player is projected as
       // factually MARKING (planner eligibility), independent of Managed
       // Boards and independent of any PLAYING state.
@@ -4539,6 +4944,11 @@
     '.sssl-advicehead{font-size:var(--fs-2xs);font-weight:700;letter-spacing:0.08em;color:var(--muted);margin:6px 0 3px}',
     '.sssl-advicehead .badge{display:inline-block;padding:0 6px;border-radius:8px;margin-right:6px;font-size:var(--fs-3xs);color:var(--accent-ink);background:var(--accent)}',
     '.sssl-advicehead.projected .badge{background:var(--border);color:var(--text)}',
+    // STABLE-01: a confirmed duty whose game the schedule no longer lists.
+    // Occupied, visible, and releasable in one click.
+    '.sssl-orphan{display:flex;align-items:center;gap:6px;font-size:var(--fs-2xs);color:var(--text);padding:2px 4px;border-left:3px solid var(--accent);background:var(--border)}',
+    '.sssl-orphan .nm{font-weight:700;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.sssl-orphan .why{color:var(--muted);font-size:var(--fs-3xs)}',
     // COLS-08: ONE recommendation row = ONE explicit CSS GRID with a column
     // for every cell (sequence | board | player | vs | player | marker |
     // status). Every cell is appended on EVERY row, so columns line up
@@ -4827,6 +5237,10 @@
 
   let activeSchedulerUi = null;
   let activeBoardRuntime = null;
+  // LIVE-01: the render closure's own persist, so a completion discovered by
+  // the live poll writes the release through the SAME path as an operator
+  // action (and cannot be resurrected by a Refresh).
+  let activePersistDispatch = null;
 
   function render(state, storage, data, liveNote, diagnostics, schedulerUi) {
     if (!schedulerUi) schedulerUi = activeSchedulerUi || defaultSchedulerUiState();
@@ -4877,8 +5291,12 @@
           // survive an immediate Refresh/F5 exactly like board ownership and
           // the pending handoff already do.
           Object.assign(
-            snapshotDispatchState(data.boardRuntime, data.pendingMarkers, data.markerHistory),
-            { markers: snapshotMarkerAssignments(data.markerRuntime) })),
+            snapshotDispatchState(data.boardRuntime, data.pendingMarkers, data.markerHistory, data.fixtures),
+            { markers: snapshotMarkerAssignments(data.markerRuntime),
+              // STABLE-01: and each duty's own match identity, so a restore
+              // can re-find the match after a key-form change instead of
+              // silently releasing the marker.
+              markerIdentity: snapshotMarkerIdentity(data.markerRuntime, data.fixtures) })),
         // MARKER-10: an unrelated persist must never drop the panel width
         nhWidthPx);
       saveState(storage, state, data.storeKey);
@@ -4887,6 +5305,7 @@
     // deliberately, so it is written with the rest of this league's state —
     // no new key, no new mechanism, and nothing the scheduler ever reads.
     const persistCollapsed = () => { saveState(storage, state, data.storeKey); };
+    activePersistDispatch = persistDispatch;
     // ACCEPT-01/02: dispatch a game to a physical board. Applies the
     // immutable assignGameToBoard result, hands the current marker proposal
     // over as PENDING advice (never factual MARKING), persists, and re-plans.
@@ -5227,6 +5646,33 @@
     // ADVISE) in MANUAL/OFF, whatever pending handoff state exists.
     const adviceModeOn = markerAdviceEnabledFor(markerModeNow);
     advicePane.classList.toggle('nomarkers', !markerUiOn);
+    /* STABLE-01: a CONFIRMED marker duty whose match DartConnect no longer
+     * lists (typically a match it now reports only as live) stays occupied —
+     * that is the invariant. It is therefore shown here with an explicit
+     * release instead of disappearing when its fixture row does. */
+    if (markerUiOn) {
+      orphanMarkerDuties(mkr, data.fixtures).forEach((duty) => {
+        const row = el('div', 'sssl-orphan');
+        row.appendChild(el('span', 'nm', 'M: ' + markerNameForId(data, duty.markerId)));
+        row.appendChild(el('span', 'why', 'duty kept — game not in the schedule list'));
+        const x = el('button', 'sssl-brel', '×');
+        x.type = 'button';
+        x.title = 'Release this marker duty only (board ownership, PLAYING and DartConnect are unchanged)';
+        x.setAttribute('aria-label', 'Release marker ' + markerNameForId(data, duty.markerId));
+        x.addEventListener('click', () => {
+          // Release by KEY: the duty's game cannot be resolved to a fixture.
+          const res = releaseMarkerByKey(mkr, duty.key);
+          if (res.ok) {
+            data.markerRuntime = res.runtime;
+            data.markerHistory = releaseMarkerMark(data.markerHistory, duty.markerId);
+            persistDispatch();
+          }
+          render(state, storage, data, liveNote, diagnostics, schedulerUi);
+        });
+        row.appendChild(x);
+        advicePane.appendChild(row);
+      });
+    }
     const listPane = el('div', 'sssl-fixtures');
     const delayedPane = el('div', 'sssl-fixtures delayed');
     const rosterPane = el('div', 'sssl-roster');
@@ -6484,6 +6930,18 @@
     MANAGED_BOARD_UNASSIGNED,
     MAX_MANAGED_BOARDS,
     boardKeyForGame,
+    gameDateToken,
+    gameIdentityFor,
+    fixtureHasPair,
+    resolveStoredGame,
+    snapshotMarkerIdentity,
+    isFixtureCompleted,
+    completedGameTokens,
+    liveCommitmentsFromRecords,
+    mergeLiveCommitments,
+    LIVE_COMMITMENT_GRACE_POLLS,
+    orphanMarkerDuties,
+    releaseMarkerByKey,
     createManagedBoardRuntime,
     findBoardOwningGame,
     getAvailableManagedBoards,

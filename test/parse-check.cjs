@@ -425,13 +425,13 @@ function lifecycleFixture() {
     status: 'waiting',
   };
 }
-function lifecycleCtx(fixture, transport) {
+function lifecycleCtx(fixture, transport, dataExtra) {
   const notes = [];
   return {
     ctx: {
       state: { division: 'Universal', selectedMatchDate: '2026-10-01' },
       storage: null,
-      data: { fixtures: [fixture] },
+      data: Object.assign({ fixtures: [fixture] }, dataExtra || {}),
       transport,
       league: { leagueCode: 'SStaffSL', leagueId: '24343' },
       live: {
@@ -472,11 +472,14 @@ const completedPayload = { reg: { Universal: { '2026-09-03': [
 // lifecycle scenarios below MUST run sequentially in one chain — concurrent
 // refreshLive calls return early without rendering.
 asyncChecks.push((async () => {
-  // live -> 500(+completed fallback) -> live: no flicker, then still marked.
+  // live -> 500(+empty fallback) -> live: no flicker, then still marked.
+  // NOTE: the fallback payload deliberately carries NO record for this match.
+  // A completed record would (correctly, LIVE-01) complete the game instead of
+  // testing the flicker case.
   const fx = lifecycleFixture();
   const { ctx, notes } = lifecycleCtx(fx, scriptedTransport([
     { live: livePayload },
-    { matches: completedPayload },
+    { matches: { matches: [] } },
     { live: livePayload },
   ]));
   await api.refreshLive(ctx);
@@ -489,17 +492,49 @@ asyncChecks.push((async () => {
   await api.refreshLive(ctx);
   check('lifecycle recovery re-marks PLAYING', fx.status === 'playing' && ctx.live.playing === 1);
 
-  // live -> successful empty live: PLAYING clears (authoritative absence).
+  // LIVE-01 (live-venue defect, 22 Oct): a successful but EMPTY live response
+  // used to clear PLAYING, which freed both players mid-match and let the
+  // scheduler recommend them for another game. Absence from the live feed is
+  // NOT completion, so PLAYING is now retained until a completed record
+  // proves the match is over.
   const fx2 = lifecycleFixture();
   fx2.status = 'playing';
   const c2 = lifecycleCtx(fx2, scriptedTransport([
     { live: livePayload },
     { live: emptyLivePayload },
+    { live: completedPayload },
   ]));
   await api.refreshLive(c2.ctx);
   check('lifecycle relive marks', fx2.status === 'playing');
   await api.refreshLive(c2.ctx);
-  check('lifecycle successful empty clears PLAYING', fx2.status === 'waiting' && c2.ctx.live.playing === 0);
+  check('LIVE-01: an empty live response RETAINS PLAYING (absence is not completion)',
+    fx2.status === 'playing' && c2.ctx.live.playing === 1);
+  check('LIVE-01: the retained game is flagged as unconfirmed, not concealed',
+    c2.ctx.live.unconfirmed === 1 && c2.notes[1].indexOf('1 unconfirmed') !== -1);
+  await api.refreshLive(c2.ctx);
+  check('LIVE-01: a completed record releases the game (status completed, no longer playing)',
+    fx2.status === 'completed' && c2.ctx.live.playing === 0);
+
+  // LIVE-01: completion is the ONLY thing that ends a committed game, and it
+  // releases the marker duty and the physical board with it (a person must
+  // never stay double-booked, and a freed board must be genuinely free).
+  const fxDone = lifecycleFixture();
+  fxDone.status = 'playing';
+  const boardRt = api.assignGameToBoard(api.createManagedBoardRuntime(4),
+    Object.assign({}, fxDone, { status: 'waiting' }), 1).runtime;
+  const markRt = api.assignMarkerToGame(api.createMarkerRuntime(), fxDone, 5765970, {
+    absentIds: [], playingPlayerIds: [], participantIds: [5765923, 5765962],
+  }).runtime;
+  const cDone = lifecycleCtx(fxDone, scriptedTransport([{ live: completedPayload }]),
+    { boardRuntime: boardRt, markerRuntime: markRt });
+  check('LIVE-01: the marker and board are held before completion',
+    api.findMarkerForGame(cDone.ctx.data.markerRuntime, fxDone) === 5765970 &&
+    api.findBoardOwningGame(cDone.ctx.data.boardRuntime, fxDone).boardNumber === 1);
+  await api.refreshLive(cDone.ctx);
+  check('LIVE-01: completion releases the marker duty and the board',
+    fxDone.status === 'completed' &&
+    api.findMarkerForGame(cDone.ctx.data.markerRuntime, fxDone) === null &&
+    api.findBoardOwningGame(cDone.ctx.data.boardRuntime, fxDone) === null);
 
   // total outage (both endpoints fail): UNKNOWN preserves state + error note.
   const fx3 = lifecycleFixture();
@@ -526,9 +561,10 @@ asyncChecks.push((async () => {
   // itself without pressing Refresh.
   const fx5 = lifecycleFixture();
   const c5 = lifecycleCtx(fx5, scriptedTransport([
-    { live: livePayload },      // marks PLAYING -> changed
-    { live: livePayload },      // same set -> unchanged
-    { live: emptyLivePayload }, // clears PLAYING -> changed
+    { live: livePayload },         // marks PLAYING -> changed
+    { live: livePayload },         // same set -> unchanged
+    { live: emptyLivePayload },    // LIVE-01: retained, so still unchanged
+    { live: completedPayload },    // factual completion -> changed (released)
   ]));
   await api.refreshLive(c5.ctx);
   check('TRIAL-05 poll that CHANGES the PLAYING set raises the updated cue',
@@ -537,8 +573,11 @@ asyncChecks.push((async () => {
   check('TRIAL-05 poll with UNCHANGED PLAYING set raises no updated cue',
     c5.ctx.live.updated === false && c5.notes[1].indexOf('· updated') === -1);
   await api.refreshLive(c5.ctx);
-  check('TRIAL-05 authoritative clear also raises the updated cue',
-    fx5.status === 'waiting' && c5.ctx.live.updated === true && c5.notes[2].indexOf('· updated') !== -1);
+  check('LIVE-01: an empty authoritative response alone never clears PLAYING',
+    fx5.status === 'playing' && c5.ctx.live.updated === false && c5.notes[2].indexOf('· updated') === -1);
+  await api.refreshLive(c5.ctx);
+  check('TRIAL-05 factual completion raises the updated cue',
+    fx5.status === 'completed' && c5.ctx.live.updated === true && c5.notes[3].indexOf('· updated') !== -1);
 })());
 // ---- dynamic divisions (V1.1 phase 2: no production allowlist) ----
 function synthProps(divNames, opts) {
@@ -1236,7 +1275,7 @@ check('ACCEPT-03: board ownership + pending handoff persist in the SAME store ke
   srcText.indexOf('restoreDispatchState(schedulerUi.boardCount, savedDispatch, data.fixtures)') !== -1);
 check('ACCEPT-03/4C: release persists immediately (a released board never resurrects)',
   (srcText.match(/persistDispatch\(\);/g) || []).length >= 3 &&
-  srcText.indexOf('function snapshotDispatchState(runtime, pendingMarkers, history)') !== -1);
+  srcText.indexOf('function snapshotDispatchState(runtime, pendingMarkers, history, fixtures)') !== -1);
 check('ACCEPT-03/5: dispatch state is scoped by division@date (never crosses divisions)',
   srcText.indexOf('mergeDispatchBucket(state.night && state.night.dispatch, dispatchBucketKey(state)') !== -1 &&
   srcText.indexOf('function mergeDispatchBucket(previous, bucket, value)') !== -1);
@@ -1315,7 +1354,7 @@ check('MARKER-3: marker history is recorded/released and persisted inside the ex
   srcText.indexOf('function recordMarkerMark(history, playerId, gameKey)') !== -1 &&
   srcText.indexOf('function releaseMarkerMark(history, playerId)') !== -1 &&
   srcText.indexOf('entry.history = normalizeMarkerHistory(b.history);') !== -1 &&
-  srcText.indexOf('snapshotDispatchState(data.boardRuntime, data.pendingMarkers, data.markerHistory)') !== -1 &&
+  srcText.indexOf('snapshotDispatchState(data.boardRuntime, data.pendingMarkers, data.markerHistory, data.fixtures)') !== -1 &&
   srcText.indexOf('data.markerHistory = restored.history;') !== -1);
 check('MARKER-1: a reservation never blocks the game that owns the pending marker',
   srcText.indexOf('function reservedPendingMarkerIds(data, state, exceptGameKey)') !== -1 &&
@@ -1340,7 +1379,10 @@ check('MARKER-5: the loser is never auto-confirmed as MARKING',
 check('COLS-01: confirmed marker assignments are persisted and restored (Refresh keeps them)',
   srcText.indexOf('function snapshotMarkerAssignments(runtime)') !== -1 &&
   srcText.indexOf('function normalizeMarkerAssignments(raw)') !== -1 &&
-  srcText.indexOf('{ markers: snapshotMarkerAssignments(data.markerRuntime) }') !== -1 &&
+  srcText.indexOf('markers: snapshotMarkerAssignments(data.markerRuntime),') !== -1 &&
+  // STABLE-01: each confirmed duty also persists its match identity, so a
+  // restore can re-find the match after a key-form change.
+  srcText.indexOf('markerIdentity: snapshotMarkerIdentity(data.markerRuntime, data.fixtures)') !== -1 &&
   srcText.indexOf('entry.markers = snapshotMarkerAssignments(normalizeMarkerAssignments(b.markers));') !== -1 &&
   srcText.indexOf('data.markerRuntime = restored.markerRuntime;') !== -1 &&
   srcText.indexOf('const markerRuntime = createMarkerRuntime();') !== -1 &&
@@ -1624,7 +1666,7 @@ asyncChecks.push(delayLivePrior.then(() => (async () => {
   const delayedRows = (ctx) => ctx.data.fixtures.filter((f) => f.delayed);
   const fx = delayedLiveFixture();
   const { ctx } = lifecycleCtx(fx, scriptedTransport([
-    { live: livePayload }, { live: livePayload }, { live: emptyLivePayload }, { live: emptyLivePayload },
+    { live: livePayload }, { live: livePayload }, { live: completedPayload }, { live: completedPayload },
   ]));
   // The operator collapsed this group earlier in the evening.
   const collapsedState = {};
@@ -1662,8 +1704,8 @@ asyncChecks.push(delayLivePrior.then(() => (async () => {
   // Manual Refresh / recovery: PLAYING survives a failed poll, then clears.
   await api.refreshLive(ctx);
   counts = api.liveDelayedGroupCounts(delayedRows(ctx));
-  check('DELAY-LIVE: when the match finishes the highlight and count are removed',
-    fx.status === 'waiting' && counts[key] === undefined);
+  check('DELAY-LIVE: when the match reports COMPLETED the highlight and count are removed',
+    fx.status === 'completed' && counts[key] === undefined);
   check('DELAY-LIVE: the group then returns to the preference the operator always had',
     api.delayedGroupCollapsed(collapsedState, key, 0) === true && collapsedState[key] === true);
   await api.refreshLive(ctx);

@@ -2005,7 +2005,11 @@ console.log('\n--- Slice 3B Collapsible Delayed Groups Tests ---');
   const liveAdvice = api.buildSchedulerAdvice(bUi(), liveData, bView);
   check('70. Collapsed delayed group never touches factual PLAYING/completion state',
     fLive[0].status === 'playing' && fLive.find((x) => x.delayed).status === 'waiting' &&
-    liveAdvice.session.completedMatchIds.size === 0);
+    // LIVE-01: the session receives the FACTUAL completion evidence and
+    // nothing more; a collapsed group invents no completion (and the
+    // delayed fixture itself is never completed by collapsing it).
+    liveAdvice.session.completedMatchIds.size === api.completedGameTokens(bCompleted()).size &&
+    !liveAdvice.session.completedMatchIds.has(fLive.find((x) => x.delayed).matchId));
 
   // Current-night group is never a collapsible delayed group.
   check('70. Current-night group is not a collapsible delayed group',
@@ -3587,8 +3591,12 @@ console.log('\n--- Acceptance Follow-Up (dispatch / handoff / persistence) Tests
     reject({ boards: [{ boardNumber: 1, gameKey: 'id:61' }, { boardNumber: 2, gameKey: 'id:61' }] }, 1, 'duplicate-game'));
   const dupFixtures = fixtures().concat(fixtures());
   const ambiguous = api.restoreDispatchState(4, { boards: [{ boardNumber: 1, gameKey: 'id:61' }] }, dupFixtures);
-  check('88. J: an ambiguous game identity is rejected (never guessed)',
-    ambiguous.restored.length === 0 && ambiguous.rejected[0].reason === 'ambiguous-game');
+  // STABLE-01: a game listed TWICE is still the SAME game. Rejecting it freed
+  // a physically occupied board (and, for markers, released a marker mid-game),
+  // so the duplicate now resolves deterministically to that one identity.
+  check('88. J/STABLE-01: a duplicated fixture row still resolves to the one game (board stays occupied)',
+    ambiguous.restored.length === 1 && ambiguous.restored[0].gameKey === 'id:61' &&
+    ambiguous.rejected.length === 0);
   check('88. Restoring never implies PLAYING, completion or marker confirmation',
     api.restoreDispatchState(4, snapshot, fixtures()).pendingMarkers !== null &&
     fixtures().every((f) => f.status === 'waiting'));
@@ -4209,12 +4217,21 @@ const fakeStore = () => {
     api.findMarkerForGame(restored.markerRuntime, f[0]) === null);
   check('97. A valid confirmed fact is restored',
     api.findMarkerForGame(restored.markerRuntime, f[1]) === cP(9).id);
-  check('97. A vanished game restores nothing (the duty is over)',
+  // STABLE-01 (live-venue defect, 22 Oct): a duty whose game left the
+  // schedule list used to be DROPPED silently, freeing the marker to be
+  // proposed for another game while he was still at the board. The duty is
+  // now RETAINED and reported, so it stays occupied until it is explicitly
+  // released (or the night's facts are replaced).
+  check('97. A vanished game keeps its duty (never silently freed), and reports it',
     api.findMarkerForGame(restored.markerRuntime, f[2]) === null &&
+    restored.orphans.length === 1 && restored.orphans[0].markerId === cP(11).id &&
     restored.runtime.boards.every((b) => b.gameKey === null));
   check('97. One player never restores two duties',
-    Object.keys(restored.markerRuntime.byMarker).length === 1 &&
-    Object.keys(restored.markerRuntime.byGame).length === 1);
+    Object.keys(restored.markerRuntime.byMarker).length === 2 &&
+    restored.markerRuntime.byMarker[cP(9).id] === 'id:7002' &&
+    restored.markerRuntime.byMarker[cP(11).id] === 'id:9999' &&
+    // the duplicate entry for cP(9) was ignored, not double-counted
+    Object.keys(restored.markerRuntime.byGame).length === 2);
   check('97. Malformed persisted markers are dropped, never guessed',
     Object.keys(api.restoreDispatchState(4, { markers: { 'id:7002': 'x', 'id:7003': -1 } }, f)
       .markerRuntime.byGame).length === 0 &&
@@ -4747,6 +4764,207 @@ const fakeStore = () => {
     cleared.runtime.byMarker[ids[1]] == null &&
     fixtures[0].status === 'waiting' && fixtures[0].playerA.id === 701 &&
     fixtures[0].playerB.id === 702 && held.ok === true);
+})();
+
+// ---------------------------------------------------------------------------
+console.log('\n--- LIVE-01/STABLE-01: live-night commitment integrity (22 Oct venue defects) ---');
+
+// The reported venue night: four boards, real names. Drew Tyler marks the B1
+// game, James Harrison plays it, Stuart Normand plays on B2. A live poll that
+// stopped listing a started match used to free those people and re-offer them,
+// and a marker duty whose game key did not resolve was silently dropped.
+(() => {
+  const v = (i, name) => ({ id: 800 + i, name, division: 'Universal' });
+  const drew = v(1, 'Drew Tyler');
+  const stuart = v(2, 'Stuart Normand');
+  const james = v(3, 'James Harrison');
+  const jason = v(4, 'Jason Cowlishaw');
+  const markW = v(5, 'Mark Walker');
+  const paulW = v(6, 'Paul Wright');
+  const steven = v(7, 'Steven Lowe');
+  const chad = v(8, 'Chad Arnold');
+  const bennett = v(9, 'Mark Bennett');
+  const andrewK = v(10, 'Andrew Kenyon');
+  const daz = v(11, 'Daz Price');
+  const trevor = v(12, 'Trevor Carter');
+  const bench = [13, 14, 15, 16, 17, 18].map((i) => v(i, 'Bench ' + i));
+  // A DIFFERENT person who shares James Harrison's first name and initial.
+  const jamesH = v(30, 'James Hughes');
+  const roster = [drew, stuart, james, jason, markW, paulW, steven, chad, bennett,
+    andrewK, daz, trevor, jamesH].concat(bench);
+
+  const g = (m, a, b, status) => ({
+    matchId: 8100 + m, date: '2026-10-22', dateValue: 200, dateLabel: '22 Oct',
+    division: 'Universal', roundValue: 1, sessionValue: 1, delayed: false,
+    playerA: a, playerB: b, status: status || 'waiting',
+  });
+  const b1 = g(1, james, jason);
+  const b2 = g(2, stuart, markW);
+  const b3 = g(3, paulW, steven);
+  const b4 = g(4, chad, bennett);
+  const w1 = g(5, andrewK, daz);
+  const w2 = g(6, trevor, jamesH);
+  const w3 = g(7, bench[0], bench[1]);
+  const view = { division: 'Universal', selectedMatchDate: '2026-10-22', absentIds: [] };
+  const ui = Object.assign(api.defaultSchedulerUiState(), { boardCount: 4 });
+
+  // Drew is CONFIRMED as the B1 marker; all four opening games are live.
+  const asg = api.assignMarkerToGame(api.createMarkerRuntime(), b1, drew.id, {
+    absentIds: [], playingPlayerIds: [], participantIds: [james.id, jason.id],
+  });
+  check('110. the opening marker is confirmed in the domain', asg.ok === true);
+  const mkr = asg.runtime;
+  const live = [b1, b2, b3, b4].map((x) => Object.assign({}, x, { status: 'playing' }));
+  const data = () => ({ fixtures: live.concat([w1, w2, w3]), roster, completedMatches: [], markerRuntime: mkr });
+  const mkrBefore = JSON.stringify(mkr);
+  const adv = api.buildSchedulerAdvice(ui, data(), view);
+  const states = api.derivePlayerStates(adv.session);
+
+  // 1. Case A: Drew, already marking B1, is never offered a second duty.
+  check('110. Case A: a confirmed marker is never proposed for a second duty',
+    adv.recommended.length > 0 && adv.recommended.every((x) => x.proposedMarkerId !== drew.id));
+  const second = api.assignMarkerToGame(mkr, live[1], drew.id, {
+    absentIds: [],
+    playingPlayerIds: live.flatMap((x) => [x.playerA.id, x.playerB.id]),
+    participantIds: [stuart.id, markW.id],
+  });
+  check('110. Case A: the domain refuses a second concurrent duty',
+    second.ok === false && second.reason === 'player-already-marking');
+
+  // 2. Case B: Stuart, playing an opening game, is never offered another.
+  check('110. Case B: a player in a live game is never recommended for another',
+    adv.recommended.every((x) => [x.playerA.id, x.playerB.id].indexOf(stuart.id) === -1));
+  check('110. every opening-wave participant is PLAYING in the occupancy engine',
+    [james, jason, stuart, markW, paulW, steven, chad, bennett]
+      .every((p) => states.get(p.id).state === api.PLAYER_STATES.PLAYING));
+
+  // 3. Case C: a MARKING player is never dispatched to play elsewhere.
+  const cB1 = g(11, chad, bennett, 'playing');
+  const cB2 = g(12, drew, jason, 'playing');
+  const cW1 = g(13, james, andrewK);
+  const mkrC = api.assignMarkerToGame(api.createMarkerRuntime(), cB1, james.id, {
+    absentIds: [], playingPlayerIds: [chad.id, bennett.id], participantIds: [chad.id, bennett.id],
+  }).runtime;
+  const advC = api.buildSchedulerAdvice(ui,
+    { fixtures: [cB1, cB2, cW1, g(14, daz, trevor)], roster, completedMatches: [], markerRuntime: mkrC }, view);
+  check('110. Case C: a MARKING player is never recommended to play elsewhere',
+    api.derivePlayerStates(advC.session).get(james.id).state === api.PLAYER_STATES.MARKING &&
+    advC.recommended.every((x) => x.playerA.id !== james.id && x.playerB.id !== james.id));
+
+  // 4. The assigned marker survives the transition to PLAYING and is part of
+  //    the active game the planner sees (not only a row decoration).
+  check('110. a marker assignment survives its game becoming PLAYING',
+    api.findMarkerForGame(mkr, live[0]) === drew.id &&
+    adv.session.activeGames.some((a) => a.matchId === b1.matchId && a.markerId === drew.id));
+
+  // 5. It survives a live refresh even when DartConnect re-publishes the same
+  //    match WITHOUT its schedule id (the identity form changes, the fact does
+  //    not).
+  const stored = {
+    boards: [], pendingMarkers: {},
+    markers: { 'id:8101': drew.id },
+    markerIdentity: { 'id:8101': { a: james.id, b: jason.id, date: '2026-10-22' } },
+    history: null,
+  };
+  const idless = Object.assign({}, b1, { matchId: null, status: 'playing' });
+  const restored = api.restoreDispatchState(4, stored, [idless, b2]);
+  check('110. a duty survives its match being re-published without the id (re-keyed, not lost)',
+    api.findMarkerForGame(restored.markerRuntime, idless) === drew.id &&
+    restored.orphans.length === 0);
+  // Legacy/unresolvable: RETAINED and reported, never silently freed.
+  const legacy = api.restoreDispatchState(4, { markers: { 'id:8101': drew.id } }, [idless, b2]);
+  const legacySession = api.buildNightSession(ui,
+    { fixtures: [idless, b2], roster, markerRuntime: legacy.markerRuntime }, view);
+  check('110. an unresolvable duty stays OCCUPIED and is reported for release',
+    legacy.orphans.length === 1 && legacy.orphans[0].markerId === drew.id &&
+    api.derivePlayerStates(legacySession).get(drew.id).state === api.PLAYER_STATES.MARKING);
+  check('110. that retained duty can be released explicitly by key',
+    api.releaseMarkerByKey(legacy.markerRuntime, legacy.orphans[0].key).runtime.byMarker[drew.id] == null);
+
+  // 6. Occupancy covers EVERY active player and EVERY active marker.
+  const activePeople = [james, jason, stuart, markW, paulW, steven, chad, bennett];
+  check('110. all active players and the active marker are excluded from the marker pool',
+    api.getEligibleMarkerCandidates({
+      players: roster, absentIds: [],
+      playingPlayerIds: activePeople.map((p) => p.id),
+      markingPlayerIds: [drew.id], markedGameKeys: mkr.byGame,
+      excludeParticipants: true, participantIds: [james.id, jason.id],
+    }).every((c) => c.id !== drew.id && activePeople.every((p) => p.id !== c.id)));
+
+  // 7. Completion releases the game's people (and the game is not replanned).
+  const done = live.map((x) => (x.matchId === b1.matchId ? Object.assign({}, x, { status: 'completed' }) : x));
+  const advDone = api.buildSchedulerAdvice(ui, {
+    fixtures: done.concat([w1, w2, w3]), roster, markerRuntime: mkr,
+    completedMatches: [{ matchId: b1.matchId, date: '2026-10-22',
+      playerA: { id: james.id }, playerB: { id: jason.id }, source: 'schedule-props' }],
+  }, view);
+  check('110. completion is established -> the game is not replanned and its players are free',
+    advDone.recommended.every((x) => x.matchId !== b1.matchId) &&
+    api.derivePlayerStates(advDone.session).get(jason.id).state === api.PLAYER_STATES.AVAILABLE);
+  check('110. completion evidence is what the planner receives (never inferred from PLAYING)',
+    advDone.session.completedMatchIds.has(b1.matchId) &&
+    !adv.session.completedMatchIds.has(b1.matchId));
+
+  // 8. Clearing ONE board releases nothing else.
+  // Boards are dispatched while the games are still waiting (the domain
+  // refuses to board a game that is already PLAYING), so the SAME match ids
+  // are used as waiting copies.
+  const twoBoards = api.assignGameToBoard(
+    api.assignGameToBoard(api.createManagedBoardRuntime(4),
+      Object.assign({}, b1, { status: 'waiting' }), 1).runtime,
+    Object.assign({}, b2, { status: 'waiting' }), 2).runtime;
+  const afterClear = api.releaseBoard(twoBoards, 1).runtime;
+  const clearSession = api.buildNightSession(ui,
+    { fixtures: live.concat([w1]), roster, markerRuntime: mkr, boardRuntime: afterClear }, view);
+  check('110. clearing one board releases nothing else (other board, players, marker)',
+    api.findBoardOwningGame(afterClear, live[0]) == null &&
+    api.findBoardOwningGame(afterClear, live[1]).boardNumber === 2 &&
+    api.findMarkerForGame(mkr, live[0]) === drew.id &&
+    api.derivePlayerStates(clearSession).get(stuart.id).state === api.PLAYER_STATES.PLAYING);
+
+  // 9. Repeated restores are stable: no duplicates, no drift, no erasure.
+  const restoredAgain = api.restoreDispatchState(4, stored, [idless, b2]);
+  check('110. repeated refreshes neither duplicate nor erase a duty',
+    JSON.stringify(restoredAgain.markerRuntime) === JSON.stringify(restored.markerRuntime) &&
+    Object.keys(restoredAgain.markerRuntime.byMarker).length === 1);
+
+  // 10. Four boards, plus the next wave: no person is in two active games.
+  const recIds = adv.recommended.flatMap((x) => [x.playerA.id, x.playerB.id]);
+  const committedIds = new Set(activePeople.map((p) => p.id).concat([drew.id]));
+  check('110. no person is committed twice across the opening wave and the next wave',
+    new Set(recIds).size === recIds.length &&
+    recIds.every((id) => !committedIds.has(id)));
+
+  // 11. Similar names stay distinct people.
+  check('110. James Hughes and James Harrison are never conflated',
+    roster.filter((p) => p.name.indexOf('James') === 0).length === 2 &&
+    api.derivePlayerStates(adv.session).get(jamesH.id).state !== api.PLAYER_STATES.PLAYING &&
+    api.derivePlayerStates(adv.session).get(james.id).state === api.PLAYER_STATES.PLAYING);
+  const ambiguousName = api.liveCommitmentsFromRecords([
+    { matchIds: [99001], ids: [null, null], names: ['Sam Lee', 'Nobody Here'], state: 'O', ref: '', date: '', division: '' },
+  ], new Map(), roster.concat([{ id: 940, name: 'Sam Lee', division: 'Universal' },
+    { id: 941, name: 'Sam Lee', division: 'Universal' }]), 'Universal', []);
+  check('110. a live record naming two people who share a name resolves to nobody',
+    ambiguousName.length === 0);
+
+  // 12. Provisional/future material never corrupts committed occupancy, and a
+  //     live match with NO fixture row still commits its identified players.
+  check('110. projections never appear as recommendations and the marker runtime is untouched',
+    adv.projectedNext.every((p) => !adv.recommended.some((r) => r.matchId === p.matchId)) &&
+    JSON.stringify(mkr) === mkrBefore);
+  const liveOnly = api.liveCommitmentsFromRecords([
+    { matchIds: [99002], ids: [null, null], names: ['Drew Tyler', 'Jason Cowlishaw'], state: 'O', ref: 'X1', date: '', division: '' },
+  ], new Map(), roster, 'Universal', []);
+  const advLive = api.buildSchedulerAdvice(ui,
+    { fixtures: [w1, w2, w3], roster, completedMatches: [], liveCommitments: liveOnly }, view);
+  check('110. a live match with no fixture row still commits its identified players',
+    liveOnly.length === 1 && liveOnly[0].playerA.id === drew.id && liveOnly[0].playerB.id === jason.id &&
+    advLive.recommended.every((x) => [x.playerA.id, x.playerB.id].indexOf(jason.id) === -1) &&
+    api.derivePlayerStates(advLive.session).get(jason.id).state === api.PLAYER_STATES.PLAYING);
+  check('110. a live-only commitment is dropped only with bounded grace (a blip cannot free it)',
+    api.mergeLiveCommitments(liveOnly, [], []).length === 1 &&
+    api.mergeLiveCommitments([Object.assign({}, liveOnly[0], { misses: api.LIVE_COMMITMENT_GRACE_POLLS })], [], []).length === 0 &&
+    api.mergeLiveCommitments(liveOnly, [], [{ matchId: 99002 }]).length === 0);
 })();
 
 if (failures === 0) {

@@ -105,6 +105,46 @@ reserve the same width. Names ellipsise safely with the complete name on hover.
 - A live row states PLAYING by fill, an inset accent bar and its tooltip plus
   the delayed group bar's `● PLAYING n` count — no extra line is spent on it.
 
+## Live-night commitment integrity (LIVE-01 / STABLE-01)
+
+A live venue night exposed two linked defects: a marker assigned to a game
+vanished when that game started, and the scheduler then recommended the same
+people again (marker double-booked, a playing player offered another game, a
+marker offered a game to play in). Both came from the same weakness —
+**occupancy was derived from what happened to be listed and displayed**, not
+from the commitments the night had established.
+
+What the script now guarantees:
+
+- **PLAYING is sticky.** A live response that no longer lists a match is NOT
+  completion: DartConnect also drops matches between legs or after a re-key.
+  The game stays PLAYING, its two players and its marker stay occupied, and the
+  note reports `n unconfirmed` so the uncertainty is visible instead of silent.
+- **Only recorded completion releases people.** A schedule item published as
+  `C`, or an API record in a completed state, completes the fixture: it leaves
+  the panels, its players and marker are released, and its board is freed. No
+  other event frees a commitment.
+- **Live matches without a fixture row still commit their players.** A match
+  that starts can leave the schedule groups it was parsed from. The live feed's
+  own records are resolved to roster players (numeric id first, exact full name
+  second, ambiguity dropped — never guessed) and projected as active games, so
+  those people can never be recommended for another game mid-match. A
+  disappeared live record survives two further polls before it is dropped, so a
+  momentary feed blip cannot free anyone.
+- **Game identity is stable.** The schedule id is the key; id-less rows carry
+  the fixture date and pair, so two legs between the same players never
+  collapse. Each saved commitment also records its match pair and date, so a
+  restore can re-find the match when DartConnect re-publishes it under the
+  other key form (an id-less row that gained an id, or the reverse).
+- **A duty is never silently dropped.** If a saved marker duty's match cannot
+  be found in the fixture list at all, the duty is RETAINED (the marker is
+  still standing at that board) and shown at the top of the scheduling area as
+  `M: <name> — duty kept — game not in the schedule list`, with one-click ×.
+  Releasing it there, or confirming completion, is the only way it ends.
+- **A duplicated fixture row, a vanished id, a collapse toggle, a mode change or
+  a re-render never ends a commitment.** Board ownership restores through the
+  same identity rules, so an occupied board is never quietly freed.
+
 ## Not Here panel: adjustable, not a fly-out (MARKER-10)
 
 The right-hand NOT HERE panel is resized by dragging the divider between it and
