@@ -20,10 +20,10 @@
     "current_work_package":  "LOSER marker mode (factual result -> loser duty -> board-continuous marker with FAIR fallback), honest three-state marker wording, RECOMMENDED-pane marker persistence, PLAYING-over-MARKING precedence, RECOMMENDED/PROJECTED NEXT name readability, PROJECTED NEXT reconciliation against proposed marking duties and the RECOMMENDED-pane play-and-mark exclusion (committed; live venue acceptance outstanding)",
     "accepted_branch":  "feature/scheduler-slice1-domain-model",
     "accepted_checkpoint":  {
-                                "commit":  "6f237b68e44a6ce371a32208fbc22191854e392b",
-                                "short":  "6f237b6",
-                                "date":  "2026-10-23",
-                                "note":  "Live-night duplicate-allocation and lost-marker correction on origin/feature/scheduler-slice1-domain-model; self-tested, awaiting the next venue night. Not merged or published to GreasyFork."
+                                "commit":  "743e5a17fc2f85ce4ff1b022598d9b93880c381d",
+                                "short":  "743e5a1",
+                                "date":  "2026-10-30",
+                                "note":  "LOSER marking, three-state marker wording, recommended-pane persistence, PLAYING precedence, recommendation-row readability, PROJECTED NEXT duty reconciliation and the RECOMMENDED-group play-and-mark exclusion, pushed to origin/feature/scheduler-slice1-domain-model; self-tested, awaiting the next venue night. Not merged or published to GreasyFork."
                             },
     "updated":  "2026-10-30",
     "provenance":  {
@@ -34,7 +34,7 @@
     "verification":  {
                          "authority":  "none",
                          "mode":  "tests",
-                         "commit":  null,
+                         "commit":  "743e5a17fc2f85ce4ff1b022598d9b93880c381d",
                          "result":  "SELF-TESTED",
                          "timestamp":  "2026-10-30T00:00:00+00:00",
                          "evidence":  "Committed on feature/scheduler-slice1-domain-model; evidence from the working tree that produced the commit. node test/parse-check.cjs (325 checks) and node test/scheduler-check.cjs (770 checks) both exited 0 with ALL PASS. New coverage: factual score retention from schedule props and completed API records, loser derivation with draws/byes/missing scores rejected, duty scoping and board/recency preference, LOSER end-to-end allocation with FAIR fallback counting, multi-match duties, board-continuity handoff with ineligible fallback, three distinct marker states (assigned/missing/awaiting), PLAYING-over-MARKING conflict detection and non-reallocation, completion release and non-resurrection, PROJECTED NEXT reconciled against the proposed duties (alternative next match selected, withheld count stated, RECOMMENDED never re-planned, holds never persisted, no duty holder projected under FAIR or LOSER in either strategy and in both managed-board modes, OFF and MANUAL unchanged, full venue invents nothing), and source guards for the recommended-pane persistence fix and the readability CSS. Measured on the captured payload, the reconciliation adds 1.85 ms to a 76 ms OPTIMISED advice build. The RECOMMENDED pane is now one dispatch group: the marker exclusion covers every row of the pane instead of only the free-board prefix, so a player in a 'waiting for a board' row can no longer mark a row above him (21 further checks, test 124, reproduce the observed Drew Tyler scene and cover alternative selection, genuine NO MARKER, dropdown agreement, refresh, FAIR/LOSER, NORMAL/OPTIMISED, managed boards ON/OFF and OFF/MANUAL). Live DartConnect was not contacted, so live result payloads and real match-night acceptance remain unverified.",
