@@ -79,12 +79,68 @@ present in both managed-board modes (it occupies no gutter when boards are
 unmanaged); the optional status column is a pane-level decision so all rows
 reserve the same width. Names ellipsise safely with the complete name on hover.
 
+## LOSER marker mode
+
+LOSER is driven by factual results only. A completed match keeps its published
+leg scores, and a **duty** exists only when both scores are present and differ:
+a draw, a bye, an unscored row or an unknown side produces no duty, so a loser
+is never guessed. The same evidence is accepted from the parsed schedule and
+from completed live API records.
+
+- **Board continuity is preferred, not required.** A physical board only
+  becomes factual when the operator names one, so continuity is honoured at
+  dispatch: naming Board 3 hands over Board 3's own loser as the pending marker
+  when he is eligible, otherwise any other factual loser, otherwise the plan's
+  own proposal. With Managed Boards OFF no board number is ever invented; the
+  most recent duty is preferred instead.
+- **FAIR fills the gaps automatically.** With no usable losing player the
+  allocation is a normal FAIR selection, the mode stays LOSER, and the row says
+  `FAIR` so the stand-in is never passed off as a loser duty. New results are
+  picked up on the next re-render.
+- LOSER adds no fairness restrictions of its own: a player with a later match is
+  still proposed. The shared sequence rule (see *RECOMMENDED is one dispatch
+  group* below) still applies, because marking must never make the current wave
+  unplayable.
+- **PLAYING dominates MARKING.** A confirmed duty whose holder is factually on a
+  dartboard is reported as a conflict (`! PLAYING`, struck-through chip), never
+  counted as valid coverage, and that player is never given a second duty.
+
+**RECOMMENDED is one dispatch group.** The pane's head can start now and its
+tail (`waiting for a board`) starts as soon as a board frees, so every player
+recommended to play anywhere in the pane is excluded from marking anywhere in
+it: nobody is proposed to mark a match while the same pane recommends him to
+play another. Matches after the pane (PROJECTED NEXT and later) stay markable —
+a duty ends with the game it serves — and a confirmed duty holder becomes
+factual MARKING and leaves the pane entirely. If every remaining player is
+already in the pane, the affected rows say NO MARKER rather than take a player
+the pane needs.
+
+Marker advice has three distinct states, so a full venue is never misreported as
+marker failure: **assigned** (confirmed or recommended), **NO MARKER** (an
+allocation was attempted and nobody eligible was free) and **waiting for a board**
+(no allocation was attempted because every board is occupied).
+
+**PROJECTED NEXT accounts for the duties proposed above it.** A marker holds that
+duty for the whole of the game he marks, so he is never named as a player in the
+next wave: the plan is replayed from the same opening wave with those players
+held out, and the first match that is genuinely free is shown instead. The hold
+is temporary — nothing is reserved, confirmed or persisted — and the projection is
+re-derived whenever a marker is changed or released, or a match finishes. If
+every planned next match needs somebody who is still marking, the pane states the
+wait instead of naming a game that cannot happen. OFF and MANUAL propose no
+duties and are unaffected.
+
+The RECOMMENDED and PROJECTED NEXT rows use slightly larger semibold names (and
+matching marker names) for at-a-glance reading; the size is scoped to those rows
+and the row height is unchanged, so TONIGHT and DELAYED keep their existing text.
+
 ## Marker modes and the game table (MARKER-9 / COLS-10)
 
 - Four mutually exclusive marker modes: **OFF | MANUAL | FAIR | LOSER**. OFF
   removes every marker element (control, chip, advice, message) and returns its
   width to the names; MANUAL offers the selector but never recommends or
-  preselects; FAIR and LOSER keep their existing algorithms and overrides.
+  preselects; FAIR rotates marking fairly. **LOSER is always selectable** and
+  prefers the losing player of a completed match (see below).
 - The marker **dialog lives in the RECOMMENDED pane** — that is where a game is
   allocated to a marker, in every mode. The game table below shows a marker
   control **only** for a game that has actually been allocated one (a pending
@@ -94,9 +150,10 @@ reserve the same width. Names ellipsise safely with the complete name on hover.
   atomic `changeMarkerForGame`) or **removed** (choose `M: —`) in place. Both
   release the duty only: board ownership, PLAYING and the fixture are untouched.
 - The candidate list only offers players whose marking leaves the sequence
-  playable: nobody playing, nobody already marking, and nobody needed by the
-  next N games that can be dispatched (N = free boards) — the same union the
-  scheduler's own marker search uses, so list and advice can never disagree.
+  playable: nobody playing, nobody already marking, and nobody recommended to
+  play anywhere in the RECOMMENDED pane — the same union the scheduler's own
+  marker search uses, so list and advice can never disagree. LOSER keeps that
+  sequence rule but drops FAIR's rotation preferences.
 - Each fixture row is ONE line in three fixed bands — `[board] [game] [marker]`
   — with the bands reserved per COLUMN (52px board, 176px marker), so the `vs`
   sits at the same x on every row and a control can never steal width from a

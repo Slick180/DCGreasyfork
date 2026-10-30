@@ -1205,10 +1205,14 @@ check('TRIAL-02: FIXTURE-row edge reserves untouched (advice rows moved to the g
   srcText.indexOf("'.sssl-row .sssl-pa{margin-left:var(--edge-reserve)}'") !== -1 &&
   srcText.indexOf("'.sssl-row .sssl-pb{margin-right:var(--edge-reserve)}'") !== -1 &&
   srcText.indexOf("'.sssl-advice .sssl-pb{margin-right:var(--edge-reserve)}'") === -1);
-check('TRIAL-03: next-N dispatchable participant union excluded from every per-game marker candidate list',
-  srcText.indexOf('const nextWaveIds = nextCapacity > 0') !== -1 &&
-  srcText.indexOf('? nextDispatchParticipantIds(advice.recommended, 0, nextCapacity)') !== -1 &&
-  srcText.indexOf('proposalPool.filter((id) => !nextWaveIds.has(id) && !ownIds.has(id))') !== -1 &&
+check('TRIAL-03: recommended-group participant union excluded from every per-game marker candidate list',
+  // MARKER-11: the union covers the WHOLE recommendation pane, not just the
+  // free-board prefix, so a player in a "waiting for a board" row can never
+  // mark an earlier row of the same pane (the Drew Tyler defect).
+  srcText.indexOf('const recommendedGroupIds = nextCapacity > 0') !== -1 &&
+  srcText.indexOf('? nextDispatchParticipantIds(advice.recommended, 0, advice.recommended.length)') !== -1 &&
+  srcText.indexOf('proposalPool.filter((id) => !recommendedGroupIds.has(id) && !ownIds.has(id))') !== -1 &&
+  srcText.indexOf('MARKER-11 dispatch-GROUP union') !== -1 &&
   srcText.indexOf('TRIAL-03 opening-wave resource validity') !== -1);
 check('TRIAL-03: exhausted candidate list skips honestly (no dead-end branch)',
   srcText.indexOf('if (!extended) select(idx + 1, score, seq);') !== -1);
@@ -1260,7 +1264,11 @@ check('ACCEPT-01: remembered queue is session presentation memory only (never pe
   srcText.indexOf('dispatchOrder: ') === -1 &&
   bnpsBody.indexOf('dispatchOrder') === -1);
 check('ACCEPT-02: dispatch hands the proposal over as PENDING advice, never factual MARKING',
-  srcText.indexOf('if (Number.isSafeInteger(proposedMarkerId)) {') !== -1 &&
+  // The handoff may be re-pointed at the named board's own loser (LOSER
+  // continuity), so the persisted pending advice is `handoff`, not the raw
+  // plan proposal. It is still only PENDING advice.
+  srcText.indexOf('if (Number.isSafeInteger(handoff)) {') !== -1 &&
+  srcText.indexOf('? loserPendingForBoard(') !== -1 &&
   srcText.indexOf('const pendingId = validatePendingMarker(pendingRaw, markerCtxFor(f));') !== -1 &&
   srcText.indexOf("el('span', 'mkslot' +") !== -1 &&
   srcText.indexOf("          (fMarkerId == null && pendingId != null ? ' pending' : ''));") !== -1 &&
@@ -1328,11 +1336,13 @@ check('MARKER-4: next-N is capacity-driven (factual free board slots), never har
   srcText.indexOf('return { managed, boardsKnown: !!rows, capacity, occupied, free: Math.max(0, capacity - occupied) };') !== -1 &&
   srcText.indexOf(': DEFAULT_SCHEDULING_CAPACITY);') !== -1 &&
   srcText.indexOf('function nextDispatchParticipantIds(games, index, capacity)') !== -1 &&
-  (srcText.match(/DEFAULT_SCHEDULING_CAPACITY/g) || []).length === 6 &&
+  // 6 original capacity derivations + 2 in projectNextWaveWithDuties, which
+  // replays the plan at the same capacity as the plan itself used.
+  (srcText.match(/DEFAULT_SCHEDULING_CAPACITY/g) || []).length === 8 &&
   srcText.indexOf('? (session.managedBoardsEnabled ? (session.boardCount || 4) : 4)') === -1 &&
   srcText.indexOf('(session.managedBoardsEnabled ? session.boardCount : 4)') === -1);
 check('MARKER-4: zero capacity invents no marker allocation; an insufficient pool is left honestly null',
-  srcText.indexOf('const nextWaveIds = nextCapacity > 0') !== -1 &&
+  srcText.indexOf('const recommendedGroupIds = nextCapacity > 0') !== -1 &&
   srcText.indexOf('      : [];') !== -1 &&
   srcText.indexOf('if (!cands.length) { select(idx + 1, score, seq); return; }') !== -1 &&
   srcText.indexOf('if (!extended) select(idx + 1, score, seq);') !== -1 &&
@@ -1343,7 +1353,10 @@ check('MARKER-2: completion is never inferred from PLAYING',
 check('MARKER-3: FAIR rotation drives the GLOBAL opening-wave allocation',
   srcText.indexOf('const MARKER_FAIR_PENALTY = 1000;') !== -1 &&
   srcText.indexOf('const MARKER_RECENT_PENALTY = 250;') !== -1 &&
-  srcText.indexOf('select(idx + 1, score + combinedScore(id), seq);') !== -1 &&
+  // LOSER adds a per-(game, player) duty bonus to the same global search, so
+  // FAIR scoring is unchanged while a loser still wins his own game.
+  srcText.indexOf('select(idx + 1, score + combinedScore(id) + loserDutyBonus(idx, id), seq);') !== -1 &&
+  srcText.indexOf('const loserDutyBonus = (idx, id) =>') !== -1 &&
   srcText.indexOf('scoreOf: combinedScore') !== -1);
 check('MARKER-2/3: the played preference is the FIRST ranking tier, rotation penalty stays dominant',
   srcText.indexOf('// Tier 1: factual "already played tonight" - preference, not a gate.') !== -1 &&
@@ -1363,18 +1376,41 @@ check('MARKER-1: a reservation never blocks the game that owns the pending marke
 check('MARKER-4: marker policy control exists, defaults to FAIR and persists with night controls',
   srcText.indexOf('markerPolicy: MARKER_POLICIES.FAIR,') !== -1 &&
   srcText.indexOf("strip.appendChild(el('span', 'lbl', 'Marker'));") !== -1 &&
-  srcText.indexOf('isMarkerPolicyAvailable(MARKER_POLICIES.LOSER, data)') !== -1 &&
   srcText.indexOf('if (isMarkerPolicy(n.markerPolicy)) night.markerPolicy = n.markerPolicy;') !== -1);
-check('MARKER-5: LOSER is factual-only, never guessed, and honestly unavailable without result data',
+check('MARKER-4/10: LOSER is ALWAYS selectable - the mode never depends on a data field',
+  // The retired gate required data.loserIds, which no producer ever wrote, so
+  // the control was permanently disabled. Absence of a result is now a
+  // per-assignment FAIR fallback, not an unavailable mode.
+  srcText.indexOf('if (policy === MARKER_POLICIES.LOSER) return true;') !== -1 &&
+  srcText.indexOf('loserAvailable') === -1 &&
+  srcText.indexOf('b.disabled = !usable') === -1 &&
+  srcText.indexOf('LOSER unavailable: no factual winner/loser result data') === -1 &&
+  srcText.indexOf('data.loserIds') === -1);
+check('MARKER-5: LOSER is factual-only, never guessed',
   srcText.indexOf('function rankLoserCandidates(candidates, options)') !== -1 &&
   srcText.indexOf('if (!loserIds) return null;') !== -1 &&
   srcText.indexOf('function isMarkerPolicyAvailable(policy, view)') !== -1 &&
-  srcText.indexOf('no factual winner/loser result data is available') !== -1 &&
+  // A draw, a bye, a missing score and an unknown side all yield NO loser.
+  srcText.indexOf('function resultLoserId(playerAId, aScore, playerBId, bScore)') !== -1 &&
+  srcText.indexOf('if (aScore === bScore) return null;') !== -1 &&
+  srcText.indexOf('if (item.is_bye) { skipped.bye += 1; return; }') !== -1 &&
   /winner_id|loser_id|loserScore|winnerScore/.test(srcText) === false);
+check('LOSER-10: factual scores are retained from both data paths and become duties',
+  srcText.indexOf('function parseMatchScore(side)') !== -1 &&
+  srcText.indexOf('const cHomeScore = parseMatchScore(cHome);') !== -1 &&
+  srcText.indexOf('loserId: resultLoserId(cAwayId, cAwayScore, cHomeId, cHomeScore),') !== -1 &&
+  srcText.indexOf('scores: [aScore, bScore],') !== -1 &&
+  srcText.indexOf('function getLoserDuties(completedMatches, date, division)') !== -1 &&
+  srcText.indexOf('function loserPreferenceForGame(duties, boardNumber)') !== -1);
+check('LOSER-10: candidate ordering prefers the factual loser and still respects sequence safety',
+  srcText.indexOf('loserIds: loserPreferredByGame[idx].length > 0 ? loserPreferredByGame[idx] : null,') !== -1 &&
+  srcText.indexOf('const loserPreferredByGame = openGames.map((game) =>') !== -1 &&
+  srcText.indexOf('game.markerFallback = markerPolicy === MARKER_POLICIES.LOSER &&') !== -1);
 check('MARKER-5: the loser is never auto-confirmed as MARKING',
   srcText.indexOf('assignMarkerToGame') !== -1 &&
   srcText.indexOf('data.markerRuntime = res.runtime;') !== -1 &&
-  srcText.indexOf('loserIds: (data && data.loserIds) || null') !== -1);
+  // A proposal is still only ADVICE: nothing in the advice path assigns.
+  srcText.indexOf('game.proposedMarkerId = bestSeq ? bestSeq[i] : null;') !== -1);
 // ---- COLS corrective pass source guards (corrective pass, 15 Oct live use) ----
 check('COLS-01: confirmed marker assignments are persisted and restored (Refresh keeps them)',
   srcText.indexOf('function snapshotMarkerAssignments(runtime)') !== -1 &&
@@ -1405,22 +1441,31 @@ check('COLS-02: recommendations are labelled by factual board availability',
   srcText.indexOf('advice.freeBoards = occupancy.free;') !== -1 &&
   srcText.indexOf('advice.occupiedBoards = occupancy.occupied;') !== -1);
 check('COLS-03: a missing marker is stated, never concealed or invented',
-  srcText.indexOf('game.markerUnavailable = game.confirmedMarkerId == null && game.proposedMarkerId == null;') !== -1 &&
   srcText.indexOf("const nm = el('span', 'mknone', 'NO MARKER');") !== -1 &&
   srcText.indexOf('No eligible marker could be recommended for this game ') !== -1 &&
   srcText.indexOf("'.sssl-advice .mknone{") !== -1);
+check('COLS-02/03: three distinct marker states - assigned, genuinely missing, not yet allocated',
+  // A full venue is NOT a marker shortage: allocation was never attempted.
+  srcText.indexOf("game.markerState = (game.confirmedMarkerId != null || game.proposedMarkerId != null)") !== -1 &&
+  srcText.indexOf(": (nextCapacity > 0 ? 'missing' : 'awaiting');") !== -1 &&
+  srcText.indexOf('game.markerUnavailable = game.markerState === \'missing\';') !== -1 &&
+  srcText.indexOf("if (advice.markerAdviceEnabled && g.markerState === 'missing') {") !== -1 &&
+  srcText.indexOf('Waiting for a board — no marker allocation was attempted for this game yet.') !== -1);
 check('COLS-04: projections are never presented as immediately executable',
   srcText.indexOf("'next projected possibility · starts after the games above'") !== -1 &&
   srcText.indexOf('Projected next wave — not startable yet.') !== -1 &&
   srcText.indexOf("pRow.classList.add('dependent');") !== -1 &&
-  srcText.indexOf('a player named here may still be PLAYING or MARKING above.') !== -1);
+  // A projected player may still be PLAYING above; a proposed MARKER never is,
+  // because the projection is reconciled against the duties first.
+  srcText.indexOf('a player named here may still be PLAYING above.') !== -1 &&
+  srcText.indexOf('Anyone proposed as a MARKER above is never ') !== -1);
 check('MARKER-7: four exclusive marker modes in the one existing compact control',
   srcText.indexOf("OFF: 'OFF',") !== -1 &&
   srcText.indexOf("MANUAL: 'MANUAL',") !== -1 &&
   srcText.indexOf('[MARKER_POLICIES.OFF, \'OFF\',') !== -1 &&
   srcText.indexOf('[MARKER_POLICIES.MANUAL, \'MANUAL\',') !== -1 &&
   srcText.indexOf('[MARKER_POLICIES.FAIR, \'FAIR\',') !== -1 &&
-  srcText.indexOf('[MARKER_POLICIES.LOSER, \'LOSER\', loserAvailable') !== -1 &&
+  srcText.indexOf("[MARKER_POLICIES.LOSER, 'LOSER',") !== -1 &&
   // one pressed mode at a time, persisted with the other night settings
   srcText.indexOf("const b = el('button', markerPolicy === mode ? 'on' : '', label);") !== -1 &&
   srcText.indexOf('schedulerUi.markerPolicy = mode;') !== -1 &&
@@ -1438,8 +1483,9 @@ check('MARKER-7: OFF produces no advice AND no marker controls; MANUAL controls 
   srcText.indexOf("if (!advice.markerAdviceEnabled && advice.markerControlsVisible) {") !== -1 &&
   srcText.indexOf('Marker advice is OFF — MARKER: — means no marker is assigned.') === -1 &&
   srcText.indexOf('MANUAL — pick a marker for a fixture you can act on. Nothing is recommended or preselected; ') !== -1 &&
-  // the OFF button is a real mode, not a disabled control
-  srcText.indexOf('const usable = mode !== MARKER_POLICIES.LOSER || loserAvailable;') !== -1);
+  // every mode is a real, selectable control (LOSER included)
+  srcText.indexOf('const usable = mode !== MARKER_POLICIES.LOSER') === -1 &&
+  srcText.indexOf('b.disabled = !usable') === -1);
 check('MARKER-7: OFF removes the marker track from the grid and the roster marker toggle',
   srcText.indexOf("advicePane.classList.toggle('nomarkers', !markerUiOn);") !== -1 &&
   srcText.indexOf('.sssl-advicepane.nomarkers .sssl-advice{--adv-tpl:var(--adv-seq) var(--adv-board) minmax(0,1fr) var(--adv-vs) minmax(0,1fr) var(--adv-status)}') !== -1 &&
@@ -1497,16 +1543,16 @@ check('MARKER-9/COLS-10: fixture rows are ONE line in three fixed bands — [boa
   srcText.indexOf("el('span', 'badge', 'DELAYED')") !== -1 &&
   srcText.indexOf("headRow.appendChild(el('div', 'sssl-rhead', 'NOT HERE'));") !== -1);
 check('MARKER-9: the marker list only offers players who keep the SEQUENCE playable',
-  // playing, marking and now "needed by the next N projected games" are excluded
+  // playing, marking and "recommended to play in the pane" are excluded
   srcText.indexOf('const upcoming = Array.isArray(ctx.upcomingPlayerIds) ? ctx.upcomingPlayerIds : [];') !== -1 &&
   srcText.indexOf('if (upcoming.indexOf(p.id) !== -1) return;') !== -1 &&
   // the operator's dropdown and the scheduler's search share ONE rule
   srcText.indexOf('function markerSequenceReservedIds(adviceState, excludeGame)') !== -1 &&
-  srcText.indexOf('nextDispatchParticipantIds(a.recommended, 0, capacity).forEach((id) => out.add(id));') !== -1 &&
+  srcText.indexOf('nextDispatchParticipantIds(a.recommended, 0, a.recommended.length).forEach((id) => out.add(id));') !== -1 &&
   srcText.indexOf('upcomingPlayerIds: markerSequenceReservedIds(advice, game),') !== -1 &&
   // and the algorithm keeps applying the same union to its proposals
-  srcText.indexOf('const nextWaveIds = nextCapacity > 0') !== -1 &&
-  srcText.indexOf('proposalPool.filter((id) => !nextWaveIds.has(id) && !ownIds.has(id)),') !== -1);
+  srcText.indexOf('const recommendedGroupIds = nextCapacity > 0') !== -1 &&
+  srcText.indexOf('proposalPool.filter((id) => !recommendedGroupIds.has(id) && !ownIds.has(id)),') !== -1);
 check('MARKER-9: an existing duty can be REALLOCATED or REMOVED from the game row',
   srcText.indexOf('? changeMarkerForGame(mkr, f, chosen, assignCtx)') !== -1 &&
   srcText.indexOf(': assignMarkerToGame(mkr, f, chosen, assignCtx);') !== -1 &&
@@ -1741,6 +1787,71 @@ asyncChecks.push(delayLivePrior.then(() => (async () => {
     cands.indexOf(live.playerA.id) === -1 && cands.indexOf(live.playerB.id) === -1 &&
     cands.length === 0);
 })()));
+
+// ---- LOSER mode, marker states, precedence and readability (30 Oct) ----
+check('LOSER: a board only matters when it is factual, so continuity is honoured at dispatch',
+  srcText.indexOf('function loserPendingForBoard(duties, boardNumber, eligibleIds, fallbackId)') !== -1 &&
+  srcText.indexOf('? loserPendingForBoard(') !== -1 &&
+  srcText.indexOf('getEligibleMarkerCandidates(markerCtxFor(game)).map((c) => c.id)') !== -1);
+check('LOSER: FAIR fallback is automatic, stated and never a mode switch',
+  srcText.indexOf('game.markerFallback = markerPolicy === MARKER_POLICIES.LOSER &&') !== -1 &&
+  srcText.indexOf("const fb = el('span', 'mkfallback', 'FAIR');") !== -1 &&
+  srcText.indexOf('LOSER — no completed match has a recorded result yet, so FAIR selection is used. ') !== -1 &&
+  srcText.indexOf('fell back to FAIR (no losing player free for that game).') !== -1);
+check('R-10: a marker confirmed from the RECOMMENDED pane is persisted immediately',
+  srcText.indexOf('const clearPendingMarker = (game) => {') !== -1 &&
+  srcText.indexOf('if (!data.pendingMarkers || data.pendingMarkers[key] == null) return false;') !== -1 &&
+  srcText.indexOf('a CONFIRMED duty is an operator fact and must') !== -1 &&
+  srcText.indexOf('clearPendingMarker(g);') < srcText.indexOf('a CONFIRMED duty is an operator fact and must'));
+check('R-10: PLAYING precedes MARKING, and a stale duty is surfaced as a conflict',
+  srcText.indexOf('if (p.state === PLAYER_STATES.PLAYING) p.markingConflict = true;') !== -1 &&
+  srcText.indexOf('advice.markingConflicts = markingConflicts;') !== -1 &&
+  srcText.indexOf("mk.classList.add('conflict');") !== -1 &&
+  srcText.indexOf("const conflict = el('span', 'mkconflict', '! PLAYING');") !== -1 &&
+  srcText.indexOf("'.sssl-advice .mkconflict{") !== -1);
+check('R-10: RECOMMENDED/PROJECTED names are larger and semibold, marker names match',
+  srcText.indexOf("'.sssl-advice{--adv-name-fs:calc(var(--fs) + 1.5px)}'") !== -1 &&
+  srcText.indexOf("'.sssl-advice .sssl-pa,.sssl-advice .sssl-pb{font-size:var(--adv-name-fs);font-weight:600;line-height:1.2}'") !== -1 &&
+  srcText.indexOf("'.sssl-advice .mkown .mkchip,.sssl-advice .mkslot .sssl-mksel{font-size:var(--adv-name-fs);font-weight:600}'") !== -1);
+check('R-10: the VS separator is less prominent and TONIGHT/DELAYED are untouched',
+  srcText.indexOf("'.sssl-advice .sssl-vs{font-weight:500;font-size:var(--fs-2xs);color:var(--faint);opacity:0.8}'") !== -1 &&
+  // row height stays compact: the marker control loses its vertical padding and
+  // the name line-height is pinned, so the larger text cannot grow the row.
+  srcText.indexOf("'.sssl-advice .mkslot .sssl-mksel{padding-top:0;padding-bottom:0}'") !== -1 &&
+  srcText.indexOf("'.sssl-row .sssl-pa{font-size") === -1 &&
+  srcText.indexOf("'.sssl-datebar{font-size:calc") === -1);
+
+check('R-11: PROJECTED NEXT is reconciled against the duties proposed above it',
+  srcText.indexOf('function projectNextWaveWithDuties(session, openingGames, dutyHolderIds, options)') !== -1 &&
+  srcText.indexOf('projectNextWaveWithDuties,') !== -1 &&
+  // the duties are applied to a COPY of the session for one rollout only
+  srcText.indexOf('reservedMarkerIds: new Set(Array.from(session.reservedMarkerIds || []).concat(ids)),') !== -1 &&
+  // the reconciliation runs AFTER the proposals exist, and only the projection
+  // is replaced: the recommended wave is never re-planned
+  srcText.indexOf('const replanned = projectNextWaveWithDuties(') >
+  srcText.indexOf('openGames.forEach((game, i) => { game.proposedMarkerId = bestSeq ? bestSeq[i] : null; });') &&
+  srcText.indexOf('advice.projectedNext = ((replanned && replanned.games) || []).filter((g) => !involvesDuty(g));') !== -1 &&
+  srcText.indexOf('advice.projectedNextMarkingWithheld = plannedNext.filter(involvesDuty).length;') !== -1 &&
+  // OFF/MANUAL report the fact honestly rather than undefined
+  srcText.indexOf('projectedNextMarkingWithheld: 0,') !== -1);
+check('R-11: the reconciliation is TEMPORARY (no duty is reserved or persisted)',
+  (() => {
+    const at = srcText.indexOf('const proposedDutyIds = new Set();');
+    const end = srcText.indexOf('return advice;', at);
+    if (at === -1 || end === -1) return false;
+    const block = srcText.slice(at, end);
+    return block.indexOf('persistDispatch') === -1 &&
+      block.indexOf('pendingMarkers') === -1 &&
+      block.indexOf('markerRuntime =') === -1 &&
+      block.indexOf('assignMarkerToGame') === -1;
+  })());
+check('R-11: no nameable next match states the wait instead of naming an impossible game',
+  srcText.indexOf("'waiting · ' +") !== -1 &&
+  srcText.indexOf('planned match needs a player who is marking above') !== -1 &&
+  srcText.indexOf('planned matches need a player who is marking above') !== -1 &&
+  srcText.indexOf('No next match is named yet: every match the plan holds for the next wave needs somebody ') !== -1 &&
+  // the wait is a HEAD + one plain line, never a fabricated advice row
+  srcText.indexOf("pHold.appendChild(el('span', 'badge', 'PROJECTED NEXT'));") !== -1);
 
 const counts = {
   rosterUniversal: roster.players.filter((p) => p.division === 'Universal').length,

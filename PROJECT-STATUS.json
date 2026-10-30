@@ -15,9 +15,9 @@
                       "model":  "unknown",
                       "role":  "implementation",
                       "started":  null,
-                      "note":  "Live-night commitment correction (LIVE-01/STABLE-01) implemented, tested and committed as 6f237b6; no development work is running."
+                      "note":  "LOSER marker mode, three-state marker wording, recommended-pane persistence, PLAYING precedence, recommendation-row readability, PROJECTED NEXT duty reconciliation and the RECOMMENDED-pane play-and-mark exclusion (MARKER-11) are implemented, self-tested and committed on feature/scheduler-slice1-domain-model. Live DartConnect acceptance is outstanding; no development work is running."
                   },
-    "current_work_package":  "Live-night commitment integrity: PLAYING retained until recorded completion, live-only matches committed, completion releases players/markers/boards, stable game identity with duty retention instead of silent release (commit 6f237b6)",
+    "current_work_package":  "LOSER marker mode (factual result -> loser duty -> board-continuous marker with FAIR fallback), honest three-state marker wording, RECOMMENDED-pane marker persistence, PLAYING-over-MARKING precedence, RECOMMENDED/PROJECTED NEXT name readability, PROJECTED NEXT reconciliation against proposed marking duties and the RECOMMENDED-pane play-and-mark exclusion (committed; live venue acceptance outstanding)",
     "accepted_branch":  "feature/scheduler-slice1-domain-model",
     "accepted_checkpoint":  {
                                 "commit":  "6f237b68e44a6ce371a32208fbc22191854e392b",
@@ -25,7 +25,7 @@
                                 "date":  "2026-10-23",
                                 "note":  "Live-night duplicate-allocation and lost-marker correction on origin/feature/scheduler-slice1-domain-model; self-tested, awaiting the next venue night. Not merged or published to GreasyFork."
                             },
-    "updated":  "2026-10-23",
+    "updated":  "2026-10-30",
     "provenance":  {
                        "agent":  "Freebuff (Buffy)",
                        "model":  "unknown",
@@ -34,17 +34,20 @@
     "verification":  {
                          "authority":  "none",
                          "mode":  "tests",
-                         "commit":  "6f237b68e44a6ce371a32208fbc22191854e392b",
+                         "commit":  null,
                          "result":  "SELF-TESTED",
-                         "timestamp":  "2026-10-23T09:16:42+01:00",
-                         "evidence":  "node test/parse-check.cjs (312 checks) and node test/scheduler-check.cjs (694 checks) both exited 0 with ALL PASS after the correction, including 12 new live-night scenarios and the live-poll retention/completion-release checks. A local Chromium harness confirmed the retained-duty affordance renders, keeps its marker out of the plan and releases on click. The live DartConnect service is unreachable from this environment, so live-feed behaviour is exercised through genuine-shaped records on a scripted transport, not the live service. No independent verification.",
+                         "timestamp":  "2026-10-30T00:00:00+00:00",
+                         "evidence":  "Committed on feature/scheduler-slice1-domain-model; evidence from the working tree that produced the commit. node test/parse-check.cjs (325 checks) and node test/scheduler-check.cjs (770 checks) both exited 0 with ALL PASS. New coverage: factual score retention from schedule props and completed API records, loser derivation with draws/byes/missing scores rejected, duty scoping and board/recency preference, LOSER end-to-end allocation with FAIR fallback counting, multi-match duties, board-continuity handoff with ineligible fallback, three distinct marker states (assigned/missing/awaiting), PLAYING-over-MARKING conflict detection and non-reallocation, completion release and non-resurrection, PROJECTED NEXT reconciled against the proposed duties (alternative next match selected, withheld count stated, RECOMMENDED never re-planned, holds never persisted, no duty holder projected under FAIR or LOSER in either strategy and in both managed-board modes, OFF and MANUAL unchanged, full venue invents nothing), and source guards for the recommended-pane persistence fix and the readability CSS. Measured on the captured payload, the reconciliation adds 1.85 ms to a 76 ms OPTIMISED advice build. The RECOMMENDED pane is now one dispatch group: the marker exclusion covers every row of the pane instead of only the free-board prefix, so a player in a 'waiting for a board' row can no longer mark a row above him (21 further checks, test 124, reproduce the observed Drew Tyler scene and cover alternative selection, genuine NO MARKER, dropdown agreement, refresh, FAIR/LOSER, NORMAL/OPTIMISED, managed boards ON/OFF and OFF/MANUAL). Live DartConnect was not contacted, so live result payloads and real match-night acceptance remain unverified.",
                          "independent":  false
                      },
     "outstanding":  [
                         "Complete scheduler slice 1 domain model",
-                        "Confirm the intended meaning of 'the next N projected games' for the marker list (implemented as the next N dispatchable games, N = free boards, matching the scheduler's own MARKER-4 rule)",
                         "Confirm LIVE-01/STABLE-01 on a real venue night: no person allocated to play or mark while already committed, and assigned markers visible and occupied for the life of their game",
-                        "Publish V1.1.0 to GreasyFork (git tag v1.1.0 exists locally; userscript distribution not published per README)"
+                        "Publish V1.1.0 to GreasyFork (git tag v1.1.0 exists locally; userscript distribution not published per README)",
+                        "Confirm LOSER mode on a real venue night: a completed factual result becomes a loser duty, the loser marks the next eligible game with board continuity preferred, and FAIR fallback is used only when no losing player is available",
+                        "Confirm the live Match Center payload carries per-side scores on completed records; only the parsed schedule-props score path is verified against the captured payload",
+                        "Confirm PROJECTED NEXT duty reconciliation on a real venue night: the next game named is genuinely playable, and a fully committed sequence states the wait rather than naming an impossible pair",
+                        "Confirm on a real venue night that no player is recommended to play and to mark in the same RECOMMENDED pane, including the 'waiting for a board' rows, and that a genuine NO MARKER appears only when nobody outside the pane is free"
                     ],
     "blockers":  [
 
@@ -55,7 +58,7 @@
     "integrations":  [
 
                      ],
-    "next_package":  "Run the corrected build at the next venue night and reconcile any live-feed behaviour that differs from the scripted evidence (unconfirmed PLAYING retention, live-only commitments, completion release)",
+    "next_package":  "Review and commit the LOSER/NO MARKER/persistence/precedence/readability/PROJECTED-NEXT-reconciliation/RECOMMENDED-group slice, then run it at the next venue night and reconcile live result data",
     "history":  [
                     {
                         "date":  "2026-09-26",
@@ -202,6 +205,48 @@
                         "outcome":  "IMPLEMENTED",
                         "verification":  "Traced the reported defects to two code paths: a successful-but-empty live response cleared PLAYING (freeing both players mid-match and re-offering the same game), and restoreDispatchState silently discarded a marker duty whose game key did not resolve to exactly one current fixture. Corrected both: PLAYING is retained until recorded completion, live records with no fixture row commit their resolved players, completion releases players/marker/board and persists it, game identity carries the fixture date and saved duties carry their own pair so a restore re-finds a re-keyed match, and an unresolvable duty is retained and shown for explicit release. node test/parse-check.cjs (312 checks) and node test/scheduler-check.cjs (694 checks) both exited 0; 12 new live-night scenarios added; local Chromium harness confirmed the retained-duty affordance and its one-click release.",
                         "source":  "project-report"
+                    },
+                    {
+                        "date":  "2026-10-30",
+                        "work_package":  "LOSER marker mode, honest NO MARKER wording, RECOMMENDED-pane marker persistence, PLAYING-over-MARKING precedence and recommendation-row readability",
+                        "phase":  "V1.1.0 release candidate plus scheduler slice 1",
+                        "agent":  "Freebuff (Buffy)",
+                        "model":  "unknown",
+                        "role":  "implementation",
+                        "from_checkpoint":  "6f237b68e44a6ce371a32208fbc22191854e392b",
+                        "to_checkpoint":  null,
+                        "outcome":  "IMPLEMENTED",
+                        "verification":  "LOSER was disabled because isMarkerPolicyAvailable required data.loserIds, a field no producer ever wrote; the parser discarded the factual scores that would have produced it. Corrected end to end: completed schedule/API records retain per-side scores and published board numbers, getLoserDuties derives a duty only from decisive factual scores (draws, byes, missing scores rejected), LOSER is always selectable and prefers the board's own loser at dispatch with automatic, clearly-labelled FAIR fallback. Marker advice now distinguishes assigned / genuine NO MARKER / waiting for a board. The RECOMMENDED-pane confirmation now persists immediately even with Managed Boards OFF. derivePlayerStates keeps PLAYING and flags the stale duty as a conflict. RECOMMENDED and PROJECTED NEXT names and marker names are 1.5px larger and semibold with a height-neutral row, scoped away from TONIGHT and DELAYED. node test/parse-check.cjs (322 checks) and node test/scheduler-check.cjs (731 checks) both exited 0. No live-service or venue-night validation was performed.",
+                        "source":  "project-report"
+                    },
+                    {
+                        "date":  "2026-10-30",
+                        "work_package":  "PROJECTED NEXT reconciled against proposed marking duties (observed browser-test conflict: a proposed marker also named as the next match player)",
+                        "phase":  "V1.1.0 release candidate plus scheduler slice 1",
+                        "agent":  "Freebuff (Buffy)",
+                        "model":  "unknown",
+                        "role":  "implementation",
+                        "from_checkpoint":  "6f237b68e44a6ce371a32208fbc22191854e392b",
+                        "to_checkpoint":  null,
+                        "outcome":  "IMPLEMENTED",
+                        "verification":  "Cause: getProjectedRunningOrder builds every wave before any marker proposal exists, so plan.projectedNextPriorities never saw the duty the RECOMMENDED pane proposes; the player was named as the next match's player while his marking duty would still be active. Corrected with a temporary projected-commitment replay: the plan's own opening wave is replayed with the proposed duty holders held out of a COPY of the session, and the first genuinely free next match is shown instead; when every planned next match needs somebody who is still marking, the pane states the wait instead of naming an impossible game. Nothing is reserved, confirmed or persisted, the RECOMMENDED wave is never re-planned, and confirmed duties already reach the plan as factual MARKING/RESERVED. node test/parse-check.cjs (325 checks) and node test/scheduler-check.cjs (749 checks) both exited 0; 18 new PROJECTED NEXT checks cover the observed scene, alternative selection, withheld count, RECOMMENDED immutability, plan arithmetic, confirmed duty, release, marker change, FAIR and LOSER consistency, NORMAL and OPTIMISED with managed boards ON/OFF, OFF/MANUAL unchanged and a full venue. Measured on the captured payload the reconciliation adds 1.85 ms to a 76 ms OPTIMISED advice build. Not validated on a live venue night.",
+                        "source":  "project-report"
+                    },
+                    {
+                        "date":  "2026-10-30",
+                        "work_package":  "RECOMMENDED pane treated as one dispatch group: no player proposed to mark while recommended to play in the same pane (observed browser-test conflict, Drew Tyler)",
+                        "phase":  "V1.1.0 release candidate plus scheduler slice 1",
+                        "agent":  "Freebuff (Buffy)",
+                        "model":  "unknown",
+                        "role":  "implementation",
+                        "from_checkpoint":  "6f237b68e44a6ce371a32208fbc22191854e392b",
+                        "to_checkpoint":  null,
+                        "outcome":  "IMPLEMENTED",
+                        "verification":  "Cause: the marker candidate pool excluded only the participants of the first `nextCapacity` recommended games (free board slots), while the pane is the whole opening wave. When free boards are fewer than the pane's rows (a partly occupied venue), the 'waiting for a board' tail rows stayed markable, so a foot-row player could be proposed as the marker of a row above him - reproduced deterministically before the change (freeBoards 3, 4 rows, foot-row player proposed as marker for row 1) and gone after it. Corrected by widening the exclusion to every game in the RECOMMENDED pane, in the automatic allocation and in the operator dropdown's shared reservation (markerSequenceReservedIds), so the two can never disagree. Matches after the pane (PROJECTED NEXT and later) stay markable, nothing is persisted or reserved permanently, OFF and MANUAL are untouched, and the FAIR/LOSER ordering, the LOSER duty preference and the PROJECTED NEXT duty reconciliation are unchanged. node test/parse-check.cjs (325 checks) and node test/scheduler-check.cjs (770 checks) both exited 0; test 124 adds 21 checks covering the observed scene, the old window that permitted it, alternative marker selection, genuine NO MARKER when the pane is the whole roster, dropdown agreement, confirmed duty plus refresh restoration, FAIR and LOSER under NORMAL and OPTIMISED with managed boards ON/OFF, and OFF/MANUAL unchanged; test 109's reserved-set assertions were re-based deliberately from the next-N prefix to the whole pane. On the captured payload (46-player roster, 20 fixtures on 5 Nov) the wider exclusion removed the play-and-mark conflict at 2 and 3 live games while all four recommended rows stayed covered by markers, and at 0-1 live games (where it is a no-op) the behaviour is byte-identical; timing differences on that payload were within the +/-40% run-to-run noise of the harness and OFF (which skips the reconciliation entirely) showed the same spread, so no performance claim is made. Not validated on a live venue night.",
+                        "source":  "project-report",
+                        "resolves":  [
+                                         "Confirm the intended meaning of 'the next N projected games' for the marker list (implemented as the next N dispatchable games, N = free boards, matching the scheduler's own MARKER-4 rule)"
+                                     ]
                     }
                 ]
 }

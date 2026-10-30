@@ -736,6 +736,49 @@
   }
 
   /**
+   * LOSER: a factual per-side score from a schedule/API record. DartConnect
+   * publishes legs won as `score` on each side of a completed match; only a
+   * genuinely numeric value is accepted, so a result is never inferred from
+   * a label, a board number or a missing field. Pure.
+   */
+  function parseMatchScore(side) {
+    if (!side || typeof side !== 'object') return null;
+    const raw = side.score != null ? side.score
+      : (side.legs != null ? side.legs : side.legs_won);
+    const n = typeof raw === 'number' ? raw
+      : (typeof raw === 'string' && /^[0-9]{1,3}$/.test(raw.trim()) ? parseInt(raw.trim(), 10) : null);
+    if (!Number.isSafeInteger(n) || n < 0) return null;
+    return n;
+  }
+
+  /**
+   * LOSER: the factually losing competitor id, or null. A draw is NOT a
+   * result with a loser, a bye never produces one, and a missing score on
+   * either side means the loser is unknown — never guessed. Pure.
+   */
+  function resultLoserId(playerAId, aScore, playerBId, bScore) {
+    if (!Number.isSafeInteger(playerAId) || !Number.isSafeInteger(playerBId)) return null;
+    if (!Number.isSafeInteger(aScore) || !Number.isSafeInteger(bScore)) return null;
+    if (playerAId === playerBId) return null;
+    if (aScore === bScore) return null;
+    return aScore < bScore ? playerAId : playerBId;
+  }
+
+  /**
+   * LOSER: the physical board the schedule itself published for a match, when
+   * it published one. A board label such as "Session 2" is a session, not a
+   * board, so only an explicit numeric board number is ever accepted here.
+   * Pure.
+   */
+  function parseMatchBoardNumber(item) {
+    if (!item || typeof item !== 'object') return null;
+    const raw = item.manual_board_number != null ? item.manual_board_number : item.board_number;
+    const n = typeof raw === 'number' ? raw
+      : (typeof raw === 'string' && /^[0-9]{1,2}$/.test(raw.trim()) ? parseInt(raw.trim(), 10) : null);
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
+  }
+
+  /**
    * Outstanding fixtures from pending (delayed) + future (upcoming) groups.
    * Display order is away-first, home-second (the (H) marker sits on home).
    * Only fixtures in `divisions` (discovered roster divisions) are accepted;
@@ -744,7 +787,8 @@
    * Skips completed (status C) — but KEEPS them as factual completion
    * evidence in `completed` (MARKER-2), because a player must have actually
    * completed a game tonight before being recommended as a marker. Also skips
-   * byes and entries without numeric IDs.
+   * byes and entries without numeric IDs. A completion keeps its factual
+   * scores and (when published) its board, so LOSER can identify its loser.
    */
   function parseFixturesFromProps(props, divisions) {
     const allowed = new Set(Array.isArray(divisions) ? divisions : []);
@@ -772,17 +816,27 @@
           // MARKER-2: factual completion evidence for the FAIR "has already
           // played tonight" preference (dated + division-scoped, ids only).
           skipped.completed += 1;
+          // LOSER: a bye is not a played match and can never produce a loser.
+          if (item.is_bye) { skipped.bye += 1; return; }
           const cHome = item.home || {};
           const cAway = item.away || {};
           const cHomeId = Number.isSafeInteger(cHome.id) ? cHome.id : null;
           const cAwayId = Number.isSafeInteger(cAway.id) ? cAway.id : null;
+          // LOSER: the factual legs won, retained only so the completion can
+          // identify its loser. Absent scores stay null; nothing is invented.
+          const cHomeScore = parseMatchScore(cHome);
+          const cAwayScore = parseMatchScore(cAway);
           if (cHomeId != null && cAwayId != null) {
             completed.push({
               matchId: typeof item.id === 'number' ? item.id : null,
               date: typeof group.date === 'string' ? group.date.slice(0, 10) : '',
               division,
-              playerA: { id: cAwayId },
-              playerB: { id: cHomeId },
+              playerA: { id: cAwayId, score: cAwayScore },
+              playerB: { id: cHomeId, score: cHomeScore },
+              // LOSER: derived once here, from scores only. A draw, an
+              // unscored row or a bye yields null and never a guessed loser.
+              loserId: resultLoserId(cAwayId, cAwayScore, cHomeId, cHomeScore),
+              boardNumber: parseMatchBoardNumber(item),
               source: 'schedule-props',
             });
           }
@@ -949,11 +1003,14 @@
     pushId(m.match_id);
     pushId(m.id);
     let aId = null, bId = null, aName = '', bName = '';
+    let aScore = null, bScore = null;
     const left = m.left || m.home || null;
     const right = m.right || m.away || null;
     if (left && right) {
       aId = numId(left.id); bId = numId(right.id);
       aName = unflipName(left.team_name || left.name || left.competitor_name);
+      // LOSER: factual per-side score when the payload publishes one.
+      aScore = parseMatchScore(left); bScore = parseMatchScore(right);
       bName = unflipName(right.team_name || right.name || right.competitor_name);
     } else if (m.league_match && m.league_match.left && m.league_match.right) {
       aId = numId(m.league_match.left.id); bId = numId(m.league_match.right.id);
@@ -979,7 +1036,7 @@
     const date = dateRaw ? dateRaw.slice(0, 10) : '';
     if (!matchIds.length && aId == null && !aName) return null;
     return {
-      matchIds, ids: [aId, bId], names: [aName, bName], state, ref, date,
+      matchIds, ids: [aId, bId], names: [aName, bName], scores: [aScore, bScore], state, ref, date,
       division: cleanName(m.division || ''),
     };
   }
@@ -1891,7 +1948,12 @@
     // (identical here) or, later, PLAYING to anything else.
     session.markingPlayerIds.forEach((id) => {
       const p = map.get(id) || { id, name: '', division: '', state: PLAYER_STATES.MARKING };
-      p.state = PLAYER_STATES.MARKING;
+      // PLAYING DOMINATES (15 Oct precedence defect): a player factually on a
+      // dartboard is never projected as a marker. The duty is flagged as a
+      // conflict instead of being silently overwritten, so the operator sees
+      // that the assignment is NOT valid coverage and can resolve it.
+      if (p.state === PLAYER_STATES.PLAYING) p.markingConflict = true;
+      else p.state = PLAYER_STATES.MARKING;
       map.set(id, p);
     });
 
@@ -1900,7 +1962,8 @@
         if (b.status === BOARD_STATUSES.OCCUPIED) {
           if (b.markerPlayerId != null && map.has(b.markerPlayerId)) {
             const m = map.get(b.markerPlayerId);
-            if (m.state !== PLAYER_STATES.PLAYING) {
+            if (m.state === PLAYER_STATES.PLAYING) m.markingConflict = true;
+            else {
               m.state = PLAYER_STATES.MARKING;
               m.currentBoard = b.boardNumber;
               m.currentMatchId = b.activeMatchId;
@@ -2948,6 +3011,41 @@
     };
   }
 
+  /**
+   * PROJECTED NEXT with TEMPORARY marker commitments. Pure.
+   *
+   * The plan is computed before any marker proposal exists, so its later waves
+   * do not know that a player is about to hold a marking duty. This replays the
+   * plan from the SAME opening wave with those players held out, and returns the
+   * wave that genuinely follows it. A marker's duty lasts for the whole of the
+   * game he marks, so he cannot be named as the next player.
+   *
+   * `dutyHolderIds` are projections, never facts: they are applied to a COPY of
+   * the session for this single rollout and nothing is persisted or reserved.
+   * Returns null when there is no duty to hold, so the caller keeps the plan's
+   * own projection unchanged (OFF/MANUAL propose nothing and are untouched).
+   */
+  function projectNextWaveWithDuties(session, openingGames, dutyHolderIds, options) {
+    const opts = options || {};
+    const ids = (Array.isArray(dutyHolderIds) ? dutyHolderIds : [])
+      .filter((id) => Number.isSafeInteger(id));
+    if (ids.length === 0) return null;
+    const opening = (Array.isArray(openingGames) ? openingGames : []).filter(Boolean);
+    const capacity = (typeof opts.capacity === 'number' && opts.capacity > 0)
+      ? Math.floor(opts.capacity)
+      : (session.managedBoardsEnabled
+        ? (session.boardCount || DEFAULT_SCHEDULING_CAPACITY) : DEFAULT_SCHEDULING_CAPACITY);
+    const maxWaves = typeof opts.maxWaves === 'number' && opts.maxWaves > 0
+      ? Math.floor(opts.maxWaves) : 50;
+    const held = Object.assign({}, session, {
+      reservedMarkerIds: new Set(Array.from(session.reservedMarkerIds || []).concat(ids)),
+    });
+    const rollout = simulateWaveRollout(held, opening, capacity, maxWaves,
+      opts.strategy === SCHEDULING_STRATEGIES.OPTIMISED);
+    const wave = (rollout.waves[1] && rollout.waves[1].games) || [];
+    return { games: wave.filter((g) => g && g.status === 'waiting') };
+  }
+
   /* ============================== 6f. Slice 3B managed physical boards (browser-independent core) ============================== */
 
   const MANAGED_BOARD_UNASSIGNED = 'UNASSIGNED';
@@ -3649,11 +3747,23 @@
     return (Array.isArray(records) ? records : [])
       .filter((r) => r && isCompletedRecord(r) && typeof r.date === 'string' && r.date &&
         Number.isSafeInteger(r.ids && r.ids[0]) && Number.isSafeInteger(r.ids && r.ids[1]))
-      .map((r) => ({
-        matchId: (r.matchIds && r.matchIds[0]) != null ? r.matchIds[0] : null,
-        date: r.date, division: r.division || '',
-        playerA: { id: r.ids[0] }, playerB: { id: r.ids[1] }, source: 'api-record',
-      }));
+      .map((r) => {
+        // LOSER: per-side scores are carried only when the payload published
+        // them; an unscored record keeps its existing shape and yields no duty.
+        const aScore = r.scores ? r.scores[0] : null;
+        const bScore = r.scores ? r.scores[1] : null;
+        const rec = {
+          matchId: (r.matchIds && r.matchIds[0]) != null ? r.matchIds[0] : null,
+          date: r.date, division: r.division || '',
+          playerA: { id: r.ids[0] },
+          playerB: { id: r.ids[1] },
+          source: 'api-record',
+        };
+        if (Number.isSafeInteger(aScore) || Number.isSafeInteger(bScore)) rec.scores = [aScore, bScore];
+        const loserId = resultLoserId(r.ids[0], aScore, r.ids[1], bScore);
+        if (loserId != null) rec.loserId = loserId;
+        return rec;
+      });
   }
 
   /* ------------------------- MARKER-3: night marker history + fair rotation ------------------------- */
@@ -3833,24 +3943,28 @@
    */
   /**
    * MARKER-9 (manager request): the players who must stay FREE so the sequence
-   * can be played — the next N games that can actually be dispatched, N being
-   * the number of free boards (the next N PROJECTED games). This is the very
-   * same union the scheduler's own marker search applies (MARKER-4), exposed so
-   * the operator's dropdown uses it too: until now the list offered players the
-   * scheduler itself would never have proposed, which is exactly the "markers
-   * that would break the following games" the manager saw.
+   * can be played — every player recommended to PLAY in the RECOMMENDED pane.
+   * This is the exact union the scheduler's own marker search applies
+   * (MARKER-4 / MARKER-11), exposed so the operator's dropdown uses it too: the
+   * list must offer what the scheduler would propose, or the operator can hand
+   * build the same play-and-mark conflict the scheduler refuses.
    *
-   * Deliberately NOT reserved: games beyond that next wave. A marker duty ends
-   * with the game it serves, so a player two waves out is not blocked here —
+   * MARKER-11: the reservation covers the WHOLE pane, not just the free-board
+   * head. A player in a "waiting for a board" row is still recommended to play
+   * this wave, so he is not a legal marker for it.
+   *
+   * Deliberately NOT reserved: matches after the pane. A marker duty ends with
+   * the game it serves, so a player two waves out is not blocked here —
    * reserving them would leave small divisions with no lists at all.
    * Returns an array of player ids. Pure.
    */
   function markerSequenceReservedIds(adviceState, excludeGame) {
     const out = new Set();
     const a = adviceState || {};
-    const capacity = Number.isSafeInteger(a.freeBoards) && a.freeBoards > 0 ? a.freeBoards : 0;
-    if (capacity > 0 && Array.isArray(a.recommended)) {
-      nextDispatchParticipantIds(a.recommended, 0, capacity).forEach((id) => out.add(id));
+    // Nothing can be dispatched to a full venue, so no duty can arise there.
+    const dispatchable = Number.isSafeInteger(a.freeBoards) && a.freeBoards > 0;
+    if (dispatchable && Array.isArray(a.recommended)) {
+      nextDispatchParticipantIds(a.recommended, 0, a.recommended.length).forEach((id) => out.add(id));
     }
     // The game being marked is never "reserved against itself"; its own players
     // are excluded as participants on every path anyway.
@@ -3909,9 +4023,92 @@
   }
 
   /**
-   * MARKER-5: is a policy usable with the factual data available right now?
-   * LOSER is unavailable until a factual result source supplies loser ids.
-   * Pure.
+   * LOSER: the factual marking duties created by completed matches. A duty
+   * exists ONLY when completion evidence carries BOTH scores and they differ;
+   * a draw, a bye, a missing score or an unknown side produces NO duty, so a
+   * loser is never invented. `order` is derivation order and is used only to
+   * keep the queue deterministic. Pure.
+   */
+  function getLoserDuties(completedMatches, date, division) {
+    const out = [];
+    (Array.isArray(completedMatches) ? completedMatches : []).forEach((m) => {
+      if (!m) return;
+      if (date && m.date && m.date !== date) return;
+      if (division && m.division && m.division !== division) return;
+      const a = m.playerA || {};
+      const b = m.playerB || {};
+      // Sides may carry their own score (schedule props) or the record may
+      // carry a [a,b] pair (API records); both are factual, neither is guessed.
+      const aScore = a.score != null ? a.score : (Array.isArray(m.scores) ? m.scores[0] : null);
+      const bScore = b.score != null ? b.score : (Array.isArray(m.scores) ? m.scores[1] : null);
+      const stored = Number.isSafeInteger(m.loserId) ? m.loserId : null;
+      const loserId = stored != null ? stored : resultLoserId(a.id, aScore, b.id, bScore);
+      if (!Number.isSafeInteger(loserId)) return;
+      if (loserId !== a.id && loserId !== b.id) return;
+      const winnerId = loserId === a.id ? b.id : a.id;
+      if (!Number.isSafeInteger(winnerId)) return;
+      out.push({
+        matchId: m.matchId != null ? m.matchId : null,
+        loserId,
+        winnerId,
+        boardNumber: Number.isSafeInteger(m.boardNumber) && m.boardNumber > 0 ? m.boardNumber : null,
+        date: typeof m.date === 'string' ? m.date : '',
+        division: typeof m.division === 'string' ? m.division : '',
+        source: m.source || '',
+        order: out.length,
+      });
+    });
+    return out;
+  }
+
+  /**
+   * LOSER: the factual losers to try FIRST for one recommended game, in order.
+   * When the game has a known physical board, the loser who just played on that
+   * board comes first (continuity); otherwise the most recently completed duty
+   * comes first, which is the same intent when the venue names no boards. Every
+   * other duty loser follows, so coverage can fall back to a loser from another
+   * board — continuity is PREFERRED, never required. Pure.
+   */
+  function loserPreferenceForGame(duties, boardNumber) {
+    const list = (Array.isArray(duties) ? duties : []).slice().sort((x, y) => {
+      const bx = boardNumber != null && x.boardNumber === boardNumber ? 0 : 1;
+      const by = boardNumber != null && y.boardNumber === boardNumber ? 0 : 1;
+      if (bx !== by) return bx - by;
+      return y.order - x.order;
+    });
+    const out = [];
+    const seen = new Set();
+    list.forEach((d) => {
+      if (!Number.isSafeInteger(d.loserId) || seen.has(d.loserId)) return;
+      seen.add(d.loserId);
+      out.push(d.loserId);
+    });
+    return out;
+  }
+
+  /**
+   * LOSER: which factual loser to HAND OVER when the operator names a board for
+   * this game. A physical board only becomes factual at dispatch, so this is
+   * where continuity can honestly be honoured: the board's own loser is chosen
+   * when he is eligible, then any other factual loser, and only then the
+   * plan's own proposal. Never returns an ineligible player. Pure.
+   */
+  function loserPendingForBoard(duties, boardNumber, eligibleIds, fallbackId) {
+    const elig = new Set((Array.isArray(eligibleIds) ? eligibleIds : [])
+      .filter((id) => Number.isSafeInteger(id)));
+    const fallback = Number.isSafeInteger(fallbackId) ? fallbackId : null;
+    if (elig.size === 0) return fallback;
+    const pref = loserPreferenceForGame(duties, boardNumber);
+    for (let i = 0; i < pref.length; i += 1) {
+      if (elig.has(pref[i])) return pref[i];
+    }
+    return fallback;
+  }
+
+  /**
+   * MARKER-5: is a policy usable right now? All four modes are: LOSER no
+   * longer depends on a data field being populated in advance (absence of a
+   * result is a fallback case, not an unavailable mode). Pure.
    */
   function isMarkerPolicyAvailable(policy, view) {
     if (policy === MARKER_POLICIES.FAIR) return true;
@@ -3921,10 +4118,13 @@
     // MARKER-7: MANUAL needs no data either — the operator supplies the
     // identity, and eligibility is checked when a marker is actually chosen.
     if (policy === MARKER_POLICIES.MANUAL) return true;
-    if (policy === MARKER_POLICIES.LOSER) {
-      const ids = view && view.loserIds;
-      return Array.isArray(ids) && ids.some((id) => Number.isSafeInteger(id));
-    }
+    // LOSER is ALWAYS selectable, including before the first match finishes.
+    // Availability is not a data question any more: with no completed result
+    // there is simply no losing player to prefer, and allocation falls back to
+    // FAIR for that assignment while the selected mode stays LOSER. Gating the
+    // MODE on data made the control unreachable in practice (the field it
+    // required was never produced).
+    if (policy === MARKER_POLICIES.LOSER) return true;
     return false;
   }
 
@@ -4586,6 +4786,9 @@
         : 0,
       recommended: [],
       projectedNext: [],
+      // How many planned next matches the projections above hold back. A fact
+      // about the ADVICE, so OFF/MANUAL report 0 rather than 'undefined'.
+      projectedNextMarkingWithheld: 0,
       laterCount: 0,
       session,
       markerRuntime: data.markerRuntime || null,
@@ -4615,16 +4818,24 @@
      * and their markers are unavailable via the factual MARKING
      * projection — they are never overwritten by a better combination. */
     const playerStates = derivePlayerStates(session);
-    /* TRIAL-03 opening-wave resource validity, MARKER-4 generalised: the
-     * HARD marker rule is the next-N wave, where N is the number of games
-     * that can currently be dispatched to available board slots. Every
-     * player due to play in the next N dispatchable games is excluded from
-     * marker proposals for the WHOLE wave (and so is each game's own pair,
-     * which is a subset of that union whenever the game sits inside it). N is
-     * capacity-driven, never a hard-coded four, and it shrinks as boards are
-     * occupied. A game that cannot obtain a legal marker gets
-     * proposedMarkerId=null — the wave marker set may be smaller than the
-     * wave, but it is never impossible and never steals a next-N player. */
+    // PLAYING DOMINATES: any confirmed duty whose holder is factually on a
+    // dartboard is a CONFLICT, not coverage. Reported so the row can say so
+    // plainly instead of claiming the game is marked.
+    const markingConflicts = [];
+    playerStates.forEach((p) => { if (p.markingConflict === true) markingConflicts.push(p.id); });
+    advice.markingConflicts = markingConflicts;
+    /* TRIAL-03 opening-wave resource validity (MARKER-4, MARKER-11): the HARD
+     * marker rule is that nobody recommended to PLAY may be proposed to MARK.
+     * Every player due to play in ANY game of the RECOMMENDED pane is excluded
+     * from marker proposals for that whole pane — the head it can dispatch now
+     * AND the tail it can dispatch as soon as a board frees — so a marker is
+     * never taken from a match the pane is itself recommending. Matches after
+     * the pane (PROJECTED NEXT and later) are NOT reserved. The exclusion is
+     * capacity-driven, never a hard-coded four, and it vanishes entirely when
+     * no board is free (nothing can be dispatched, so nothing is allocated).
+     * A game that cannot obtain a legal marker gets proposedMarkerId=null — the
+     * pane's marker set may be smaller than the pane, but it is never
+     * impossible and never steals a recommended player. */
     const availableIds = [];
     playerStates.forEach((p) => {
       if (p.state === PLAYER_STATES.AVAILABLE) availableIds.push(p.id);
@@ -4657,6 +4868,15 @@
       (data && data.completedMatches) || [],
       state && state.selectedMatchDate,
       state && state.division);
+    // LOSER: the factual duties created by completed matches, scoped to the
+    // selected night and division. Derived from completion evidence alone, so
+    // a loser only ever appears when a real score produced one.
+    const loserDuties = getLoserDuties(
+      (data && data.completedMatches) || [],
+      state && state.selectedMatchDate,
+      state && state.division);
+    advice.loserDuties = loserDuties;
+    advice.loserDutyCount = loserDuties.length;
     const proposalPool = openPool.filter((id) => !reservedIds.has(id));
     // MARKER-4: how many games can be dispatched right now (free board
     // slots; the planner's effective capacity when Managed Boards are OFF).
@@ -4698,7 +4918,12 @@
       advice.recommended.forEach((game) => {
         game.proposedMarkerId = null;
         game.markerUnavailable = false;
+        // No advice exists in this mode, so there is no shortage to report
+        // and nothing is awaiting an allocation.
+        game.markerState = game.confirmedMarkerId != null ? 'assigned' : 'off';
+        game.markerFallback = false;
       });
+      advice.loserFallbackCount = 0;
       return advice;
     }
     const impactCache = {};
@@ -4728,26 +4953,68 @@
       (recentPlayerId === id ? MARKER_RECENT_PENALTY : 0);
     // Zero capacity: nothing can be dispatched, so no NEW marker allocation
     // is invented. Existing advice/pending state is left untouched.
-    // MARKER-4 next-N union: the participants of the next N games that can
-    // currently be dispatched, unioned, are excluded for the whole wave.
-    const nextWaveIds = nextCapacity > 0
-      ? nextDispatchParticipantIds(advice.recommended, 0, nextCapacity)
+    // MARKER-11 dispatch-GROUP union: every player due to play in ANY game of
+    // the RECOMMENDED pane is excluded from marking across that pane.
+    //
+    // The rule used to be bounded by free boards (the next-N prefix). That left
+    // the pane's TAIL rows - the matches "waiting for a board" - markable, so a
+    // player could be proposed as the marker of an earlier row while the same
+    // pane recommended him to play in a later one (the observed Drew Tyler
+    // case). The pane is ONE dispatch group: its head can start now and its
+    // tail starts as soon as a board frees, so a marker taken from its tail
+    // would be unavailable for the very match it was recommended to play.
+    // Marking duty lasts the whole of the game it serves, so the two duties are
+    // mutually exclusive by construction, not by a fairness preference.
+    //
+    // Still deliberately NOT reserved: matches after the pane (PROJECTED NEXT
+    // and beyond). A duty ends with the game it serves, so a player two waves
+    // out is legitimately markable - reserving the whole night would leave a
+    // small division with no marker list at all.
+    const recommendedGroupIds = nextCapacity > 0
+      ? nextDispatchParticipantIds(advice.recommended, 0, advice.recommended.length)
       : new Set();
 
+    // LOSER: the physical board this game is going to, when the operator has
+    // named one. With Managed Boards OFF no board identity is invented — the
+    // duty order (most recent first) carries the same continuity intent.
+    const gameBoardNumberFor = (game) => {
+      if (!ui.managedBoardsEnabled) return null;
+      const owned = findBoardOwningGame(data && data.boardRuntime, game);
+      return owned && Number.isSafeInteger(owned.boardNumber) ? owned.boardNumber : null;
+    };
+    // LOSER continuity is a PREFERENCE per game: the board's own loser first,
+    // then any other factual loser, then the FAIR ordering. An empty list is
+    // the honest FAIR fallback, never an invented loser.
+    const loserPreferredByGame = openGames.map((game) => (markerPolicy === MARKER_POLICIES.LOSER
+      ? loserPreferenceForGame(loserDuties, gameBoardNumberFor(game)) : []));
+    // A losing player is the POINT of LOSER: he must win the global search
+    // for his own game, otherwise a marginally better fitness sum elsewhere
+    // would quietly reproduce FAIR. The bonus is per (game, player), so two
+    // games with two different losers are never traded against each other.
+    const LOSER_DUTY_BONUS = 5000;
+    const loserDutyBonus = (idx, id) => {
+      if (markerPolicy !== MARKER_POLICIES.LOSER) return 0;
+      const pref = loserPreferredByGame[idx] || [];
+      const at = pref.indexOf(id);
+      if (at === -1) return 0;
+      // The continuity pick (this board's own loser, or the most recent duty)
+      // wins; any other factual loser still beats a pure FAIR candidate.
+      return at === 0 ? LOSER_DUTY_BONUS : LOSER_DUTY_BONUS / 2;
+    };
     const perGameCandidates = nextCapacity > 0
-      ? openGames.map((game) => {
+      ? openGames.map((game, idx) => {
         // Own participants are excluded unconditionally; when this game sits
         // inside the next-N window the union already covers them.
         const ownIds = nextDispatchParticipantIds([game], 0, 0);
         return orderMarkerCandidates(
-          proposalPool.filter((id) => !nextWaveIds.has(id) && !ownIds.has(id)),
+          proposalPool.filter((id) => !recommendedGroupIds.has(id) && !ownIds.has(id)),
           markerPolicy,
           {
             history: markerHistory,
             recentPlayerId,
             scoreOf: combinedScore,
             playedIds,
-            loserIds: (data && data.loserIds) || null,
+            loserIds: loserPreferredByGame[idx].length > 0 ? loserPreferredByGame[idx] : null,
           }
         ).slice(0, CANDIDATE_BREADTH);
       })
@@ -4771,7 +5038,7 @@
         if (used.has(id)) continue;
         used.add(id);
         seq.push(id);
-        select(idx + 1, score + combinedScore(id), seq);
+        select(idx + 1, score + combinedScore(id) + loserDutyBonus(idx, id), seq);
         seq.pop();
         used.delete(id);
         extended = true;
@@ -4785,14 +5052,69 @@
     openGames.forEach((game, i) => { game.proposedMarkerId = bestSeq ? bestSeq[i] : null; });
     advice.recommended.forEach((game) => {
       if (game.proposedMarkerId === undefined) game.proposedMarkerId = null;
-      // COLS-03: distinguish a fixture that has a COMPLETE marker
-      // recommendation from one that is playable but has NO eligible marker
-      // at all (or whose only eligible volunteers went to other games of the
-      // same wave). The fixture is never withheld for this and no marker is
-      // ever invented; the shortfall is simply STATED, so the operator sees
-      // the difference instead of an unexplained blank.
-      game.markerUnavailable = game.confirmedMarkerId == null && game.proposedMarkerId == null;
+      // LOSER fallback: the proposal is a real losing player for THIS game, or
+      // it is FAIR filling the gap. Stated plainly, never passed off as LOSER.
+      const gIdx = openGames.indexOf(game);
+      const preferred = gIdx >= 0 ? (loserPreferredByGame[gIdx] || []) : [];
+      game.markerFallback = markerPolicy === MARKER_POLICIES.LOSER &&
+        game.confirmedMarkerId == null && game.proposedMarkerId != null &&
+        preferred.indexOf(game.proposedMarkerId) === -1;
+      // COLS-03 / three distinct facts, never one blended warning:
+      //   assigned = a confirmed or recommended marker covers the game;
+      //   missing  = an allocation WAS attempted and nobody eligible was free;
+      //   awaiting = no allocation was attempted because no board is free.
+      // A full venue is therefore never reported as a marker failure.
+      game.markerState = (game.confirmedMarkerId != null || game.proposedMarkerId != null)
+        ? 'assigned'
+        : (nextCapacity > 0 ? 'missing' : 'awaiting');
+      game.markerUnavailable = game.markerState === 'missing';
     });
+    advice.loserFallbackCount = advice.recommended.filter((g) => g.markerFallback === true).length;
+    /* PROJECTED NEXT must account for the marking duties proposed ABOVE it.
+     * A proposed marker's duty is active for the whole of the game he marks,
+     * so naming him as a PLAYER in a later match of the same sequence states
+     * something the scheduler itself would refuse the moment it was acted on
+     * (an active marker does not play until his duty completes). The plan is
+     * built before any marker exists, so it cannot know this on its own - the
+     * projection is re-derived here against the duties that exist RIGHT NOW.
+     *
+     * TEMPORARY ONLY. The duties are held as session reservations for the
+     * duration of one rollout: nothing is written to markerRuntime, to pending
+     * markers or to storage, so changing, confirming or releasing a marker (or
+     * any match finishing) simply re-derives the projection on the next render.
+     *
+     * The plan above is NOT re-planned: the opening wave it selected is replayed
+     * as given, so RECOMMENDED still shows exactly what was recommended and the
+     * projection is the only thing that adapts. Confirmed duties need no
+     * correction here - their holders are already factual MARKING/RESERVED in
+     * the session and never enter the plan at all. */
+    const proposedDutyIds = new Set();
+    advice.recommended.forEach((game) => {
+      if (game.proposedMarkerId != null) proposedDutyIds.add(game.proposedMarkerId);
+    });
+    advice.projectedNextMarkingWithheld = 0;
+    if (proposedDutyIds.size > 0) {
+      const plannedNext = advice.projectedNext;
+      const dutyHolders = Array.from(proposedDutyIds);
+      const heldSet = new Set(dutyHolders);
+      const involvesDuty = (g) => (g.playerA && heldSet.has(g.playerA.id)) === true ||
+        (g.playerB && heldSet.has(g.playerB.id)) === true;
+      const replanned = projectNextWaveWithDuties(
+        session,
+        (plan.projectedWaves[0] && plan.projectedWaves[0].games) || [],
+        dutyHolders,
+        { strategy: ui.strategy }
+      );
+      // The replayed wave is already free of duty holders (they are RESERVED in
+      // the replay). The filter is the guarantee, and it names the shortfall the
+      // pane states honestly instead of inventing an impossible next match.
+      advice.projectedNext = ((replanned && replanned.games) || []).filter((g) => !involvesDuty(g));
+      advice.projectedNextMarkingWithheld = plannedNext.filter(involvesDuty).length;
+      // The plan is unchanged and nothing vanished from the night: a withheld
+      // projection is still planned, so the remaining count stays truthful.
+      advice.laterCount = Math.max(0, plan.metrics.totalScheduledGames
+        - advice.recommended.length - advice.projectedNext.length);
+    }
     return advice;
   }
 
@@ -4970,6 +5292,23 @@
     '.sssl-advicepane.nomarkers .sssl-advice{--adv-tpl:var(--adv-seq) var(--adv-board) minmax(0,1fr) var(--adv-vs) minmax(0,1fr) var(--adv-status)}',
     '.sssl-advicepane.hasstatus .sssl-advice{--adv-status:calc(var(--fs-3xs) * 9)}',
     '.sssl-advice .sssl-pa,.sssl-advice .sssl-pb{min-width:0}',
+    // READABILITY (30 Oct): the RECOMMENDED and PROJECTED NEXT rows are the
+    // operator's primary scan target, so player names are one step larger and
+    // semibold, and the marker name matches them. Scoped to `.sssl-advice`
+    // only: TONIGHT and DELAYED keep their existing sizes. line-height is
+    // pinned lower and the marker control's vertical padding is removed, so
+    // the larger text does NOT grow the row height.
+    '.sssl-advice{--adv-name-fs:calc(var(--fs) + 1.5px)}',
+    '.sssl-advice .sssl-pa,.sssl-advice .sssl-pb{font-size:var(--adv-name-fs);font-weight:600;line-height:1.2}',
+    '.sssl-advice .sssl-vs{font-weight:500;font-size:var(--fs-2xs);color:var(--faint);opacity:0.8}',
+    '.sssl-advice .mkown .mkchip,.sssl-advice .mkslot .sssl-mksel{font-size:var(--adv-name-fs);font-weight:600}',
+    '.sssl-advice .mkslot .sssl-mksel{padding-top:0;padding-bottom:0}',
+    // PAIRING/COVERAGE states: a stale duty that collides with a factual
+    // PLAYING state reads as a conflict, and a FAIR stand-in in LOSER mode is
+    // stated rather than passed off as a loser duty.
+    '.sssl-advice .mkconflict{font-size:var(--fs-3xs);font-weight:700;letter-spacing:0.04em;color:var(--err-text);border:1px dashed var(--err-border);border-radius:8px;padding:0 5px;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}',
+    '.sssl-advice .mkown.conflict .mkchip{color:var(--err-text);text-decoration:line-through}',
+    '.sssl-advice .mkfallback{font-size:var(--fs-3xs);font-weight:700;letter-spacing:0.04em;color:var(--muted);border:1px dashed var(--border);border-radius:8px;padding:0 5px;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}',
     '.sssl-advice .amark{min-width:0;text-align:left;font-weight:700;font-size:var(--fs-2xs);color:var(--faint)}',
     '.sssl-advice.projected{border-style:dotted;border-color:var(--faint);opacity:0.9}',
     '.sssl-advice.projected .amark{color:var(--muted)}',
@@ -5314,8 +5653,20 @@
       const res = assignGameToBoard(rtv, game, boardNumber, { absentIds: Array.from(new Set(state.absentIds)) });
       if (res.ok) {
         data.boardRuntime = res.runtime;
-        if (Number.isSafeInteger(proposedMarkerId)) {
-          data.pendingMarkers = Object.assign({}, data.pendingMarkers, { [markerGameKey(game)]: proposedMarkerId });
+        // LOSER continuity: the board is factual at THIS moment, so its own
+        // loser is handed over as the pending advice in preference to the
+        // board-less proposal. Eligibility is unchanged (the handoff is
+        // re-validated at display time and discarded if stale).
+        const handoff = schedulerUi.markerPolicy === MARKER_POLICIES.LOSER
+          ? loserPendingForBoard(
+            getLoserDuties((data && data.completedMatches) || [],
+              state.selectedMatchDate, state.division),
+            boardNumber,
+            getEligibleMarkerCandidates(markerCtxFor(game)).map((c) => c.id),
+            proposedMarkerId)
+          : proposedMarkerId;
+        if (Number.isSafeInteger(handoff)) {
+          data.pendingMarkers = Object.assign({}, data.pendingMarkers, { [markerGameKey(game)]: handoff });
         }
         persistDispatch();
       }
@@ -5325,11 +5676,12 @@
     // it stops being PENDING and the fact lives in the marker runtime only.
     const clearPendingMarker = (game) => {
       const key = markerGameKey(game);
-      if (!data.pendingMarkers || data.pendingMarkers[key] == null) return;
+      if (!data.pendingMarkers || data.pendingMarkers[key] == null) return false;
       const next = Object.assign({}, data.pendingMarkers);
       delete next[key];
       data.pendingMarkers = next;
       persistDispatch();
+      return true;
     };
     // ACCEPT-02: one marker-candidate context per game, shared by the
     // selector, the confirmation defence and pending-advice validation.
@@ -5346,9 +5698,11 @@
       // offered or confirmed here — no duplicate marker ownership.
       pendingMarkerIds: reservedPendingMarkerIds(data, state, markerGameKey(game)).filter((id) =>
         id !== game.playerA.id && id !== game.playerB.id),
-      // MARKER-9: only players whose marking leaves the SEQUENCE playable are
-      // offered — the next N dispatchable games and the projected wave are
-      // reserved, through the same helper the scheduler's proposal search uses.
+      // MARKER-9 / MARKER-11: only players whose marking leaves the SEQUENCE
+      // playable are offered — everybody recommended to play anywhere in the
+      // RECOMMENDED pane is reserved, through the same helper the scheduler's
+      // proposal search uses, so a board-continuity handoff can never take a
+      // player the pane itself is recommending.
       upcomingPlayerIds: markerSequenceReservedIds(advice, game),
       excludeParticipants: true,
       participantIds: [game.playerA.id, game.playerB.id],
@@ -5501,10 +5855,13 @@
     });
     strip.appendChild(delayGroup);
     // MARKER-4: marker policy selector. FAIR rotates marking fairly among
-    // eligible players who have already played; LOSER prefers the loser of a
-    // completed game and is ONLY available when factual result data exists
-    // (it does not today), so it is shown disabled and says so honestly.
-    // COLS-06: OFF | FAIR | LOSER. Three mutually exclusive options in the one
+    // eligible players who have already played; LOSER prefers the losing player
+    // of a completed game, with board continuity preferred but not required.
+    // LOSER is ALWAYS selectable, including before the first result arrives:
+    // with no factual loser yet it falls back to FAIR per assignment while the
+    // selected mode stays LOSER (the old result-dependent gate made the control
+    // permanently unreachable in practice).
+    // COLS-06: OFF | FAIR | LOSER. Mutually exclusive options in the one
     // existing compact marker control — no second toggle anywhere. The active
     // mode is the one shown pressed. Switching mode changes ADVICE only: it
     // never touches live fixture records, confirmed markers or the manual
@@ -5512,7 +5869,6 @@
     strip.appendChild(el('span', 'lbl', 'Marker'));
     const markerGroup = el('span', 'grp');
     const markerPolicy = isMarkerPolicy(schedulerUi.markerPolicy) ? schedulerUi.markerPolicy : MARKER_POLICIES.FAIR;
-    const loserAvailable = isMarkerPolicyAvailable(MARKER_POLICIES.LOSER, data);
     [[MARKER_POLICIES.OFF, 'OFF',
        'OFF = no marker UI anywhere: no dropdowns, no MARKER placeholders, no ADVISE and no marker messages. ' +
        'Matches and boards are scheduled exactly as before, and confirmed/manual markers are kept internally.'],
@@ -5520,18 +5876,16 @@
        'MANUAL = you choose every marker yourself. The dropdowns are offered on the fixtures you can act on, ' +
        'nothing is recommended and nothing is preselected; eligibility and conflict rules still apply.'],
      [MARKER_POLICIES.FAIR, 'FAIR', 'FAIR = rotate marking fairly among eligible players who have already played tonight'],
-     [MARKER_POLICIES.LOSER, 'LOSER', loserAvailable
-       ? 'LOSER = prefer the loser of a completed game when factual result data supports it (a preference only \u2014 you can still choose anyone eligible)'
-       : 'LOSER unavailable: no factual winner/loser result data is available from DartConnect']].forEach(([mode, label, tip]) => {
-      const usable = mode !== MARKER_POLICIES.LOSER || loserAvailable;
+     [MARKER_POLICIES.LOSER, 'LOSER',
+       'LOSER = prefer the losing player of a completed game \u2014 the loser stays at the board he just played on when that board is known. ' +
+       'Continuity is preferred, not required. Until a result is recorded, FAIR selection is used and says so.'
+     ]].forEach(([mode, label, tip]) => {
+      // Every mode is selectable; LOSER no longer depends on a result existing.
       const b = el('button', markerPolicy === mode ? 'on' : '', label);
       b.type = 'button';
       b.title = tip;
-      b.disabled = !usable;
-      if (!usable) b.style.opacity = '0.5';
       b.setAttribute('aria-pressed', markerPolicy === mode ? 'true' : 'false');
       b.addEventListener('click', () => {
-        if (!usable) return;
         schedulerUi.markerPolicy = mode;
         persistNight();
         render(state, storage, data, liveNote, diagnostics, schedulerUi);
@@ -5846,7 +6200,10 @@
       // created long before the advice is computed.
       advicePane.classList.toggle('hasstatus',
         advice.markerAdviceEnabled === true &&
-        advice.recommended.some((r) => r.markerUnavailable));
+        advice.recommended.some((r) => r.markerState === 'missing' ||
+          r.markerFallback === true ||
+          (r.confirmedMarkerId != null &&
+            (advice.markingConflicts || []).indexOf(r.confirmedMarkerId) !== -1)));
       if (advice.recommended.length > 0) {
         const head = el('div', 'sssl-advicehead');
         head.appendChild(el('span', 'badge', 'RECOMMENDED'));
@@ -5871,7 +6228,12 @@
         const markerControlsShown = advice.markerControlsVisible === true;
         const buildAdviceRow = (g, seq, awaiting) => {
           const row = el('div', 'sssl-advice');
-          if (awaiting) row.classList.add('awaiting');
+          if (awaiting) {
+            row.classList.add('awaiting');
+            // Third marker state: nothing was allocated because no board is
+            // free. Distinct from a genuine marker shortage.
+            row.title = 'Waiting for a board — no marker allocation was attempted for this game yet.';
+          }
           // RECOMMENDATION SEQUENCE (1..n, follow the actual advice order):
           // its own column. It is NOT a physical board number and implies no
           // board mapping — boards remain explicit operator assignment only.
@@ -5946,6 +6308,18 @@
               render(state, storage, data, liveNote, diagnostics, schedulerUi);
             });
             mk.appendChild(relMk);
+            // PLAYING DOMINATES (15 Oct precedence defect): a confirmed duty
+            // held by somebody factually on a dartboard is NOT valid coverage.
+            // It is shown as a conflict until the operator resolves it.
+            if ((advice.markingConflicts || []).indexOf(g.confirmedMarkerId) !== -1) {
+              mk.classList.add('conflict');
+              mk.title = 'CONFLICT: ' + markerNameForId(data, g.confirmedMarkerId) +
+                ' is factually PLAYING, so this duty is NOT valid coverage. ' +
+                'Release it or choose another marker.';
+              const conflict = el('span', 'mkconflict', '! PLAYING');
+              conflict.title = mk.title;
+              statusCell.appendChild(conflict);
+            }
             markerCell.appendChild(mk);
           } else {
             const mkCtx = markerCtxFor(g);
@@ -5972,6 +6346,12 @@
                   // MARKER-3: a confirmed duty counts toward fair rotation.
                   data.markerHistory = recordMarkerMark(data.markerHistory, chosen, markerGameKey(g));
                   clearPendingMarker(g);
+                  // COLS-01: a CONFIRMED duty is an operator fact and must
+                  // survive Refresh/F5 exactly like board ownership. The
+                  // recommendation pane never creates a pending handoff, and
+                  // with Managed Boards OFF there is none to clear, so
+                  // clearing alone left the confirmation memory-only.
+                  persistDispatch();
                 } else warn('marker assignment rejected:', res.reason);
                 render(state, storage, data, liveNote, diagnostics, schedulerUi);
               },
@@ -5982,7 +6362,20 @@
             // unassigned row. Nothing is invented and the fixture is never
             // withheld: the operator can still choose a marker manually (the
             // selector beside it) or start it without one.
-            if (advice.markerAdviceEnabled && g.markerUnavailable) {
+            // LOSER: a FAIR proposal used because no losing player was
+            // available for THIS game says so — it is never passed off as a
+            // loser duty. The selected mode stays LOSER.
+            if (g.markerFallback === true) {
+              const fb = el('span', 'mkfallback', 'FAIR');
+              fb.title = 'No losing player was available for this game, so FAIR selection was used. ' +
+                'LOSER stays selected and will use a loser as soon as one is free.';
+              statusCell.appendChild(fb);
+            }
+            // COLS-03: a game whose allocation was ATTEMPTED and found nobody
+            // eligible is stated plainly. A game that could not be allocated
+            // at all (no free board) is NOT a marker failure and is labelled
+            // as waiting for a board instead.
+            if (advice.markerAdviceEnabled && g.markerState === 'missing') {
               const nm = el('span', 'mknone', 'NO MARKER');
               nm.title = 'No eligible marker could be recommended for this game ' +
                 '(nobody eligible is free, or the eligible volunteers are allocated to other games). ' +
@@ -6018,6 +6411,24 @@
             'MANUAL — pick a marker for a fixture you can act on. Nothing is recommended or preselected; ' +
             'eligibility and conflict rules still apply.'));
         }
+        // LOSER states which factual duties exist and where FAIR had to stand
+        // in, so the selected mode is never silently doing something else.
+        if (advice.markerPolicy === MARKER_POLICIES.LOSER) {
+          const dutyCount = advice.loserDutyCount || 0;
+          const fallbackCount = advice.loserFallbackCount || 0;
+          let line;
+          if (dutyCount === 0) {
+            line = 'LOSER — no completed match has a recorded result yet, so FAIR selection is used. ' +
+              'A losing player becomes available as soon as a result arrives.';
+          } else if (fallbackCount > 0) {
+            line = 'LOSER — ' + dutyCount + ' completed result' + (dutyCount === 1 ? '' : 's') +
+              ' available; ' + fallbackCount + ' game' + (fallbackCount === 1 ? '' : 's') +
+              ' fell back to FAIR (no losing player free for that game).';
+          } else {
+            line = 'LOSER — every recommended game is covered by a losing player from a completed match.';
+          }
+          advicePane.appendChild(el('div', 'sssl-hintline', line));
+        }
       }
       if (advice.projectedNext.length > 0) {
         const pHead = el('div', 'sssl-advicehead projected');
@@ -6045,12 +6456,31 @@
         if (advice.markerControlsVisible === true) pRow.appendChild(el('span', 'mkslot'));
         pRow.appendChild(el('span', 'astat'));
         // COLS-04: a projected game is NEVER presented as immediately
-        // executable. A player named here may still be playing or marking a
-        // game above; the projection assumes those finish first. The
-        // dependency is one short tooltip, not another panel.
+        // executable — the dependency is one short tooltip, not another panel.
+        // A player named here may still be PLAYING above (the plan sequences
+        // that deliberately). A proposed MARKER never is: his duty is active
+        // for the whole of the game he marks, so the projection is reconciled
+        // against those duties above.
         pRow.title = 'Projected next wave — not startable yet. It assumes the games above finish first; ' +
-          'a player named here may still be PLAYING or MARKING above.';
+          'a player named here may still be PLAYING above. Anyone proposed as a MARKER above is never ' +
+          'named here while that duty is active.';
         advicePane.appendChild(pRow);
+      } else if (advice.projectedNextMarkingWithheld > 0) {
+        // Honest waiting state: no planned next match can be named without
+        // contradicting a marking duty proposed above. Nothing is invented and
+        // no impossible pair is shown.
+        const pHold = el('div', 'sssl-advicehead projected');
+        pHold.appendChild(el('span', 'badge', 'PROJECTED NEXT'));
+        pHold.appendChild(document.createTextNode('waiting · ' +
+          advice.projectedNextMarkingWithheld +
+          (advice.projectedNextMarkingWithheld === 1
+            ? ' planned match needs a player who is marking above'
+            : ' planned matches need a player who is marking above')));
+        advicePane.appendChild(pHold);
+        advicePane.appendChild(el('div', 'sssl-hintline',
+          'No next match is named yet: every match the plan holds for the next wave needs somebody ' +
+          'whose marking duty is still active above. The projection returns as soon as a marker is ' +
+          'released, a marker is changed or a marked match finishes.'));
       }
     }
 
@@ -6924,6 +7354,7 @@
     evaluateProjectedMarkerConfidence,
     evaluateDelayedGameImpact,
     getProjectedRunningOrder,
+    projectNextWaveWithDuties,
     defaultSchedulerUiState,
     buildNightSession,
     buildSchedulerAdvice,
@@ -6984,6 +7415,12 @@
     rankMarkerCandidatesByFairness,
     rankLoserCandidates,
     orderMarkerCandidates,
+    getLoserDuties,
+    loserPreferenceForGame,
+    loserPendingForBoard,
+    parseMatchScore,
+    resultLoserId,
+    parseMatchBoardNumber,
     reservedPendingMarkerIds,
     defaultSchedulerUiState,
     createMarkerRuntime,
@@ -6994,6 +7431,7 @@
     assignMarkerToGame,
     changeMarkerForGame,
     releaseMarkerFromGame,
+    releaseCompletedCommitments,
     detectMarkerConflicts,
     markerSelectEl,
     DEFAULT_DELAYED_CATCHUP_ALLOWANCE,
