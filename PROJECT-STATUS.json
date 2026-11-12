@@ -1,64 +1,58 @@
 ﻿{
-    "schema_version":  "2.0.0",
-    "project":  "DCGreasyfork",
-    "repository":  {
-                       "root":  "E:\\Developments\\Software",
-                       "path":  "E:\\Developments\\Software\\DCGreasyfork"
-                   },
-    "project_type":  "userscript",
-    "phase":  "V1.1.0 release candidate plus scheduler slice 1",
-    "lifecycle":  "IMPLEMENTED",
-    "execution":  {
-                      "state":  "IDLE",
-                      "work_package":  null,
-                      "agent":  "Freebuff (Buffy)",
-                      "model":  "unknown",
-                      "role":  "implementation",
-                      "started":  null,
-                      "note":  "LOSER marker mode, three-state marker wording, recommended-pane persistence, PLAYING precedence, recommendation-row readability, PROJECTED NEXT duty reconciliation and the RECOMMENDED-pane play-and-mark exclusion (MARKER-11) are implemented, self-tested and committed on feature/scheduler-slice1-domain-model. Live DartConnect acceptance is outstanding; no development work is running."
-                  },
-    "current_work_package":  "LOSER marker mode (factual result -> loser duty -> board-continuous marker with FAIR fallback), honest three-state marker wording, RECOMMENDED-pane marker persistence, PLAYING-over-MARKING precedence, RECOMMENDED/PROJECTED NEXT name readability, PROJECTED NEXT reconciliation against proposed marking duties and the RECOMMENDED-pane play-and-mark exclusion (committed; live venue acceptance outstanding)",
-    "accepted_branch":  "feature/scheduler-slice1-domain-model",
-    "accepted_checkpoint":  {
-                                "commit":  "743e5a17fc2f85ce4ff1b022598d9b93880c381d",
-                                "short":  "743e5a1",
-                                "date":  "2026-10-30",
-                                "note":  "LOSER marking, three-state marker wording, recommended-pane persistence, PLAYING precedence, recommendation-row readability, PROJECTED NEXT duty reconciliation and the RECOMMENDED-group play-and-mark exclusion, pushed to origin/feature/scheduler-slice1-domain-model; self-tested, awaiting the next venue night. Not merged or published to GreasyFork."
-                            },
-    "updated":  "2026-10-30",
-    "provenance":  {
-                       "agent":  "Freebuff (Buffy)",
-                       "model":  "unknown",
-                       "role":  "implementation"
-                   },
-    "verification":  {
-                         "authority":  "none",
-                         "mode":  "tests",
-                         "commit":  "743e5a17fc2f85ce4ff1b022598d9b93880c381d",
-                         "result":  "SELF-TESTED",
-                         "timestamp":  "2026-10-30T00:00:00+00:00",
-                         "evidence":  "Committed on feature/scheduler-slice1-domain-model; evidence from the working tree that produced the commit. node test/parse-check.cjs (325 checks) and node test/scheduler-check.cjs (770 checks) both exited 0 with ALL PASS. New coverage: factual score retention from schedule props and completed API records, loser derivation with draws/byes/missing scores rejected, duty scoping and board/recency preference, LOSER end-to-end allocation with FAIR fallback counting, multi-match duties, board-continuity handoff with ineligible fallback, three distinct marker states (assigned/missing/awaiting), PLAYING-over-MARKING conflict detection and non-reallocation, completion release and non-resurrection, PROJECTED NEXT reconciled against the proposed duties (alternative next match selected, withheld count stated, RECOMMENDED never re-planned, holds never persisted, no duty holder projected under FAIR or LOSER in either strategy and in both managed-board modes, OFF and MANUAL unchanged, full venue invents nothing), and source guards for the recommended-pane persistence fix and the readability CSS. Measured on the captured payload, the reconciliation adds 1.85 ms to a 76 ms OPTIMISED advice build. The RECOMMENDED pane is now one dispatch group: the marker exclusion covers every row of the pane instead of only the free-board prefix, so a player in a 'waiting for a board' row can no longer mark a row above him (21 further checks, test 124, reproduce the observed Drew Tyler scene and cover alternative selection, genuine NO MARKER, dropdown agreement, refresh, FAIR/LOSER, NORMAL/OPTIMISED, managed boards ON/OFF and OFF/MANUAL). Live DartConnect was not contacted, so live result payloads and real match-night acceptance remain unverified.",
-                         "independent":  false
-                     },
-    "outstanding":  [
-                        "Complete scheduler slice 1 domain model",
-                        "Confirm LIVE-01/STABLE-01 on a real venue night: no person allocated to play or mark while already committed, and assigned markers visible and occupied for the life of their game",
-                        "Publish V1.1.0 to GreasyFork (git tag v1.1.0 exists locally; userscript distribution not published per README)",
-                        "Confirm LOSER mode on a real venue night: a completed factual result becomes a loser duty, the loser marks the next eligible game with board continuity preferred, and FAIR fallback is used only when no losing player is available",
-                        "Confirm the live Match Center payload carries per-side scores on completed records; only the parsed schedule-props score path is verified against the captured payload",
-                        "Confirm PROJECTED NEXT duty reconciliation on a real venue night: the next game named is genuinely playable, and a fully committed sequence states the wait rather than naming an impossible pair",
-                        "Confirm on a real venue night that no player is recommended to play and to mark in the same RECOMMENDED pane, including the 'waiting for a board' rows, and that a genuine NO MARKER appears only when nobody outside the pane is free"
-                    ],
-    "blockers":  [
-
-                 ],
-    "dependencies":  [
-
-                     ],
-    "integrations":  [
-
-                     ],
-    "next_package":  "Review and commit the LOSER/NO MARKER/persistence/precedence/readability/PROJECTED-NEXT-reconciliation/RECOMMENDED-group slice, then run it at the next venue night and reconcile live result data",
+    "schema_version": "2.0.0",
+    "project": "DCGreasyfork",
+    "repository": {
+        "root": "E:\\Developments\\Software",
+        "path": "E:\\Developments\\Software\\DCGreasyfork"
+    },
+    "project_type": "userscript",
+    "phase": "V1.1.0 release candidate plus scheduler slice 1",
+    "lifecycle": "IMPLEMENTED",
+    "execution": {
+        "state": "IDLE",
+        "work_package": null,
+        "agent": "Codex",
+        "model": "GPT-6",
+        "role": "implementation",
+        "started": null,
+        "note": "Implemented and self-tested locally."
+    },
+    "current_work_package": "Managed Boards Option A and live commitment accounting",
+    "accepted_branch": "feature/scheduler-slice1-domain-model",
+    "accepted_checkpoint": {
+        "commit": "7c5ec8a43b735bf8e239bcd8d69735381d2adcde",
+        "short": "7c5ec8a",
+        "date": "2026-11-12",
+        "note": "Option A implemented and self-tested on the local branch. Unpushed per user instruction."
+    },
+    "updated": "2026-11-12",
+    "provenance": {
+        "agent": "Codex",
+        "model": "GPT-6",
+        "role": "implementation"
+    },
+    "verification": {
+        "authority": "none",
+        "mode": "tests",
+        "commit": "7c5ec8a43b735bf8e239bcd8d69735381d2adcde",
+        "result": "SELF-TESTED",
+        "timestamp": "2026-11-12T23:18:44.7904133+00:00",
+        "evidence": "node test/scheduler-check.cjs (800 checks) and node test/parse-check.cjs (325 checks) passed. Both strategies cover seven unmanaged starts, managed occupancy and deduplication, retained assignments and refresh, release and completion, player conflicts, FAIR/LOSER and PROJECTED NEXT. Diff reviewed and git diff --check passed. Browser and live venue acceptance remain unverified.",
+        "independent": false
+    },
+    "outstanding": [
+        "Complete scheduler slice 1 domain model",
+        "Confirm LIVE-01/STABLE-01 on a real venue night: no person allocated to play or mark while already committed, and assigned markers visible and occupied for the life of their game",
+        "Publish V1.1.0 to GreasyFork (git tag v1.1.0 exists locally; userscript distribution not published per README)",
+        "Confirm LOSER mode on a real venue night: a completed factual result becomes a loser duty, the loser marks the next eligible game with board continuity preferred, and FAIR fallback is used only when no losing player is available",
+        "Confirm the live Match Center payload carries per-side scores on completed records; only the parsed schedule-props score path is verified against the captured payload",
+        "Confirm PROJECTED NEXT duty reconciliation on a real venue night: the next game named is genuinely playable, and a fully committed sequence states the wait rather than naming an impossible pair",
+        "Confirm on a real venue night that no player is recommended to play and to mark in the same RECOMMENDED pane, including the 'waiting for a board' rows, and that a genuine NO MARKER appears only when nobody outside the pane is free"
+    ],
+    "blockers": [],
+    "dependencies": [],
+    "integrations": [],
+    "next_package": "Validate Option A and the outstanding marker and live commitment behavior on a venue night.",
     "history":  [
                     {
                         "date":  "2026-09-26",
@@ -247,6 +241,19 @@
                         "resolves":  [
                                          "Confirm the intended meaning of 'the next N projected games' for the marker list (implemented as the next N dispatchable games, N = free boards, matching the scheduler's own MARKER-4 rule)"
                                      ]
+                    },
+                    {
+                        "date": "2026-11-12",
+                        "work_package": "Managed Boards Option A and live commitment accounting",
+                        "phase": "V1.1.0 release candidate plus scheduler slice 1",
+                        "agent": "Codex",
+                        "model": "GPT-6",
+                        "role": "implementation",
+                        "from_checkpoint": "743e5a17fc2f85ce4ff1b022598d9b93880c381d",
+                        "to_checkpoint": "7c5ec8a43b735bf8e239bcd8d69735381d2adcde",
+                        "outcome": "IMPLEMENTED",
+                        "verification": "node test/scheduler-check.cjs (800 checks) and node test/parse-check.cjs (325 checks) passed. Both strategies cover seven unmanaged starts, managed occupancy and deduplication, retained assignments and refresh, release and completion, player conflicts, FAIR/LOSER and PROJECTED NEXT. Diff reviewed and git diff --check passed. Browser and live venue acceptance remain unverified.",
+                        "source": "repository-evidence"
                     }
                 ]
 }
