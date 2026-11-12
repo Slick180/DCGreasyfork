@@ -1948,12 +1948,12 @@ console.log('\n--- Slice 3B Fixture-Row Board Ownership Tests ---');
   const rt4 = api.assignGameToBoard(api.createManagedBoardRuntime(4), f[0], 1).runtime;
   const kept = JSON.parse(JSON.stringify(rt4));
   const dataOff = { fixtures: f, roster: bRoster, completedMatches: bCompleted(), boardRuntime: rt4 };
-  api.buildNightSession(uiOff, dataOff, bView); // OFF projection ignores ownership
+  api.buildNightSession(uiOff, dataOff, bView);
   check('69. Managed OFF: runtime assignments survive untouched',
     JSON.stringify(rt4) === JSON.stringify(kept) && api.findBoardOwningGame(rt4, f[0]).boardNumber === 1);
   const offAdvice = api.buildSchedulerAdvice(uiOff, dataOff, bView);
-  check('69. Managed OFF: owned game is advisory-eligible again (no board capacity consumed)',
-    offAdvice.recommended.some((g) => g.matchId === f[0].matchId));
+  check('69. Managed OFF: owned game remains committed without a board limit',
+    offAdvice.recommended.every((g) => g.matchId !== f[0].matchId));
   const onAdvice = api.buildSchedulerAdvice(bUi(), dataOff, bView);
   check('69. Managed ON reveals the preserved assignment (owned game not re-recommended)',
     onAdvice.recommended.every((g) => g.matchId !== f[0].matchId) &&
@@ -3821,8 +3821,8 @@ console.log('\n--- Marker Model (reservation / next-N wave / fair rotation) Test
       qFx(6)[1], 2, { absentIds: [] }).runtime) === 2);
   const unmanaged = api.buildNightSession(
     Object.assign(api.defaultSchedulerUiState(), { managedBoardsEnabled: false }), qData(6), qView);
-  check('90. MARKER-4: with Managed Boards OFF the planner capacity is reused (no board count invented)',
-    api.getNextDispatchCapacity(unmanaged, null) === 4 &&
+  check('90. MARKER-4: unmanaged capacity is unrestricted and managed capacity is configured',
+    api.getNextDispatchCapacity(unmanaged, null) === Infinity &&
     api.getNextDispatchCapacity(api.buildNightSession(qUi(6), qData(6), qView), null) === 6);
   const games = qFx(6);
   const idsOf = (s) => Array.from(s).sort((a, b) => a - b);
@@ -4109,13 +4109,12 @@ const fakeStore = () => {
   };
 };
 
-// 94. The observed live situation: four games PLAYING, four boards, Managed
-// Boards OFF. The next wave may still be PLANNED, but nothing is startable
+// 94. Four games PLAYING on four managed boards. The next wave may still be PLANNED, but nothing is startable
 // and no marker may be invented for a game that cannot reach a board.
 (() => {
   const f = [cF(1, 1, 2, 'playing'), cF(2, 3, 4, 'playing'), cF(3, 5, 6, 'playing'),
     cF(4, 7, 8, 'playing'), cF(5, 9, 10), cF(6, 1, 3), cF(7, 5, 7)];
-  const advice = api.buildSchedulerAdvice(cUi(), cData(f), cView);
+  const advice = api.buildSchedulerAdvice(bUi(), cData(f), cView);
   check('94. Four boards in play: 0 of 4 free (occupancy is factual, not the plan length)',
     advice.totalBoards === 4 && advice.occupiedBoards === 4 && advice.freeBoards === 0);
   check('94. The next wave is still planned (no fixture withheld for having no board)',
@@ -4133,9 +4132,10 @@ const fakeStore = () => {
   // Managed Boards OFF must keep its advisory meaning (no board identity).
   const noBoard = api.buildSchedulerAdvice(
     Object.assign(cUi(), { managedBoardsEnabled: false }), cData(f), cView);
-  check('94. Managed Boards OFF keeps the same advisory plan and occupancy',
+  check('94. Managed Boards OFF starts all eligible recommendations without board identity',
     noBoard.recommended.length === advice.recommended.length &&
-    noBoard.freeBoards === 0 && noBoard.session.boards.length === 0);
+    noBoard.freeBoards === Infinity && noBoard.session.boards.length === 0 &&
+    api.splitStartableRecommendations(noBoard.recommended, noBoard.freeBoards).awaitingBoard.length === 0);
 })();
 
 // 95. One board frees: exactly one game becomes startable and marker advice
@@ -4148,8 +4148,8 @@ const fakeStore = () => {
   // remain, so one may start and one must wait).
   const afterCompleted = [cF(2, 3, 4, 'playing'), cF(3, 5, 6, 'playing'),
     cF(4, 7, 8, 'playing'), cF(5, 9, 10), cF(6, 11, 12)];
-  const before = api.buildSchedulerAdvice(cUi(), cData(fourPlaying), cView);
-  const after = api.buildSchedulerAdvice(cUi(), cData(afterCompleted), cView);
+  const before = api.buildSchedulerAdvice(bUi(), cData(fourPlaying), cView);
+  const after = api.buildSchedulerAdvice(bUi(), cData(afterCompleted), cView);
   check('95. A completed game frees exactly one board',
     before.freeBoards === 0 && after.freeBoards === 1 && after.occupiedBoards === 3 &&
     after.recommended.length === 2);
@@ -4485,8 +4485,8 @@ const fakeStore = () => {
   const sessionOff = api.buildNightSession(Object.assign(cUi(), { managedBoardsEnabled: false }),
     cData(f), cView);
   const occOff = api.getBoardOccupancy(sessionOff, api.createManagedBoardRuntime(4));
-  check('105. Managed OFF: effective capacity only, occupancy still factual',
-    occOff.managed === false && occOff.capacity === 4 && occOff.occupied === 1 && occOff.free === 3);
+  check('105. Managed OFF: no board capacity or occupancy to report',
+    occOff.managed === false && occOff.capacity === Infinity && occOff.occupied === 0 && occOff.free === Infinity);
   const sessionOn = api.buildNightSession(Object.assign(cUi(), { managedBoardsEnabled: true, boardCount: 2 }),
     cData(f), cView);
   const occOn = api.getBoardOccupancy(sessionOn, api.createManagedBoardRuntime(2));
@@ -4497,7 +4497,7 @@ const fakeStore = () => {
     api.getBoardOccupancy(sessionOn, brt).occupied === 2 && api.getBoardOccupancy(sessionOn, brt).free === 0);
   check('105. Occupancy never exceeds the venue and never goes negative',
     api.getBoardOccupancy(sessionOn, api.createManagedBoardRuntime(1)).free === 0 &&
-    api.getBoardOccupancy(sessionOff, null).free === 3);
+    api.getBoardOccupancy(sessionOff, null).free === Infinity);
   check('105. next-N capacity is the same factual number the UI shows',
     api.getNextDispatchCapacity(sessionOff, api.createManagedBoardRuntime(4)) === occOff.free &&
     api.getNextDispatchCapacity(sessionOn, brt) === api.getBoardOccupancy(sessionOn, brt).free);
@@ -4517,7 +4517,7 @@ const fakeStore = () => {
   ];
   const adviceFor = (mode, managed) => api.buildSchedulerAdvice(
     Object.assign(cUi(), { markerPolicy: mode, managedBoardsEnabled: managed }),
-    cData(fixtures), cView);
+    cData(fixtures, { roster: Array.from({ length: 16 }, (_, i) => cP(i + 1)) }), cView);
 
   const off = adviceFor(api.MARKER_POLICIES.OFF, false);
   check('106. OFF: no automatic marker recommendation anywhere',
@@ -4525,7 +4525,7 @@ const fakeStore = () => {
     off.recommended.length > 0 &&
     off.recommended.every((g) => g.proposedMarkerId == null && g.markerUnavailable === false));
   check('106. OFF: matches are still recommended (a marker is never required)',
-    off.recommended.length === 4 && off.freeBoards === 4 && off.occupiedBoards === 0);
+    off.recommended.length === 5 && off.freeBoards === Infinity && off.occupiedBoards === 0);
 
   const manual = adviceFor(api.MARKER_POLICIES.MANUAL, false);
   check('106. MANUAL: controls offered, nothing recommended or preselected',
@@ -4675,7 +4675,7 @@ const fakeStore = () => {
   // More waiting games than the two boards can start, so the scheduler is
   // genuinely holding a follow-on wave to protect.
   const fixtures = Array.from({ length: 6 }, (_, k) => cF(k + 1, 2 * k + 1, 2 * k + 2));
-  const ui109 = Object.assign(cUi(), { markerPolicy: api.MARKER_POLICIES.FAIR, boardCount: 2 });
+  const ui109 = { ...bUi(), markerPolicy: api.MARKER_POLICIES.FAIR, boardCount: 2 };
   const advice = api.buildSchedulerAdvice(ui109, cData(fixtures), cView);
   // The wave the PLAN holds is the sequence genuinely at risk: it is computed
   // before any marker exists, so it is the raw list the pane has to reconcile
@@ -5188,7 +5188,7 @@ console.log('\n--- LOSER Mode Tests (results, continuity, fallback, precedence) 
 (() => {
   const busy = [cF(1, 1, 2, 'playing'), cF(2, 3, 4, 'playing'),
     cF(3, 5, 6, 'playing'), cF(4, 7, 8, 'playing'), cF(5, 9, 10), cF(6, 1, 3)];
-  const full = api.buildSchedulerAdvice(cUi(), cData(busy), cView);
+  const full = api.buildSchedulerAdvice(bUi(), cData(busy), cView);
   check('120. a full venue is "waiting for a board", never "NO MARKER"',
     full.freeBoards === 0 && full.recommended.length > 0 &&
     full.recommended.every((g) => g.markerState === 'awaiting' && g.markerUnavailable === false));
@@ -5269,7 +5269,7 @@ console.log('\n--- LOSER Mode Tests (results, continuity, fallback, precedence) 
   // ALTERNATIVE next match available instead of a bare wait.
   const roster16 = Array.from({ length: 16 }, (_, k) => cP(k + 1));
   const ui = (mode, boardCount) => Object.assign(cUi(), {
-    managedBoardsEnabled: false, markerPolicy: mode, boardCount: boardCount || 4,
+    managedBoardsEnabled: true, markerPolicy: mode, boardCount: boardCount || 4,
   });
   const mkData = (extra) => cData(f, Object.assign({ roster: roster16,
     completedMatches: completed, markerRuntime: api.createMarkerRuntime() }, extra || {}));
@@ -5397,7 +5397,7 @@ console.log('\n--- LOSER Mode Tests (results, continuity, fallback, precedence) 
       playerA: { id: cP(9).id, score: 0 }, playerB: { id: cP(11).id, score: 3 } }],
   }, extra || {});
   const ui = (mode, extra) => Object.assign(cUi(), {
-    managedBoardsEnabled: false, markerPolicy: mode,
+    managedBoardsEnabled: true, markerPolicy: mode,
   }, extra || {});
   const paneIds = (a) => a.recommended
     .reduce((acc, g) => acc.concat([g.playerA.id, g.playerB.id]), []);
@@ -5507,6 +5507,84 @@ console.log('\n--- LOSER Mode Tests (results, continuity, fallback, precedence) 
         g.markerFallback === false) &&
       a.projectedNextMarkingWithheld === 0);
   });
+})();
+
+
+(() => {
+  const roster = Array.from({ length: 28 }, (_, i) => cP(i + 1));
+  const assigned = cF(1, 1, 2);
+  const conflict = cF(2, 1, 3);
+  const waiting = Array.from({ length: 7 }, (_, i) => cF(10 + i, 4 + 2 * i, 5 + 2 * i));
+  const liveOnly = { matchId: 9999, playerA: cP(18), playerB: cP(19) };
+  const liveConflict = cF(3, 18, 20);
+  const fixtures = [assigned, conflict, liveConflict].concat(waiting);
+  const boardRuntime = api.assignGameToBoard(api.createManagedBoardRuntime(3), assigned, 1).runtime;
+  const liveCommitments = [liveOnly, assigned];
+  const loserId = cP(28).id;
+  const data = cData(fixtures, {
+    roster, boardRuntime, liveCommitments,
+    completedMatches: [{ ...cF(40, 28, 27), playerA: { ...cP(28), score: 0 }, playerB: { ...cP(27), score: 3 } }],
+    markerHistory: { marks: { [loserId]: 2 }, recentPlayerId: loserId },
+  });
+  for (const strategy of Object.values(api.SCHEDULING_STRATEGIES)) {
+    for (const markerPolicy of [api.MARKER_POLICIES.FAIR, api.MARKER_POLICIES.LOSER]) {
+      const ui = { strategy, markerPolicy, boardCount: 3 };
+      const off = api.buildSchedulerAdvice({ ...ui, managedBoardsEnabled: false }, data, cView);
+      const split = api.splitStartableRecommendations(off.recommended, off.freeBoards);
+      const markers = off.recommended.map(g => g.proposedMarkerId);
+      check('125. ' + strategy + '/' + markerPolicy + ' unmanaged allows seven eligible games and no board wait',
+        split.startable.length === 7 && split.awaitingBoard.length === 0 &&
+        off.recommended.every(g => waiting.some(f => f.matchId === g.matchId)));
+      const unavailable = new Set(roster.slice(0, 19).map(p => p.id));
+      check('125. ' + strategy + '/' + markerPolicy + ' large wave has distinct eligible markers',
+        markers.length === 7 && new Set(markers).size === 7 &&
+        markers.every(id => id != null && !unavailable.has(id)));
+      check('125. ' + strategy + '/' + markerPolicy + ' large wave follows its marker policy',
+        markers.includes(loserId) === (markerPolicy === api.MARKER_POLICIES.LOSER));
+      const on = api.buildSchedulerAdvice({ ...ui, managedBoardsEnabled: true }, data, cView);
+      check('125. ' + strategy + '/' + markerPolicy + ' managed counts live-only and assigned once',
+        on.totalBoards === 3 && on.occupiedBoards === 2 && on.freeBoards === 1 &&
+        on.recommended.length <= 3);
+    }
+    const ui = { strategy, boardCount: 3, managedBoardsEnabled: false };
+    const retained = api.buildSchedulerAdvice(ui, { ...data, liveCommitments: [] }, cView);
+    check('125. ' + strategy + ' retains assignment and player commitment after switching off',
+      retained.session.activeGames.some(g => g.matchId === assigned.matchId) &&
+      retained.recommended.every(g => g.matchId !== assigned.matchId && g.matchId !== conflict.matchId));
+    const saved = api.snapshotDispatchState(boardRuntime, {}, null, fixtures);
+    const restored = api.restoreDispatchState(3, saved, fixtures);
+    const afterRefresh = api.buildSchedulerAdvice(ui,
+      { ...data, boardRuntime: restored.runtime, liveCommitments: [] }, cView);
+    check('125. ' + strategy + ' retained commitment survives refresh with boards off',
+      afterRefresh.recommended.every(g => g.matchId !== assigned.matchId && g.matchId !== conflict.matchId));
+    const released = api.releaseBoard(restored.runtime, 1).runtime;
+    const afterRelease = api.buildSchedulerAdvice({ ...ui, managedBoardsEnabled: true },
+      { ...data, boardRuntime: released, liveCommitments: [liveOnly] }, cView);
+    check('125. ' + strategy + ' release frees one slot and the previously committed players',
+      afterRelease.freeBoards === 2 && afterRelease.session.activeGames.every(g => g.matchId !== assigned.matchId));
+    const afterCompletion = api.buildSchedulerAdvice({ ...ui, managedBoardsEnabled: true },
+      { ...data, boardRuntime: released, liveCommitments: [], completedMatches: [liveOnly] }, cView);
+    check('125. ' + strategy + ' live-only completion frees its slot and players',
+      afterCompletion.freeBoards === 3 &&
+      api.getPlayableGames(afterCompletion.session).some(g => g.matchId === liveConflict.matchId));
+
+    const opening = cF(30, 1, 2);
+    const later = cF(31, 1, 3);
+    const projectedData = cData([opening, later], {
+      roster: [cP(1), cP(2), cP(3)],
+      completedMatches: [{ ...cF(32, 3, 2), playerA: { ...cP(3), score: 0 }, playerB: { ...cP(2), score: 3 } }],
+    });
+    const rawPlan = api.getProjectedRunningOrder(api.buildNightSession(ui, projectedData, cView), { strategy });
+    check('125. ' + strategy + ' unmanaged still projects player-conflicting games later',
+      rawPlan.projectedWaves.length === 2);
+    for (const markerPolicy of [api.MARKER_POLICIES.FAIR, api.MARKER_POLICIES.LOSER]) {
+      const projected = api.buildSchedulerAdvice({ ...ui, markerPolicy }, projectedData, cView);
+      check('125. ' + strategy + '/' + markerPolicy + ' unmanaged reconciles next wave with marker duties',
+        projected.recommended.length === 1 && projected.recommended[0].proposedMarkerId != null &&
+        projected.projectedNext.length === 0 && projected.projectedNextMarkingWithheld === 1);
+    }
+
+  }
 })();
 
 if (failures === 0) {

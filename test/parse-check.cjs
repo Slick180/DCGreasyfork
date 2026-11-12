@@ -1258,7 +1258,10 @@ check('ACCEPT-01: dispatch queue order is applied + remembered in render, and su
   /invalidateDispatchOrder\(\);\r?\n\s*state\.night = buildNightPersistedState/.test(srcText));
 check('ACCEPT-01: genuine changes always invalidate the queue; dispatch/release never do',
   (srcText.match(/data\.dispatchOrder = null;/g) || []).length >= 6 &&
-  /const dispatchToBoard = \(boardNumber, game, proposedMarkerId\) => \{\r?\n\s*const res = assignGameToBoard/.test(srcText));
+  srcText.slice(srcText.indexOf('const dispatchToBoard ='), srcText.indexOf('const clearPendingMarker ='))
+    .includes('const res = assignGameToBoard') &&
+  !srcText.slice(srcText.indexOf('const dispatchToBoard ='), srcText.indexOf('const clearPendingMarker ='))
+    .includes('data.dispatchOrder ='));
 check('ACCEPT-01: remembered queue is session presentation memory only (never persisted)',
   srcText.indexOf('data.dispatchOrder') !== -1 &&
   srcText.indexOf('dispatchOrder: ') === -1 &&
@@ -1326,27 +1329,18 @@ check('MARKER-2: "already played" is a FAIR PREFERENCE, never a hard eligibility
 // It is now computed from FACTUAL occupancy (a PLAYING game the operator has
 // not named still occupies a physical board), so a full venue yields 0
 // instead of the plan's length.
-check('MARKER-4: next-N is capacity-driven (factual free board slots), never hard-coded to four',
-  srcText.indexOf('const DEFAULT_SCHEDULING_CAPACITY = 4;') !== -1 &&
-  srcText.indexOf('function getNextDispatchCapacity(session, boardRuntime)') !== -1 &&
-  srcText.indexOf('return getBoardOccupancy(session, boardRuntime).free;') !== -1 &&
-  srcText.indexOf('function getBoardOccupancy(session, boardRuntime)') !== -1 &&
-  srcText.indexOf('if (b && typeof b.gameKey === \'string\' && b.gameKey) busy.add(b.gameKey);') !== -1 &&
-  srcText.indexOf('if (key) busy.add(key);') !== -1 &&
-  srcText.indexOf('return { managed, boardsKnown: !!rows, capacity, occupied, free: Math.max(0, capacity - occupied) };') !== -1 &&
-  srcText.indexOf(': DEFAULT_SCHEDULING_CAPACITY);') !== -1 &&
-  srcText.indexOf('function nextDispatchParticipantIds(games, index, capacity)') !== -1 &&
-  // 6 original capacity derivations + 2 in projectNextWaveWithDuties, which
-  // replays the plan at the same capacity as the plan itself used.
-  (srcText.match(/DEFAULT_SCHEDULING_CAPACITY/g) || []).length === 8 &&
-  srcText.indexOf('? (session.managedBoardsEnabled ? (session.boardCount || 4) : 4)') === -1 &&
-  srcText.indexOf('(session.managedBoardsEnabled ? session.boardCount : 4)') === -1);
+check('MARKER-4: managed occupancy drives capacity and unmanaged advice has no board limit',
+  srcText.includes('return getBoardOccupancy(session, boardRuntime).free;') &&
+  srcText.includes('session.activeGames || []') &&
+  srcText.includes('capacity: Infinity, occupied: 0, free: Infinity') &&
+  !srcText.includes('DEFAULT_SCHEDULING_CAPACITY') &&
+  srcText.includes('!schedulerUi.managedBoardsEnabled ? unmanagedSummary : startableCount > 0'));
 check('MARKER-4: zero capacity invents no marker allocation; an insufficient pool is left honestly null',
   srcText.indexOf('const recommendedGroupIds = nextCapacity > 0') !== -1 &&
   srcText.indexOf('      : [];') !== -1 &&
   srcText.indexOf('if (!cands.length) { select(idx + 1, score, seq); return; }') !== -1 &&
   srcText.indexOf('if (!extended) select(idx + 1, score, seq);') !== -1 &&
-  srcText.indexOf('proposedMarkerId = bestSeq ? bestSeq[i] : null') !== -1);
+  srcText.indexOf('proposedMarkerId = chosen[i]') !== -1);
 check('MARKER-2: completion is never inferred from PLAYING',
   srcText.indexOf("f.status === 'playing') || playedIds.has(id)") === -1 &&
   srcText.indexOf('playedIds.add') === -1);
@@ -1410,7 +1404,7 @@ check('MARKER-5: the loser is never auto-confirmed as MARKING',
   srcText.indexOf('assignMarkerToGame') !== -1 &&
   srcText.indexOf('data.markerRuntime = res.runtime;') !== -1 &&
   // A proposal is still only ADVICE: nothing in the advice path assigns.
-  srcText.indexOf('game.proposedMarkerId = bestSeq ? bestSeq[i] : null;') !== -1);
+  srcText.indexOf('game.proposedMarkerId = chosen[i];') !== -1);
 // ---- COLS corrective pass source guards (corrective pass, 15 Oct live use) ----
 check('COLS-01: confirmed marker assignments are persisted and restored (Refresh keeps them)',
   srcText.indexOf('function snapshotMarkerAssignments(runtime)') !== -1 &&
@@ -1450,7 +1444,7 @@ check('COLS-02/03: three distinct marker states - assigned, genuinely missing, n
   srcText.indexOf(": (nextCapacity > 0 ? 'missing' : 'awaiting');") !== -1 &&
   srcText.indexOf('game.markerUnavailable = game.markerState === \'missing\';') !== -1 &&
   srcText.indexOf("if (advice.markerAdviceEnabled && g.markerState === 'missing') {") !== -1 &&
-  srcText.indexOf('Waiting for a board — no marker allocation was attempted for this game yet.') !== -1);
+  srcText.indexOf('Waiting for a free board.') !== -1);
 check('COLS-04: projections are never presented as immediately executable',
   srcText.indexOf("'next projected possibility · starts after the games above'") !== -1 &&
   srcText.indexOf('Projected next wave — not startable yet.') !== -1 &&
@@ -1766,9 +1760,12 @@ asyncChecks.push(delayLivePrior.then(() => (async () => {
   const players = [live.playerA, live.playerB, other.playerA, other.playerB];
   const view = { division: 'Universal', selectedMatchDate: '2026-10-15' };
   const sessionOff = api.buildNightSession(api.defaultSchedulerUiState(), { fixtures: [live, other], roster: players }, view);
-  const occ = api.getBoardOccupancy(sessionOff, null);
+  const sessionOn = api.buildNightSession({ ...api.defaultSchedulerUiState(), managedBoardsEnabled: true },
+    { fixtures: [live, other], roster: players }, view);
+  const occ = api.getBoardOccupancy(sessionOn, null);
   check('DELAY-LIVE: a live delayed match occupies a board factually but is never auto-assigned one',
-    occ.occupied === 1 && sessionOff.activeGames.every((g) => g.boardNumber === null));
+    occ.occupied === 1 && api.getBoardOccupancy(sessionOff, null).free === Infinity &&
+    sessionOff.activeGames.every((g) => g.boardNumber === null));
   const advice = api.buildSchedulerAdvice(api.defaultSchedulerUiState(), { fixtures: [live, other], roster: players }, view);
   const liveIds = [live.playerA.id, live.playerB.id];
   check('DELAY-LIVE: a live delayed fixture is never recommended again and its players are never suggested elsewhere',
@@ -1829,7 +1826,7 @@ check('R-11: PROJECTED NEXT is reconciled against the duties proposed above it',
   // the reconciliation runs AFTER the proposals exist, and only the projection
   // is replaced: the recommended wave is never re-planned
   srcText.indexOf('const replanned = projectNextWaveWithDuties(') >
-  srcText.indexOf('openGames.forEach((game, i) => { game.proposedMarkerId = bestSeq ? bestSeq[i] : null; });') &&
+  srcText.indexOf('openGames.forEach((game, i) => { game.proposedMarkerId = chosen[i]; });') &&
   srcText.indexOf('advice.projectedNext = ((replanned && replanned.games) || []).filter((g) => !involvesDuty(g));') !== -1 &&
   srcText.indexOf('advice.projectedNextMarkingWithheld = plannedNext.filter(involvesDuty).length;') !== -1 &&
   // OFF/MANUAL report the fact honestly rather than undefined

@@ -65,9 +65,8 @@ scheduling option is unchanged: it still controls delayed-game eligibility.
 - A live group is not a collapse toggle while it is live, so polling cannot
   produce a collapse/expand flicker.
 - A live delayed match is never automatically given a board or a marker; it
-  occupies a physical board factually (board occupancy), which is what bounds
-  free capacity. Its players are unavailable for conflicting match or marker
-  recommendations.
+  counts against free capacity when Managed Boards is ON. Its players are
+  unavailable for conflicting match or marker recommendations.
 
 ## Recommendation row layout (COLS-08)
 
@@ -91,8 +90,7 @@ from completed live API records.
   becomes factual when the operator names one, so continuity is honoured at
   dispatch: naming Board 3 hands over Board 3's own loser as the pending marker
   when he is eligible, otherwise any other factual loser, otherwise the plan's
-  own proposal. With Managed Boards OFF no board number is ever invented; the
-  most recent duty is preferred instead.
+  own proposal. With Managed Boards OFF the most recent duty is preferred.
 - **FAIR fills the gaps automatically.** With no usable losing player the
   allocation is a normal FAIR selection, the mode stays LOSER, and the row says
   `FAIR` so the stand-in is never passed off as a loser duty. New results are
@@ -105,9 +103,14 @@ from completed live API records.
   dartboard is reported as a conflict (`! PLAYING`, struck-through chip), never
   counted as valid coverage, and that player is never given a second duty.
 
-**RECOMMENDED is one dispatch group.** The pane's head can start now and its
-tail (`waiting for a board`) starts as soon as a board frees, so every player
-recommended to play anywhere in the pane is excluded from marking anywhere in
+**Managed Boards** limits scheduling to the configured 1–6 boards when ON.
+With it OFF, player availability and existing commitments determine which games
+can start together. Existing board assignments commit their players until release
+or completion in either mode.
+
+**RECOMMENDED is one dispatch group.** With Managed Boards ON, any waiting
+rows start as boards free. Every player recommended to play anywhere in the pane
+is excluded from marking anywhere in
 it: nobody is proposed to mark a match while the same pane recommends him to
 play another. Matches after the pane (PROJECTED NEXT and later) stay markable —
 a duty ends with the game it serves — and a confirmed duty holder becomes

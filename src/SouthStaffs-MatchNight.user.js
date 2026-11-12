@@ -1790,14 +1790,6 @@
     OCCUPIED: 'OCCUPIED',
   };
 
-  /**
-   * MARKER-4: the effective scheduling capacity the planner uses when Managed
-   * Boards are OFF. One named constant so the planner, the candidate-set
-   * search and the "next N" marker wave all agree — the capacity is never
-   * hard-coded to four in more than one place.
-   */
-  const DEFAULT_SCHEDULING_CAPACITY = 4;
-
   function createBoard(boardNumber) {
     return {
       boardNumber,
@@ -2072,7 +2064,7 @@
       g.playerA.id === candidatePlayerId || g.playerB.id === candidatePlayerId
     );
 
-    let availableBoards = 1;
+    let availableBoards = 0;
     if (session.managedBoardsEnabled) {
       const freeBoards = (session.boards || []).filter((b) => b.status === BOARD_STATUSES.AVAILABLE);
       availableBoards = Math.max(1, freeBoards.length);
@@ -2159,7 +2151,7 @@
         const freeBoards = (session.boards || []).filter((b) => b.status === BOARD_STATUSES.AVAILABLE);
         limit = Math.max(1, freeBoards.length);
       } else {
-        limit = Math.min(playable.length, 4);
+        limit = playable.length;
       }
     }
 
@@ -2361,7 +2353,7 @@
    */
   function getCompatibleCandidateSets(session, playableGames, capacity, options) {
     const opts = options || {};
-    const cap = typeof capacity === 'number' && capacity > 0 ? Math.floor(capacity) : (session.managedBoardsEnabled ? session.boardCount : DEFAULT_SCHEDULING_CAPACITY);
+    const cap = typeof capacity === 'number' && capacity > 0 ? Math.floor(capacity) : (session.managedBoardsEnabled ? session.boardCount : Infinity);
     const pool = Array.isArray(playableGames) ? playableGames : getPlayableGames(session);
 
     if (pool.length === 0 || cap <= 0) return [];
@@ -2815,7 +2807,7 @@
 
     const capacity = (typeof opts.capacity === 'number' && opts.capacity > 0)
       ? Math.floor(opts.capacity)
-      : (session.managedBoardsEnabled ? (session.boardCount || DEFAULT_SCHEDULING_CAPACITY) : DEFAULT_SCHEDULING_CAPACITY);
+      : (session.managedBoardsEnabled ? session.boardCount : Infinity);
 
     const maxWaves = typeof opts.maxWaves === 'number' && opts.maxWaves > 0 ? Math.floor(opts.maxWaves) : 50;
 
@@ -3033,8 +3025,7 @@
     const opening = (Array.isArray(openingGames) ? openingGames : []).filter(Boolean);
     const capacity = (typeof opts.capacity === 'number' && opts.capacity > 0)
       ? Math.floor(opts.capacity)
-      : (session.managedBoardsEnabled
-        ? (session.boardCount || DEFAULT_SCHEDULING_CAPACITY) : DEFAULT_SCHEDULING_CAPACITY);
+      : (session.managedBoardsEnabled ? session.boardCount : Infinity);
     const maxWaves = typeof opts.maxWaves === 'number' && opts.maxWaves > 0
       ? Math.floor(opts.maxWaves) : 50;
     const held = Object.assign({}, session, {
@@ -3867,19 +3858,9 @@
   }
 
   /**
-   * COLS-02: FACTUAL board occupancy versus effective capacity.
-   *
-   * The venue has a fixed number of physical boards. With Managed Boards OFF
-   * the operator never names them, so the planner's effective capacity is
-   * reused unchanged (this mode keeps its advisory meaning); with Managed
-   * Boards ON the operator's own board rows are the capacity.
-   *
-   * What is knowable in BOTH modes is how many boards are genuinely BUSY:
-   * every fixture that is factually PLAYING occupies one physical board, and
-   * every explicit managed assignment occupies one too. Occupancy is the
-   * union of those stable game keys, so a game that is both counting once —
-   * never double-counted, never above the venue capacity, never below zero.
-   * Returns { managed, boardsKnown, capacity, occupied, free }. Pure.
+   * Managed board capacity and occupancy. Count the union of assigned and
+   * live games, including live commitments without a fixture row.
+   * Unmanaged scheduling has no board limit.
    */
   function getBoardOccupancy(session, boardRuntime) {
     const managed = !!(session && session.managedBoardsEnabled);
@@ -3887,9 +3868,8 @@
     const rows = boards && boards.length > 0 ? boards.length : null;
     const declared = session && Number.isSafeInteger(session.boardCount) && session.boardCount > 0
       ? session.boardCount : null;
-    const capacity = Math.max(1, managed
-      ? (rows || declared || DEFAULT_SCHEDULING_CAPACITY)
-      : DEFAULT_SCHEDULING_CAPACITY);
+    if (!managed) return { managed, boardsKnown: false, capacity: Infinity, occupied: 0, free: Infinity };
+    const capacity = rows || declared || 4;
     const busy = new Set();
     (boards || []).forEach((b) => {
       if (b && typeof b.gameKey === 'string' && b.gameKey) busy.add(b.gameKey);
@@ -3897,6 +3877,10 @@
     (session && Array.isArray(session.fixtures) ? session.fixtures : []).forEach((f) => {
       if (!f || f.status !== 'playing') return;
       const key = boardKeyForGame(f);
+      if (key) busy.add(key);
+    });
+    (session.activeGames || []).forEach((game) => {
+      const key = game.gameKey || boardKeyForGame(game);
       if (key) busy.add(key);
     });
     const occupied = Math.min(busy.size, capacity);
@@ -3928,8 +3912,8 @@
    */
   function splitStartableRecommendations(recommended, freeBoards) {
     const list = Array.isArray(recommended) ? recommended : [];
-    const n = Number.isSafeInteger(freeBoards) && freeBoards > 0
-      ? Math.min(freeBoards, list.length) : 0;
+    const n = freeBoards === Infinity ? list.length
+      : (Number.isSafeInteger(freeBoards) && freeBoards > 0 ? Math.min(freeBoards, list.length) : 0);
     return { startable: list.slice(0, n), awaitingBoard: list.slice(n) };
   }
 
@@ -3962,7 +3946,7 @@
     const out = new Set();
     const a = adviceState || {};
     // Nothing can be dispatched to a full venue, so no duty can arise there.
-    const dispatchable = Number.isSafeInteger(a.freeBoards) && a.freeBoards > 0;
+    const dispatchable = a.freeBoards > 0;
     if (dispatchable && Array.isArray(a.recommended)) {
       nextDispatchParticipantIds(a.recommended, 0, a.recommended.length).forEach((id) => out.add(id));
     }
@@ -4653,7 +4637,7 @@
    * is how the planner learns about ownership without any duplicated
    * scheduling logic in the UI.
    *
-   * No board identity is invented: unmanaged capacity is capacity only.
+   * Commitments remain active while board controls are hidden.
    */
   /**
    * MARKER-1: player ids reserved by PENDING marker handoffs on board-
@@ -4700,6 +4684,7 @@
       .filter((f) => f.status === 'playing')
       .map((f) => ({
         matchId: f.matchId != null ? f.matchId : 'live-' + (f.playerA && f.playerA.id) + '-' + (f.playerB && f.playerB.id),
+        gameKey: boardKeyForGame(f),
         playerA: f.playerA,
         playerB: f.playerB,
         boardNumber: null,
@@ -4722,15 +4707,15 @@
         isExtra: true,
       });
     });
-    if (ui.managedBoardsEnabled && data.boardRuntime && Array.isArray(data.boardRuntime.boards)) {
+    if (data.boardRuntime && Array.isArray(data.boardRuntime.boards)) {
       data.boardRuntime.boards.forEach((b) => {
         if (b.gameKey === null) return;
         const game = sessionFixtures.find((f) => boardKeyForGame(f) === b.gameKey);
         if (!game) return;
-        const liveIds = new Set(activeGames.filter((ag) => typeof ag.matchId === 'number').map((ag) => ag.matchId));
-        if (game.matchId != null && liveIds.has(game.matchId)) return;
+        if (activeGames.some((ag) => (ag.gameKey || boardKeyForGame(ag)) === b.gameKey)) return;
         activeGames.push({
-          matchId: game.matchId != null ? game.matchId : boardKeyForGame(game),
+          matchId: game.matchId != null ? game.matchId : b.gameKey,
+          gameKey: b.gameKey,
           playerA: game.playerA,
           playerB: game.playerB,
           boardNumber: b.boardNumber,
@@ -4811,10 +4796,9 @@
      * a player needed soon scores low, a player with nothing outstanding
      * scores high), with deterministic ascending-id tie-breaks.
      *
-     * Bounds: per game only the top CANDIDATE_BREADTH=4 ranked candidates
-     * are considered, so the search is at most 4^n with n = opening games
-     * (n <= capacity <= 6) -> <= 4096 leaves, each scored O(n) from cached
-     * impacts. FACT beats ADVICE: games with confirmed markers are skipped
+     * Managed waves and small unmanaged waves search four candidates per game.
+     * Larger unmanaged waves rank eligible pairs once to bound the work.
+     * FACT beats ADVICE: games with confirmed markers are skipped
      * and their markers are unavailable via the factual MARKING
      * projection — they are never overwritten by a better combination. */
     const playerStates = derivePlayerStates(session);
@@ -4878,10 +4862,6 @@
     advice.loserDuties = loserDuties;
     advice.loserDutyCount = loserDuties.length;
     const proposalPool = openPool.filter((id) => !reservedIds.has(id));
-    // MARKER-4: how many games can be dispatched right now (free board
-    // slots; the planner's effective capacity when Managed Boards are OFF).
-    // 0 free boards means no new dispatchable allocation at all.
-    const nextCapacity = getNextDispatchCapacity(session, data && data.boardRuntime);
     // COLS-02: the board picture behind the recommendations, so the UI can
     // state plainly whether the venue has room for them RIGHT NOW instead of
     // describing them all as immediately startable. The PLAN is untouched:
@@ -4891,6 +4871,7 @@
     advice.totalBoards = occupancy.capacity;
     advice.occupiedBoards = occupancy.occupied;
     advice.freeBoards = occupancy.free;
+    const nextCapacity = occupancy.free;
     // COLS-06 / MARKER-7: the marker mode the proposals below were produced
     // under. OFF and MANUAL produce NO automatic marker recommendation at all;
     // OFF additionally offers no marker UI (see markerControlsVisible), while
@@ -5001,6 +4982,7 @@
       // wins; any other factual loser still beats a pure FAIR candidate.
       return at === 0 ? LOSER_DUTY_BONUS : LOSER_DUTY_BONUS / 2;
     };
+    const largeWave = !session.managedBoardsEnabled && openGames.length > CANDIDATE_BREADTH;
     const perGameCandidates = nextCapacity > 0
       ? openGames.map((game, idx) => {
         // Own participants are excluded unconditionally; when this game sits
@@ -5016,40 +4998,53 @@
             playedIds,
             loserIds: loserPreferredByGame[idx].length > 0 ? loserPreferredByGame[idx] : null,
           }
-        ).slice(0, CANDIDATE_BREADTH);
+        ).slice(0, largeWave ? Infinity : CANDIDATE_BREADTH);
       })
       : [];
     const chosen = new Array(openGames.length).fill(null);
-    let bestScore = -Infinity;
-    let bestSeq = null;
     const used = new Set();
-    (function select(idx, score, seq) {
-      if (idx === openGames.length) {
-        const better = score > bestScore ||
-          (score === bestScore && (bestSeq === null || seq.join(',') < bestSeq.join(',')));
-        if (better) { bestScore = score; bestSeq = seq.slice(); }
-        return;
-      }
-      const cands = perGameCandidates[idx] || [];
-      if (!cands.length) { select(idx + 1, score, seq); return; }
-      let extended = false;
-      for (let i = 0; i < cands.length; i++) {
-        const id = cands[i];
-        if (used.has(id)) continue;
+    if (largeWave) {
+      const pairs = perGameCandidates.flatMap((ids, gameIndex) => ids.map((id) => ({
+        gameIndex, id, score: combinedScore(id) + loserDutyBonus(gameIndex, id),
+      })));
+      pairs.sort((a, b) => b.score - a.score || a.gameIndex - b.gameIndex || a.id - b.id);
+      pairs.forEach(({ gameIndex, id }) => {
+        if (chosen[gameIndex] != null || used.has(id)) return;
+        chosen[gameIndex] = id;
         used.add(id);
-        seq.push(id);
-        select(idx + 1, score + combinedScore(id) + loserDutyBonus(idx, id), seq);
-        seq.pop();
-        used.delete(id);
-        extended = true;
-      }
-      // TRIAL-03: when every candidate for this game is already used by an
-      // earlier wave game, the game legitimately gets NO proposed marker —
-      // skipping is a first-class branch, never a dead end (previously an
-      // exhausted-but-non-empty candidate list silently killed the branch).
-      if (!extended) select(idx + 1, score, seq);
-    })(0, 0, []);
-    openGames.forEach((game, i) => { game.proposedMarkerId = bestSeq ? bestSeq[i] : null; });
+      });
+    } else {
+      let bestScore = -Infinity;
+      let bestSeq = null;
+      (function select(idx, score, seq) {
+        if (idx === openGames.length) {
+          const better = score > bestScore ||
+            (score === bestScore && (bestSeq === null || seq.join(',') < bestSeq.join(',')));
+          if (better) { bestScore = score; bestSeq = seq.slice(); }
+          return;
+        }
+        const cands = perGameCandidates[idx] || [];
+        if (!cands.length) { select(idx + 1, score, seq); return; }
+        let extended = false;
+        for (let i = 0; i < cands.length; i++) {
+          const id = cands[i];
+          if (used.has(id)) continue;
+          used.add(id);
+          seq.push(id);
+          select(idx + 1, score + combinedScore(id) + loserDutyBonus(idx, id), seq);
+          seq.pop();
+          used.delete(id);
+          extended = true;
+        }
+        // TRIAL-03: when every candidate for this game is already used by an
+        // earlier wave game, the game legitimately gets NO proposed marker —
+        // skipping is a first-class branch, never a dead end (previously an
+        // exhausted-but-non-empty candidate list silently killed the branch).
+        if (!extended) select(idx + 1, score, seq);
+      })(0, 0, []);
+      if (bestSeq) bestSeq.forEach((id, i) => { chosen[i] = id; });
+    }
+    openGames.forEach((game, i) => { game.proposedMarkerId = chosen[i]; });
     advice.recommended.forEach((game) => {
       if (game.proposedMarkerId === undefined) game.proposedMarkerId = null;
       // LOSER fallback: the proposal is a real losing player for THIS game, or
@@ -5650,6 +5645,7 @@
     // over as PENDING advice (never factual MARKING), persists, and re-plans.
     // The surviving queue keeps its order: dispatch does NOT invalidate it.
     const dispatchToBoard = (boardNumber, game, proposedMarkerId) => {
+      if (game.status === 'waiting' && advice && advice.freeBoards === 0) return;
       const res = assignGameToBoard(rtv, game, boardNumber, { absentIds: Array.from(new Set(state.absentIds)) });
       if (res.ok) {
         data.boardRuntime = res.runtime;
@@ -5895,7 +5891,7 @@
     strip.appendChild(markerGroup);
     strip.appendChild(el('span', 'lbl', 'Managed Boards'));
     const mbGroup = el('span', 'grp');
-    [[false, 'OFF', 'Advisory scheduling without physical board identity (effective capacity only)'],
+    [[false, 'OFF', 'Schedule by player availability without a board limit'],
      [true, 'ON', 'Plan and operate against physical boards you assign explicitly (runtime only)']].forEach(([on, label, tip]) => {
       const b = el('button', schedulerUi.managedBoardsEnabled === on ? 'on' : '', label);
       b.type = 'button';
@@ -6207,7 +6203,9 @@
       if (advice.recommended.length > 0) {
         const head = el('div', 'sssl-advicehead');
         head.appendChild(el('span', 'badge', 'RECOMMENDED'));
-        head.appendChild(document.createTextNode(startableCount > 0
+        const unmanagedSummary = 'start now' + (startableCount > 1 ? ' · ' + startableCount + ' games' : '') +
+          (advice.laterCount > 0 ? ' · ' + advice.laterCount + ' planned later' : '');
+        head.appendChild(document.createTextNode(!schedulerUi.managedBoardsEnabled ? unmanagedSummary : startableCount > 0
           ? 'start now' + (startableCount > 1 ? ' · ' + startableCount + ' games' : '') +
             ' · ' + advice.freeBoards + ' of ' + advice.totalBoards + ' boards free' +
             (awaitingCount > 0 ? ' · ' + awaitingCount + ' waiting for a board' : '') +
@@ -6230,9 +6228,7 @@
           const row = el('div', 'sssl-advice');
           if (awaiting) {
             row.classList.add('awaiting');
-            // Third marker state: nothing was allocated because no board is
-            // free. Distinct from a genuine marker shortage.
-            row.title = 'Waiting for a board — no marker allocation was attempted for this game yet.';
+            row.title = 'Waiting for a free board.';
           }
           // RECOMMENDATION SEQUENCE (1..n, follow the actual advice order):
           // its own column. It is NOT a physical board number and implies no
@@ -6263,7 +6259,12 @@
               const ctrl = el('span', 'bassign-slot');
               // ACCEPT-02: dispatch carries the current proposal over as
               // PENDING advice on the factual board-assigned row.
-              ctrl.appendChild(boardSelectEl(rtv, (n) => dispatchToBoard(n, g, g.proposedMarkerId)));
+              const select = boardSelectEl(rtv, (n) => dispatchToBoard(n, g, g.proposedMarkerId));
+              if (advice.freeBoards === 0) {
+                select.disabled = true;
+                select.title = 'No free board';
+              }
+              ctrl.appendChild(select);
               boardCell.appendChild(ctrl);
             }
           }
