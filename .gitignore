@@ -14,3 +14,6 @@ Thumbs.db
 
 # Tampermonkey / build artefacts
 *.bak
+
+# Freebuff attachment cache (agent temp, never project data)
+.cloud-attachments/
